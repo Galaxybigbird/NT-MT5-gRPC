@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.IO;
 using System.Threading.Tasks;
 using Trading.Proto;
@@ -26,7 +27,67 @@ namespace NTGrpcClient
         {
             if (!string.IsNullOrWhiteSpace(baseId)) _corrByBaseId.TryRemove(baseId, out _);
         }
-        private static bool _initialized = false;
+        private struct PendingLogEntry
+        {
+            public string Level;
+            public string Component;
+            public string Message;
+            public string TradeId;
+            public string ErrorCode;
+            public string BaseId;
+        }
+
+        private static readonly System.Collections.Concurrent.ConcurrentQueue<PendingLogEntry> _pendingLogs = new System.Collections.Concurrent.ConcurrentQueue<PendingLogEntry>();
+        private static volatile bool _initialized = false;
+        private const int MaxBufferedLogs = 2048;
+        private static void EnqueuePendingLog(string level, string component, string message, string tradeId, string errorCode, string baseId)
+        {
+            // Simple backpressure: drop oldest when buffer grows too large
+            while (_pendingLogs.Count >= MaxBufferedLogs && _pendingLogs.TryDequeue(out _)) { }
+            _pendingLogs.Enqueue(new PendingLogEntry
+            {
+                Level = level,
+                Component = component,
+                Message = message,
+                TradeId = tradeId,
+                ErrorCode = errorCode,
+                BaseId = baseId
+            });
+        }
+
+        private static void FlushPendingLogs()
+        {
+            if (!_initialized || !(_client is TradingClient impl))
+                return;
+
+            PendingLogEntry entry;
+            int drained = 0;
+            while (drained < 512 && _pendingLogs.TryDequeue(out entry))
+            {
+                drained++;
+                try
+                {
+                    string corr = GetOrCreateCorrelation(entry.BaseId);
+                    impl.LogFireAndForget(entry.Level, entry.Component, entry.Message, entry.TradeId, entry.ErrorCode, entry.BaseId, corr);
+                }
+                catch
+                {
+                    // If sending fails, requeue and bail to avoid tight failure loop
+                    EnqueuePendingLog(entry.Level, entry.Component, entry.Message, entry.TradeId, entry.ErrorCode, entry.BaseId);
+                    break;
+                }
+            }
+
+            // If more logs remain, schedule another pass soon
+            if (!_pendingLogs.IsEmpty)
+            {
+                System.Threading.Tasks.Task.Run(async () =>
+                {
+                    await System.Threading.Tasks.Task.Delay(200);
+                    FlushPendingLogs();
+                });
+            }
+        }
         
         /// <summary>
         /// Initialize the gRPC client
@@ -72,6 +133,7 @@ namespace NTGrpcClient
                     return false;
                 }
                 _initialized = true;
+                FlushPendingLogs();
                 return true;
             }
             catch (Exception ex)
@@ -86,8 +148,13 @@ namespace NTGrpcClient
         {
             if (_initialized && _client is TradingClient impl)
             {
-        string corr = GetOrCreateCorrelation(baseId);
-        impl.LogFireAndForget(level, component, message, tradeId, errorCode, baseId, corr);
+                FlushPendingLogs();
+                string corr = GetOrCreateCorrelation(baseId);
+                impl.LogFireAndForget(level, component, message, tradeId, errorCode, baseId, corr);
+            }
+            else
+            {
+                EnqueuePendingLog(level, component, message, tradeId, errorCode, baseId);
             }
         }
 

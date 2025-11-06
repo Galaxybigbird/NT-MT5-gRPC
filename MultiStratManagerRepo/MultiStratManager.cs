@@ -51,6 +51,16 @@ namespace NinjaTrader.NinjaScript.AddOns
         private bool connectionsStarted = false;
         private System.Windows.Threading.DispatcherTimer autoLaunchTimer;
 
+        private TradeSyncService tradeSyncService;
+        private struct PendingHedgeCommand
+        {
+            public string BaseId;
+            public string JsonPayload;
+            public double Quantity;
+        }
+        private readonly ConcurrentQueue<PendingHedgeCommand> pendingHedgeCommands = new ConcurrentQueue<PendingHedgeCommand>();
+        private int hedgeFlushInProgress = 0;
+
         // ✅ RECOMPILATION SAFETY: Track if we've already cleaned up to prevent multiple cleanup attempts
         private static bool hasPerformedStaticCleanup = false;
 
@@ -98,6 +108,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     try
                     {
                         System.Console.WriteLine("[NT_ADDON][DEBUG] PerformStaticCleanup: Disposing previous instance");
+                        Instance.tradeSyncService?.Shutdown("static cleanup");
                         Instance.DisconnectGrpcAndStopAll();
                         Instance = null;
                     }
@@ -129,6 +140,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private bool priorUseAlternativeTrailing = true;
 
         public static MultiStratManager Instance { get; private set; }
+        public TradeSyncService TradeSync => tradeSyncService;
         public event Action PingReceivedFromBridge;
 
         private SLTPRemovalLogic sltpRemovalLogic;
@@ -595,9 +607,12 @@ public TrailingActivationType TrailingStopType
         }
 
         // Update trade result based on execution
-        private void UpdateTradeResult(ExecutionEventArgs e)
+        private void UpdateTradeResult(Execution execution)
         {
-            if (e.Execution.Order.OrderAction == OrderAction.Buy || e.Execution.Order.OrderAction == OrderAction.Sell)
+            if (execution == null || execution.Order == null)
+                return;
+
+            if (execution.Order.OrderAction == OrderAction.Buy || execution.Order.OrderAction == OrderAction.Sell)
             {
                 _sessionTradeCount++;
 
@@ -605,7 +620,7 @@ public TrailingActivationType TrailingStopType
                 double tradePnL = 0.0;
 
                 // For closing trades, we can estimate P&L
-                if (e.Execution.Order.OrderAction == OrderAction.BuyToCover || e.Execution.Order.OrderAction == OrderAction.SellShort)
+                if (execution.Order.OrderAction == OrderAction.BuyToCover || execution.Order.OrderAction == OrderAction.SellShort)
                 {
                     // This is a closing trade - determine if win/loss
                     // Note: This is a simplified approach. Real P&L tracking would require position tracking
@@ -773,7 +788,6 @@ public TrailingActivationType TrailingStopType
             public string timestamp { get; set; }
             public string ClosureReason { get; set; } // Added for MT5 EA closure reason
         }
-private HashSet<string> trackedHedgeClosingOrderIds;
 
         public void LogAndPrint(string message)
         {
@@ -907,8 +921,29 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                         bool shouldProcess = false;
                         // Include mt5_ticket in dedup key when available so sequential closes aren’t dropped
                         string ticketForDedup = ExtractJsonValue(tradeResultJson, "mt5_ticket");
-                        string dedupulationSuffix = !string.IsNullOrEmpty(ticketForDedup) ? ticketForDedup : messageId;
-                        string deduplicationKey = $"{action}_{baseId}_{dedupulationSuffix}"; // action + baseId + (ticket or messageId)
+                        string timestampForDedup = ExtractJsonValue(tradeResultJson, "timestamp");
+                        string closureReasonForDedup = ExtractJsonValue(tradeResultJson, "closure_reason");
+                        if (string.IsNullOrEmpty(closureReasonForDedup))
+                            closureReasonForDedup = ExtractJsonValue(tradeResultJson, "nt_trade_result");
+
+                        string dedupSuffix;
+                        long ticketNumber;
+                        if (!string.IsNullOrEmpty(ticketForDedup) && long.TryParse(ticketForDedup, out ticketNumber) && ticketNumber > 0)
+                        {
+                            dedupSuffix = ticketNumber.ToString();
+                        }
+                        else
+                        {
+                            // Fallback to unique message id; include closure reason to differentiate partial vs completion
+                            string fallbackId = !string.IsNullOrEmpty(messageId)
+                                ? messageId
+                                : (!string.IsNullOrEmpty(timestampForDedup) ? timestampForDedup : DateTime.UtcNow.Ticks.ToString());
+                            dedupSuffix = !string.IsNullOrEmpty(closureReasonForDedup)
+                                ? $"{fallbackId}_{closureReasonForDedup}"
+                                : fallbackId;
+                        }
+
+                        string deduplicationKey = $"{action}_{baseId}_{dedupSuffix}"; // action + baseId + (ticket or unique id)
                         
                         lock (closeNotificationLock)
                         {
@@ -934,9 +969,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                             }
 
                             // POLICY: Do NOT close NT when MT5 reports an elastic partial close
-                            string closureReason = ExtractJsonValue(tradeResultJson, "closure_reason");
-                            if (string.IsNullOrEmpty(closureReason))
-                                closureReason = ExtractJsonValue(tradeResultJson, "nt_trade_result");
+                            string closureReason = closureReasonForDedup;
 
                             if (!string.IsNullOrEmpty(closureReason) && closureReason.Equals("elastic_partial_close", StringComparison.OrdinalIgnoreCase))
                             {
@@ -1007,6 +1040,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                     if (originalTradeDetails.RemainingQuantity <= 0)
                     {
                         LogInfo("GRPC", $"ALREADY_FULLY_CLOSED: Trade {baseId} has RemainingQuantity=0. Skipping MT5 closure handling.");
+                        CancelProtectiveOrdersForBaseId(account, baseId);
                         return; // Nothing left to close
                     }
                     
@@ -1120,6 +1154,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                 if (positionsToClose.Count == 0)
                 {
                     Log($"GRPC WARNING: No NT positions found to close for BaseID: {baseId}", LogLevel.Warning);
+                    CancelProtectiveOrdersForBaseId(account, baseId);
                     return;
                 }
                 
@@ -1169,13 +1204,6 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                             LogInfo("GRPC", $"Order state BEFORE submit: {closeOrder.OrderState}");
                             LogInfo("GRPC", $"Position details - Quantity: {position.Quantity}, MarketPosition: {position.MarketPosition}, AvgPrice: {position.AveragePrice}");
                             
-                            // Add to hedge closing order tracking to prevent circular trades
-                            if (trackedHedgeClosingOrderIds != null)
-                            {
-                                trackedHedgeClosingOrderIds.Add(closeOrder.Id.ToString());
-                                LogInfo("GRPC", $"Added order {closeOrder.Id} to hedge closing tracking");
-                            }
-                            
                             account.Submit(new[] { closeOrder });
                             LogInfo("GRPC", $"Submitted NT close order for MT5-initiated closure: {closeName}");
                             LogInfo("GRPC", $"Order state AFTER submit: {closeOrder.OrderState}");
@@ -1183,6 +1211,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                             // Decrement remaining quantity for this base_id to allow further sequential closes
                             try
                             {
+                                bool cancelProtectiveOrders = false;
                                 lock (_activeNtTradesLock)
                                 {
                                     if (activeNtTrades.TryGetValue(baseId, out var od))
@@ -1196,10 +1225,21 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                                                 od.IsClosed = true;
                                                 od.ClosedTimestamp = DateTime.UtcNow;
                                                 LogInfo("GRPC", $"SEQ_TRACK: BaseID {baseId} fully closed");
+                                                cancelProtectiveOrders = true;
                                             }
                                             activeNtTrades[baseId] = od;
                                         }
                                     }
+                                }
+
+                                if (!cancelProtectiveOrders && !activeNtTrades.ContainsKey(baseId))
+                                {
+                                    cancelProtectiveOrders = true;
+                                }
+
+                                if (cancelProtectiveOrders)
+                                {
+                                    CancelProtectiveOrdersForBaseId(account, baseId);
                                 }
                             }
                             catch (Exception rqEx)
@@ -1245,6 +1285,65 @@ private HashSet<string> trackedHedgeClosingOrderIds;
             catch (Exception ex)
             {
                 LogError("GRPC", $"Error handling MT5-initiated closure for BaseID {baseId}: {ex.Message}");
+            }
+        }
+
+        private void CancelProtectiveOrdersForBaseId(Account account, string baseId)
+        {
+            if (account == null || string.IsNullOrWhiteSpace(baseId))
+                return;
+
+            try
+            {
+                var orders = account.Orders;
+                if (orders == null || orders.Count == 0)
+                {
+                    LogInfo("GRPC", $"CANCEL_PROTECTIVE: No orders present when evaluating BaseID {baseId}");
+                    return;
+                }
+
+                var toCancel = new List<Order>();
+                foreach (var order in orders)
+                {
+                    if (order == null)
+                        continue;
+
+                    if (!string.Equals(order.FromEntrySignal, baseId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    switch (order.OrderState)
+                    {
+                        case OrderState.Initialized:
+                        case OrderState.Submitted:
+                        case OrderState.Accepted:
+                        case OrderState.Working:
+                        case OrderState.PartFilled:
+                        case OrderState.ChangeSubmitted:
+                        case OrderState.ChangePending:
+                            toCancel.Add(order);
+                            break;
+                    }
+                }
+
+                if (toCancel.Count == 0)
+                {
+                    LogInfo("GRPC", $"CANCEL_PROTECTIVE: No active protective orders found for BaseID {baseId}");
+                    return;
+                }
+
+                try
+                {
+                    account.Cancel(toCancel.ToArray());
+                    LogInfo("GRPC", $"CANCEL_PROTECTIVE: Cancelled {toCancel.Count} protective orders tied to BaseID {baseId}");
+                }
+                catch (Exception cancelEx)
+                {
+                    LogError("GRPC", $"CANCEL_PROTECTIVE: Failed to cancel protective orders for BaseID {baseId}: {cancelEx.Message}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogError("GRPC", $"CANCEL_PROTECTIVE: Unexpected error while processing BaseID {baseId}: {ex.Message}");
             }
         }
 
@@ -1541,6 +1640,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                         grpcInitialized = true;
                         grpcInitializing = false;
                         LogInfo("GRPC", "gRPC client fully initialized and connected");
+                        FlushPendingHedgeCommands();
                         
                         // Start trading stream to receive MT5 trade results
                         StartMT5TradeResultStream();
@@ -1797,7 +1897,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
                     Description = "Multi-Strategy Manager for hedging";
                     Name = "Multi-Strategy Manager";
                     Instance = this;
-                    trackedHedgeClosingOrderIds = new HashSet<string>();
+                    tradeSyncService = new TradeSyncService(this);
                     Print("[NT_ADDON][DEBUG] SetDefaults completed - progressing to Active");
                     State = State.Active;
                 }
@@ -1848,6 +1948,8 @@ private HashSet<string> trackedHedgeClosingOrderIds;
 
                 try
                 {
+                    tradeSyncService?.Shutdown("AddOn terminated");
+
                     // ✅ AGGRESSIVE CLEANUP: Stop all timers first
                     StopAutoLaunchTimer();
                     StopBridgeConnectionMonitoring();
@@ -2275,10 +2377,380 @@ private HashSet<string> trackedHedgeClosingOrderIds;
             }
         }
 
+        internal void PublishLifecycleToBridge(TradeSyncService.TradeRecord record, string lifecycle)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return;
+
+            if (IsBacktestAccount(record.AccountName))
+            {
+                LogDebug("TRADE_SYNC", $"Skipping lifecycle publish for backtest account {record.AccountName} (trade_id={record.TradeId})", record.TradeId, record.TradeId);
+                return;
+            }
+
+            string instrumentName = record.Instrument ?? string.Empty;
+
+            var payload = new Dictionary<string, object>
+            {
+                { "id", $"lifecycle_{record.TradeId}_{DateTime.UtcNow.Ticks}" },
+                { "base_id", record.TradeId },
+                { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
+                { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
+                { "action", lifecycle },
+                { "lifecycle_event", lifecycle },
+                { "order_type", "TRADE_SYNC" },
+                { "instrument", instrumentName },
+                { "instrument_name", instrumentName },
+                { "account_name", record.AccountName ?? string.Empty },
+                { "direction", record.Side == MarketPosition.Short ? "SHORT" : "LONG" },
+                { "quantity", (double)record.NtQuantity },
+                { "total_quantity", record.NtQuantity },
+                { "contract_num", 1 },
+                { "remaining_quantity", (double)record.RemainingQuantity },
+                { "seq", record.LastSeq },
+                { "epoch", record.Epoch },
+                { "event_type", "trade_lifecycle" },
+                { "nt_trade_result", lifecycle.ToLowerInvariant() }
+            };
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    await SendToBridge(payload);
+                }
+                catch (Exception ex)
+                {
+                    LogError("TRADE_SYNC", $"Failed to publish lifecycle '{lifecycle}' for trade_id={record.TradeId}: {ex.Message}", 0, record.TradeId, record.TradeId);
+                }
+            });
+        }
+
+        private static bool IsBacktestAccount(string accountName)
+        {
+            if (string.IsNullOrWhiteSpace(accountName))
+                return false;
+
+            string trimmed = accountName.Trim();
+            if (trimmed.Equals("Backtest", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (trimmed.StartsWith("Backtest ", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        private bool ShouldBypassGrpc(IDictionary<string, object> data)
+        {
+            if (data == null)
+                return false;
+
+            if (data.TryGetValue("account_name", out var accountObj))
+            {
+                string accountName = accountObj as string ?? accountObj?.ToString();
+                if (IsBacktestAccount(accountName))
+                    return true;
+            }
+
+            return false;
+        }
+
+        internal void OnStrategyTradeOpened(TradeSyncService.TradeRecord record)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return;
+
+            var details = new OriginalTradeDetails
+            {
+                BaseId = record.TradeId,
+                MarketPosition = record.Side,
+                Quantity = record.NtQuantity,
+                TotalQuantity = record.NtQuantity,
+                RemainingQuantity = record.RemainingQuantity,
+                Price = record.EntryPrice,
+                NtInstrumentSymbol = record.Instrument ?? string.Empty,
+                NtAccountName = record.AccountName ?? string.Empty,
+                OriginalOrderAction = record.Side == MarketPosition.Short ? OrderAction.SellShort : OrderAction.Buy,
+                Timestamp = DateTime.UtcNow
+            };
+
+            lock (_activeNtTradesLock)
+            {
+                activeNtTrades[record.TradeId] = details;
+            }
+
+            trailingAndElasticManager?.RegisterTrade(record);
+
+            SendHedgeOpenRequest(record);
+        }
+
+        private void SendHedgeOpenRequest(TradeSyncService.TradeRecord record)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return;
+
+            if (IsBacktestAccount(record.AccountName))
+            {
+                LogDebug("GRPC", $"Bypassing hedge entry send during backtest context (baseId={record.TradeId})");
+                return;
+            }
+
+            string baseId = record.TradeId;
+            string action = record.Side == MarketPosition.Short ? "sell" : "buy";
+            double quantity = Math.Max(1, record.NtQuantity);
+
+            var payload = new Dictionary<string, object>
+            {
+                { "id", $"trade_{baseId}_{DateTime.UtcNow.Ticks}" },
+                { "base_id", baseId },
+                { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
+                { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
+                { "action", action },
+                { "order_type", "ENTRY" },
+                { "instrument", record.Instrument ?? string.Empty },
+                { "instrument_name", record.Instrument ?? string.Empty },
+                { "account_name", record.AccountName ?? string.Empty },
+                { "quantity", quantity },
+                { "total_quantity", quantity },
+                { "price", record.EntryPrice },
+                { "nt_points_per_1k_loss", record.NtPointsPer1kLoss },
+                { "nt_balance", SessionStartBalance },
+                { "nt_daily_pnl", DailyPnL },
+                { "nt_trade_result", "open" },
+                { "nt_session_trades", SessionTradeCount },
+                { "epoch", record.Epoch },
+                { "seq", record.LastSeq > 0 ? record.LastSeq : 1 }
+            };
+
+            string jsonPayload = SimpleJson.SerializeObject(payload);
+            LogDebug("CONNECTION", $"Submitting hedge entry to bridge via gRPC: {jsonPayload}", baseId, baseId);
+
+            var command = new PendingHedgeCommand
+            {
+                BaseId = baseId,
+                JsonPayload = jsonPayload,
+                Quantity = quantity
+            };
+
+            if (!grpcInitialized || !TradingGrpcClient.IsConnected)
+            {
+                pendingHedgeCommands.Enqueue(command);
+                LogDebug("GRPC", $"Queued hedge entry while gRPC not ready (baseId={baseId}, queue={pendingHedgeCommands.Count})");
+                FlushPendingHedgeCommands();
+                return;
+            }
+
+            Task.Run(async () =>
+            {
+                bool success = await SubmitHedgeCommandAsync(command);
+                if (!success)
+                {
+                    pendingHedgeCommands.Enqueue(command);
+                    LogDebug("GRPC", $"Re-queued hedge entry after send failure (baseId={baseId}, queue={pendingHedgeCommands.Count})");
+                    FlushPendingHedgeCommands();
+                }
+            });
+        }
+
+        private async Task<bool> SubmitHedgeCommandAsync(PendingHedgeCommand command)
+        {
+            try
+            {
+                if (!grpcInitialized)
+                    await InitializeGrpcClient();
+
+                bool success = await Task.Run(() => TradingGrpcClient.SubmitTrade(command.JsonPayload));
+                if (success)
+                {
+                    LogAndPrint($"NT_ENTRY: Submitted hedge entry for {command.BaseId} (qty={command.Quantity})");
+                }
+                else
+                {
+                    string error = TradingGrpcClient.LastError;
+                    LogAndPrint($"ERROR: Failed to submit hedge entry for {command.BaseId}: {error}");
+                }
+                return success;
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"ERROR: Exception submitting hedge entry for {command.BaseId}: {ex.Message}");
+                return false;
+            }
+        }
+
+        private void FlushPendingHedgeCommands()
+        {
+            if (!grpcInitialized)
+                return;
+
+            if (Interlocked.CompareExchange(ref hedgeFlushInProgress, 1, 0) != 0)
+                return;
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    if (!grpcInitialized)
+                        await InitializeGrpcClient();
+
+                    while (grpcInitialized && pendingHedgeCommands.TryDequeue(out var command))
+                    {
+                        bool success = await SubmitHedgeCommandAsync(command);
+                        if (!success)
+                        {
+                            pendingHedgeCommands.Enqueue(command);
+                            await Task.Delay(250);
+                            break;
+                        }
+                    }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref hedgeFlushInProgress, 0);
+                    if (grpcInitialized && !pendingHedgeCommands.IsEmpty)
+                        FlushPendingHedgeCommands();
+                }
+            });
+        }
+
+        internal void OnStrategyTradePartiallyClosed(TradeSyncService.TradeRecord record, int closedQuantity)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId) || closedQuantity <= 0)
+                return;
+
+            lock (_activeNtTradesLock)
+            {
+                if (activeNtTrades.TryGetValue(record.TradeId, out var details))
+                {
+                    details.RemainingQuantity = record.RemainingQuantity;
+                    details.Timestamp = DateTime.UtcNow;
+                }
+            }
+
+            trailingAndElasticManager?.UpdateRemainingQuantity(record.TradeId, record.RemainingQuantity);
+
+            SendHedgeCloseRequest(record, closedQuantity, "NT_PARTIAL_CLOSE");
+        }
+
+        internal void OnStrategyTradeClosed(TradeSyncService.TradeRecord record, int closedQuantity)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return;
+
+            trailingAndElasticManager?.CompleteTrade(record.TradeId);
+
+            lock (_activeNtTradesLock)
+            {
+                if (activeNtTrades.TryGetValue(record.TradeId, out var details))
+                {
+                    details.RemainingQuantity = 0;
+                    details.ClosedTimestamp = DateTime.UtcNow;
+                }
+                activeNtTrades.TryRemove(record.TradeId, out _);
+            }
+            baseIdToMT5Ticket.TryRemove(record.TradeId, out _);
+            if (baseIdToOrderIdMap.TryRemove(record.TradeId, out var removedOrderId))
+            {
+                if (!string.IsNullOrEmpty(removedOrderId))
+                    orderIdToBaseIdMap.TryRemove(removedOrderId, out _);
+            }
+
+            if (closedQuantity <= 0)
+                closedQuantity = record.NtQuantity;
+
+            SendHedgeCloseRequest(record, closedQuantity, "NT_FULL_CLOSE");
+        }
+
+        private void SendHedgeCloseRequest(TradeSyncService.TradeRecord record, int quantityToClose, string reason)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId) || quantityToClose <= 0)
+                return;
+
+            string baseId = record.TradeId;
+            double closedQuantity = quantityToClose;
+
+            ulong mt5Ticket = 0;
+            for (int retry = 0; retry < 3; retry++)
+            {
+                if (baseIdToMT5Ticket.TryGetValue(baseId, out mt5Ticket) && mt5Ticket > 0)
+                    break;
+                if (retry < 2)
+                    Thread.Sleep(5);
+            }
+
+            if (mt5Ticket > 0)
+                LogAndPrint($"CLOSURE_TICKET: Found MT5 ticket {mt5Ticket} for BaseID {baseId}");
+            else
+                LogAndPrint($"CLOSURE_TICKET: No MT5 ticket found for BaseID {baseId}, proceeding without ticket mapping");
+
+            var closureData = new Dictionary<string, object>
+            {
+                { "action", "CLOSE_HEDGE" },
+                { "base_id", baseId },
+                { "quantity", (float)closedQuantity },
+                { "nt_instrument_symbol", record.Instrument ?? string.Empty },
+                { "nt_account_name", record.AccountName ?? string.Empty },
+                { "closed_hedge_quantity", (double)closedQuantity },
+                { "closed_hedge_action", "CLOSE_HEDGE" },
+                { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
+                { "price", record.EntryPrice },
+                { "total_quantity", record.NtQuantity },
+                { "contract_num", 1 },
+                { "instrument_name", record.Instrument ?? string.Empty },
+                { "account_name", record.AccountName ?? string.Empty },
+                { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
+                { "nt_balance", SessionStartBalance },
+                { "nt_daily_pnl", DailyPnL },
+                { "nt_trade_result", reason == "NT_FULL_CLOSE" ? "closed" : "partial" },
+                { "nt_session_trades", SessionTradeCount },
+                { "closure_reason", reason },
+                { "mt5_ticket", mt5Ticket },
+                { "remaining_quantity", (double)record.RemainingQuantity }
+            };
+
+            string closureJson = SimpleJson.SerializeObject(closureData);
+            LogAndPrint($"NT_CLOSURE: Sending hedge closure request for {baseId} (reason={reason}, qty={closedQuantity}) -> {closureJson}");
+
+            if (IsBacktestAccount(record.AccountName))
+            {
+                LogDebug("GRPC", $"Bypassing CLOSE_HEDGE send during backtest context (baseId={baseId})");
+                return;
+            }
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    if (!grpcInitialized)
+                        await InitializeGrpcClient();
+
+                    bool success = TradingGrpcClient.NTCloseHedge(closureJson);
+                    if (success)
+                    {
+                        LogAndPrint($"NT_CLOSURE: Successfully sent CLOSE_HEDGE via gRPC for BaseID: {baseId}");
+                    }
+                    else
+                    {
+                        string error = TradingGrpcClient.LastError;
+                        LogAndPrint($"ERROR: Failed to send CLOSE_HEDGE via gRPC for BaseID: {baseId}. Error: {error}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogAndPrint($"ERROR: Exception sending CLOSE_HEDGE via gRPC for BaseID: {baseId}. Exception: {ex.Message}");
+                }
+            });
+        }
+
         private async Task SendToBridge(Dictionary<string, object> data)
         {
             try
             {
+                if (ShouldBypassGrpc(data))
+                {
+                    LogDebug("GRPC", "Bypassing gRPC send during backtest/optimization context");
+                    return;
+                }
+
                 string jsonPayload = SimpleJson.SerializeObject(data);
                 LogDebug("CONNECTION", $"Sending data to bridge via gRPC: {jsonPayload}");
 
@@ -2314,6 +2786,13 @@ private HashSet<string> trackedHedgeClosingOrderIds;
         {
             try
             {
+                string monitoredName = monitoredAccount != null ? monitoredAccount.Name : string.Empty;
+                if (IsBacktestAccount(monitoredName))
+                {
+                    LogDebug("GRPC", $"Bypassing CLOSE_HEDGE send during backtest context (baseId={baseId})");
+                    return;
+                }
+
                 var closureRequest = new
                 {
                     base_id = baseId,
@@ -2618,645 +3097,87 @@ private HashSet<string> trackedHedgeClosingOrderIds;
             OnPropertyChanged(nameof(TotalPnL));
         }
     }
+        private void OnExecutionUpdate(object sender, ExecutionEventArgs e)
+        {
+            if (e?.Execution == null)
+                return;
 
-    private void OnExecutionUpdate(object sender, ExecutionEventArgs e)
+            try
+            {
+                var execution = e.Execution;
+
+                if (monitoredAccount == null || execution.Account == null || execution.Account.Name != monitoredAccount.Name)
+                    return;
+
+                if (!string.IsNullOrEmpty(execution.ExecutionId))
+                {
+                    lock (executionTrackingLock)
+                    {
+                        if (!processedExecutionIds.Add(execution.ExecutionId))
+                        {
+                            LogAndPrint($"EXECUTION_DEDUP: Skipping duplicate execution {execution.ExecutionId}");
+                            return;
+                        }
+                    }
+                }
+
+                string tradeId = GetTradeIdFromExecution(execution);
+                if (string.IsNullOrWhiteSpace(tradeId))
+                {
+                    LogWarn("EXECUTION", $"Execution {execution.ExecutionId} missing strategy trade_id; skipping add-on processing.");
+                    return;
+                }
+
+                UpdateTradeResult(execution);
+
+                TradeSyncService.TradeRecord record;
+                if (tradeSyncService != null && tradeSyncService.TryGetTrade(tradeId, out record))
+                {
+                    trailingAndElasticManager?.UpdateRemainingQuantity(tradeId, record.RemainingQuantity);
+                }
+
+                sltpRemovalLogic?.HandleExecutionUpdate(execution, EnableSLTPRemoval, SLTPRemovalDelaySeconds, execution.Account);
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"ERROR: OnExecutionUpdate failure: {ex.Message}");
+            }
+        }
+
+        private static string GetTradeIdFromExecution(Execution execution)
     {
-        try
-        {
-            // BUY_DEBUG: Log ALL executions to debug buy trade processing
-            if (e?.Execution?.Order != null)
-            {
-                LogAndPrint($"BUY_DEBUG: EXECUTION RECEIVED - OrderAction: {e.Execution.Order.OrderAction}, Account: {e.Execution.Account?.Name ?? "null"}, Instrument: {e.Execution.Instrument?.FullName ?? "null"}, Quantity: {e.Execution.Quantity}");
-            }
+        if (execution == null)
+            return string.Empty;
 
-            // Only log significant events, not every execution
+        string tradeId = execution.Order?.FromEntrySignal;
+        if (!string.IsNullOrWhiteSpace(tradeId))
+            return tradeId.Trim();
 
-            // Ensure the execution is for the monitored account
-            if (monitoredAccount == null)
-            {
-                LogError("EXECUTION", "monitoredAccount is null, skipping execution");
-                return;
-            }
+        tradeId = execution.Order?.Name;
+        if (!string.IsNullOrWhiteSpace(tradeId))
+            return tradeId.Trim();
 
-            if (e.Execution.Account.Name != monitoredAccount.Name)
-            {
-                // BUY_DEBUG: Log account mismatches for debugging
-                LogAndPrint($"BUY_DEBUG: ACCOUNT_MISMATCH - Execution Account: '{e.Execution.Account.Name}', Monitored Account: '{monitoredAccount.Name}', OrderAction: {e.Execution.Order?.OrderAction}");
-                // Account mismatch - silent skip
-                return;
-            }
-            
-            // Processing execution for monitored account
-
-            // EXECUTION DEDUPLICATION: Check if this execution has already been processed
-            string executionId = e.Execution.ExecutionId;
-            if (!string.IsNullOrEmpty(executionId))
-            {
-                lock (executionTrackingLock)
-                {
-                    if (processedExecutionIds.Contains(executionId))
-                    {
-                        LogAndPrint($"EXECUTION_DEDUP: Skipping duplicate execution {executionId} - already processed");
-                        return;
-                    }
-                    
-                    // Add to processed set to prevent future duplicates
-                    processedExecutionIds.Add(executionId);
-                    LogAndPrint($"EXECUTION_DEDUP: Processing execution {executionId} (first time seen)");
-                }
-            }
-
-            // BIDIRECTIONAL_HEDGE_FIX: Skip processing executions of hedge closing orders
-            // These orders are responses to MT5 notifications and should NOT trigger additional CLOSE_HEDGE commands
-            if (e.Execution?.Order != null && trackedHedgeClosingOrderIds != null &&
-                trackedHedgeClosingOrderIds.Contains(e.Execution.Order.Id.ToString()))
-            {
-                LogAndPrint($"HEDGE_CLOSURE_SKIP: Skipping execution processing for hedge closing order {e.Execution.Order.Id} ('{e.Execution.Order.Name}'). This prevents incorrect FIFO-based BaseID selection.");
-                return;
-            }
-
-            // OFFICIAL NINJATRADER BEST PRACTICE: Comprehensive Trade Classification
-            bool isClosingExecution = DetectTradeClosureByExecution(e);
-            bool isNewEntryTrade = IsNewEntryTrade(e);
-
-            LogAndPrint($"TRADE_CLASSIFICATION: Closure={isClosingExecution}, Entry={isNewEntryTrade}, OrderAction={e.Execution.Order.OrderAction}, OrderName={e.Execution.Order.Name ?? "null"}");
-
-            if (isClosingExecution)
-            {
-                LogAndPrint($"PROCESSING_CLOSURE: Handling trade closure execution via HandleTradeClosureExecution");
-                HandleTradeClosureExecution(e);
-                return; // Don't process as new trade
-            }
-
-            if (!isNewEntryTrade)
-            {
-                // Not a closure and not a new entry - ignoring
-                return; // Don't process executions that are neither closures nor new entries
-            }
-
-            LogAndPrint($"PROCESSING_NEW_ENTRY: Handling new entry trade execution");
-
-// Call SLTP Removal Logic
-            LogForSLTP($"OnExecutionUpdate: EnableSLTPRemoval is {{EnableSLTPRemoval}}.", LogLevel.Information);
-            if (sltpRemovalLogic == null)
-            {
-                LogForSLTP("OnExecutionUpdate: sltpRemovalLogic is null. SLTP removal will be skipped.", LogLevel.Warning);
-            }
-            if (sltpRemovalLogic != null && e.Execution != null && e.Execution.Account != null)
-            {
-                // Calling SLTP removal logic
-                sltpRemovalLogic.HandleExecutionUpdate(
-                    e.Execution,
-                    this.EnableSLTPRemoval,
-                    this.SLTPRemovalDelaySeconds,
-                    e.Execution.Account
-                );
-            }
-            // Log only fills
-            if (e.Execution != null && e.Execution.Quantity > 0)
-            {
-                // Ensure Order is not null before accessing its properties for logging
-                if (e.Execution != null && e.Execution.Order != null)
-                {
-                    LogDebug("EXECUTION", String.Format("[MultiStratManager] DEBUG Addon: Execution Details - ID: {0}, Order.Filled: {1}, Execution.Quantity: {2}, Order.Quantity: {3}, MarketPosition: {4}",
-                        e.Execution.ExecutionId, // Using ExecutionId as OrderId might be the base order id for multiple fills
-                        e.Execution.Order.Filled,
-                        e.Execution.Quantity,
-                        e.Execution.Order.Quantity,
-                        e.Execution.MarketPosition
-                    ));
-                    
-                    // Track MT5_CLOSE order executions specifically
-                    if (!string.IsNullOrEmpty(e.Execution.Order.Name) && e.Execution.Order.Name.StartsWith("MT5_CLOSE_"))
-                    {
-                        LogInfo("GRPC", $"MT5_CLOSE_EXECUTION: Order '{e.Execution.Order.Name}' EXECUTED - Quantity: {e.Execution.Quantity}, Price: {e.Execution.Price}, MarketPosition: {e.Execution.MarketPosition}");
-                        LogInfo("GRPC", $"MT5_CLOSE_EXECUTION: Order State: {e.Execution.Order.OrderState}, Order Action: {e.Execution.Order.OrderAction}");
-                    }
-                }
-                else
-                {
-                    LogDebug("EXECUTION", $"[MultiStratManager] Received Execution Fill (Order details partially unavailable): {e.Execution}");
-                }
-                
-                // CONSISTENT_BASEID_FIX: Instead of generating a new baseId for every execution,
-                // check if this is part of an existing trade group using the same Order
-                string baseId = null;
-                string originalOrderId = e.OrderId;
-                
-                // First, check if we already have a baseId mapping for this OrderId
-                if (orderIdToBaseIdMap.TryGetValue(originalOrderId, out string existingBaseId))
-                {
-                    baseId = existingBaseId;
-                    LogAndPrint($"BASEID_REUSE: Using existing BaseID {baseId} for OrderID {originalOrderId}");
-                }
-                else
-                {
-                    // Generate a new baseId only if this is truly a new order
-                    baseId = GenerateSimpleBaseId();
-                    
-                    // Store mapping between simple baseID and original NT OrderId for closure detection
-                    baseIdToOrderIdMap.TryAdd(baseId, originalOrderId);
-                    orderIdToBaseIdMap.TryAdd(originalOrderId, baseId);
-                    LogAndPrint($"BASEID_NEW: Created new mapping - BaseID: {baseId} <-> OrderID: {originalOrderId}");
-                }
-
-                // MULTI_TRADE_GROUP_FIX: Store original trade info and handle multiple trades with same BaseID
-                if (e.Execution.Order != null && e.Execution.Order.OrderState == OrderState.Filled)
-                {
-                    if (!string.IsNullOrEmpty(baseId))
-                    {
-                        lock (_activeNtTradesLock)
-                        {
-                            if (activeNtTrades.ContainsKey(baseId))
-                            {
-                                // MULTI_TRADE_GROUP_FIX: BaseID already exists, increment quantities
-                                var existingTrade = activeNtTrades[baseId];
-                                existingTrade.TotalQuantity += (int)e.Execution.Order.Quantity;
-                                existingTrade.RemainingQuantity += (int)e.Execution.Order.Quantity;
-                                LogAndPrint($"MULTI_TRADE_GROUP: Updated existing BaseID {baseId}. Total: {existingTrade.TotalQuantity}, Remaining: {existingTrade.RemainingQuantity}");
-                            }
-                            else
-                            {
-                                // MULTI_TRADE_GROUP_FIX: New BaseID, create new entry
-                                var tradeInfo = new OriginalTradeDetails
-                                {
-                                    MarketPosition = e.Execution.MarketPosition,
-                                    Quantity = (int)e.Execution.Order.Quantity,
-                                    NtInstrumentSymbol = e.Execution.Instrument.FullName,
-                                    NtAccountName = e.Execution.Account.Name,
-                                    OriginalOrderAction = e.Execution.Order.OrderAction,
-                                    TotalQuantity = (int)e.Execution.Order.Quantity,
-                                    RemainingQuantity = (int)e.Execution.Order.Quantity
-                                };
-
-                                if (activeNtTrades.TryAdd(baseId, tradeInfo))
-                                {
-                                    LogDebug("TRADING", $"[MultiStratManager] Stored original trade info for base_id: {baseId}, Position: {tradeInfo.MarketPosition}, Qty: {tradeInfo.Quantity}, Action: {tradeInfo.OriginalOrderAction}");
-                                    LogAndPrint($"ACTIVE_TRADES_ADD: Added base_id {baseId} to activeNtTrades. Total entries: {activeNtTrades.Count}");
-                                }
-                                else
-                                {
-                                    LogAndPrint($"ACTIVE_TRADES_ADD_FAILED: Failed to add base_id {baseId} to activeNtTrades (race condition)");
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Update trade result tracking for elastic hedging
-                UpdateTradeResult(e);
-
-                // --- OPTIMIZED CLOSURE DETECTION: Call FindOriginalTradeBaseId only once ---
-                string originalBaseId = FindOriginalTradeBaseId(e);
-                bool isClosingTrade = !string.IsNullOrEmpty(originalBaseId);
-
-                LogAndPrint($"FIFO_CLOSURE_CHECK: FindOriginalTradeBaseId returned '{originalBaseId}', isClosingTrade={isClosingTrade}");
-
-                if (isClosingTrade)
-                {
-                    // CRITICAL FIX: Only send closure notification if this trade actually has an active hedge
-                    // Check if this base_id was ever sent to MT5 and potentially has an active hedge
-                    bool hasActiveHedge = activeNtTrades.ContainsKey(originalBaseId);
-
-                    if (hasActiveHedge)
-                    {
-                        // This is a closing trade with an active hedge - send hedge closure notification
-                        LogAndPrint($"NT_CLOSURE_DETECTED: Execution {e.Execution.ExecutionId} is closing trade for BaseID={originalBaseId} which has an active hedge. Sending hedge closure notification to MT5.");
-
-                        try
-                        {
-                            // Send hedge closure notification to MT5 via bridge
-                            // MT5 EA expects a trade message with action="CLOSE_HEDGE" for processing
-                            // Look up MT5 ticket for reliable closure
-                            ulong mt5Ticket = 0;
-                            // Retry logic for stress testing race conditions
-            for (int retry = 0; retry < 3; retry++)
-            {
-                if (baseIdToMT5Ticket.TryGetValue(originalBaseId, out mt5Ticket) && mt5Ticket > 0)
-                    break;
-                if (retry < 2) Thread.Sleep(5); // Brief delay
-            }
-            
-            if (mt5Ticket > 0)
-                            {
-                                LogAndPrint($"CLOSURE_TICKET: Found MT5 ticket {mt5Ticket} for BaseID {originalBaseId}");
-                            }
-                            else
-                            {
-                                LogAndPrint($"CLOSURE_TICKET: No MT5 ticket found for BaseID {originalBaseId}, will use comment matching");
-                            }
-                            
-                            var closureData = new Dictionary<string, object>
-                            {
-                                { "action", "CLOSE_HEDGE" },  // MT5 EA looks for this specific action
-                                { "base_id", originalBaseId },
-                                { "quantity", (float)e.Execution.Quantity },
-                                // gRPC hedge-close fields expected by JsonToProtoHedgeClose
-                                { "nt_instrument_symbol", e.Execution.Instrument.FullName },
-                                { "nt_account_name", e.Execution.Account.Name },
-                                { "closed_hedge_quantity", (double) e.Execution.Quantity },
-                                { "closed_hedge_action", "CLOSE_HEDGE" },
-                                { "timestamp", e.Execution.Time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
-                                { "price", 0.0 },  // Not critical for closure
-                                { "total_quantity", (float)e.Execution.Quantity },
-                                { "contract_num", 1 },
-                                { "instrument_name", e.Execution.Instrument.FullName },
-                                { "account_name", e.Execution.Account.Name },
-                                { "time", e.Execution.Time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
-                                { "nt_balance", (float)SessionStartBalance },
-                                { "nt_daily_pnl", (float)DailyPnL },
-                                { "nt_trade_result", "closed" },
-                                { "nt_session_trades", SessionTradeCount },
-                                { "closure_reason", "NT_ORIGINAL_TRADE_CLOSED" }, // This will NOT trigger whack-a-mole
-                                { "mt5_ticket", mt5Ticket } // Include MT5 ticket for reliable closure
-                            };
-
-                            string closureJson = SimpleJson.SerializeObject(closureData);
-                            LogAndPrint($"NT_CLOSURE: Sending hedge closure notification: {closureJson}");
-
-                            // Send to bridge's hedge closure endpoint
-                            Task.Run(() => SendHedgeClosureNotification(closureData));
-
-                            // CRITICAL FIX: Don't immediately remove from activeNtTrades - mark as closed instead
-                            // This prevents race conditions where MT5 closure notifications can't find the base_id
-                            if (activeNtTrades.TryGetValue(originalBaseId, out var tradeDetails))
-                            {
-                                // Mark as closed but keep in tracking for MT5 closure coordination
-                                tradeDetails.IsClosed = true;
-                                tradeDetails.ClosedTimestamp = DateTime.UtcNow;
-                                LogAndPrint($"NT_CLOSURE: Marked trade {originalBaseId} as closed in activeNtTrades tracking. Will cleanup later. Total entries: {activeNtTrades.Count}");
-                                
-                                // Schedule cleanup after delay to allow MT5 notifications to process
-                                Task.Run(async () =>
-                                {
-                                    await Task.Delay(5000); // Wait 5 seconds for any pending MT5 notifications
-                                    if (activeNtTrades.TryRemove(originalBaseId, out _))
-                                    {
-                                        LogAndPrint($"DELAYED_CLEANUP: Removed closed trade {originalBaseId} from activeNtTrades tracking. Remaining entries: {activeNtTrades.Count}");
-                                    }
-                                });
-                            }
-                            else
-                            {
-                                LogAndPrint($"NT_CLOSURE: Trade {originalBaseId} not found in activeNtTrades (may have been removed by hedge closure)");
-                            }
-                        }
-                        catch (Exception ex_closure)
-                        {
-                            LogAndPrint($"ERROR: Exception sending hedge closure notification: {ex_closure.Message}");
-                        }
-                    }
-                    else
-                    {
-                        // This is a closing trade but no active hedge exists - skip closure notification
-                        LogAndPrint($"NT_CLOSURE_SKIPPED: Execution {e.Execution.ExecutionId} is closing trade for BaseID={originalBaseId} but no active hedge exists. Skipping closure notification to prevent noise.");
-                        LogAndPrint($"NT_CLOSURE_SKIPPED: This trade was likely from a previous session or never had a hedge opened. No action needed.");
-                    }
-
-                    return; // Don't process as new trade regardless
-                }
-                else
-                {
-                    // This is an entry trade - send trade data
-                    // FIXED: Send ONLY ONE message per execution to prevent duplicate trades
-                    string jsonData = null; // To store serialized tradeData for logging in case of bridge error
-
-                    try
-                    {
-                        int executionQuantity = e.Execution.Quantity;
-                        int totalOrderQuantity = (e.Execution.Order != null) ? (int)e.Execution.Order.Quantity : executionQuantity;
-                        
-                        LogAndPrint($"SINGLE_MESSAGE_FIX: Processing execution - ExecutionQuantity={executionQuantity}, TotalOrderQuantity={totalOrderQuantity}");
-                        
-                        // CRITICAL FIX: Send ONLY ONE message per execution with full quantity
-                        // This prevents the "whack-a-mole" duplication issue
-                        string executionIdForSend = e.Execution.ExecutionId;
-                        bool alreadySent = false;
-                        
-                        lock (executionTrackingLock)
-                        {
-                            string sentKey = $"SENT_{executionIdForSend}";
-                            if (processedExecutionIds.Contains(sentKey))
-                            {
-                                alreadySent = true;
-                                LogAndPrint($"TRADE_DEDUP: ExecutionId {executionIdForSend} already sent to bridge - skipping duplicate submission");
-                            }
-                            else
-                            {
-                                processedExecutionIds.Add(sentKey);
-                                LogAndPrint($"TRADE_DEDUP: Sending ExecutionId {executionIdForSend} to bridge (first time) - Quantity={executionQuantity}");
-                            }
-                        }
-                        
-                        if (!alreadySent)
-                        {
-                            // Get the correct contract number for this execution
-                            int contractNumber = GetContractNumberForExecution(e.Execution.Order?.OrderId ?? "", totalOrderQuantity);
-                            
-                            var tradeData = new Dictionary<string, object>
-                            {
-                                { "id", $"{e.Execution.ExecutionId}_C1" }, // Single message ID
-                                { "base_id", baseId },
-                                { "time", e.Execution.Time.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
-                                { "action", e.Execution.Order.OrderAction.ToString() },
-                                { "quantity", (float)executionQuantity }, // Send actual execution quantity
-                                { "price", (float)e.Execution.Price },
-                                { "total_quantity", totalOrderQuantity }, // Total order quantity
-                                { "contract_num", contractNumber }, // Sequential contract number
-                                { "instrument_name", e.Execution.Instrument.FullName },
-                                { "account_name", e.Execution.Account.Name },
-
-                                // Enhanced NT Performance Data for Elastic Hedging
-                                { "nt_balance", (float)_sessionStartBalance },
-                                { "nt_daily_pnl", (float)DailyPnL },
-                                { "nt_trade_result", _lastTradeResult },
-                                { "nt_session_trades", _sessionTradeCount }
-                            };
-
-                            // Inject nt_points_per_1k_loss hint for MT5 elastic sizing.
-                            // Assumption: 1 NT point corresponds to MasterInstrument.PointValue dollars per contract.
-                            // Therefore, NT points for $1000 loss = 1000 / pointValue.
-                            try
-                            {
-                                double pointValue = e.Execution.Instrument?.MasterInstrument?.PointValue ?? 0.0;
-                                if (pointValue > 0)
-                                {
-                                    double ntPointsPer1k = 1000.0 / pointValue;
-                                    tradeData["nt_points_per_1k_loss"] = ntPointsPer1k;
-                                    LogAndPrint($"ELASTIC_HINT_EMIT: nt_points_per_1k_loss={ntPointsPer1k:F2} (pointValue={pointValue:F2}) for {e.Execution.Instrument?.FullName}");
-                                }
-                                else
-                                {
-                                    LogAndPrint($"ELASTIC_HINT_EMIT: Skipped nt_points_per_1k_loss (pointValue invalid for {e.Execution.Instrument?.FullName})");
-                                }
-                            }
-                            catch (Exception ehEx)
-                            {
-                                LogAndPrint($"ELASTIC_HINT_EMIT_ERROR: {ehEx.Message}");
-                            }
-
-                            if (e.Execution.Order != null && !string.IsNullOrEmpty(e.Execution.Order.Name))
-                            {
-                                if (e.Execution.Order.Name.Contains("TP")) tradeData["order_type"] = "TP";
-                                else if (e.Execution.Order.Name.Contains("SL")) tradeData["order_type"] = "SL";
-                            }
-
-                            jsonData = SimpleJson.SerializeObject(tradeData);
-                            LogDebug("CONNECTION", String.Format("[MultiStratManager] DEBUG Addon: JSON to Bridge: {0}", jsonData));
-
-                            // Explicit emission log to confirm new entry submission path and action
-                            var actionStr = tradeData.ContainsKey("action") ? (tradeData["action"]?.ToString() ?? "") : "";
-                            var qtyVal = tradeData.ContainsKey("quantity") ? (float)tradeData["quantity"] : 0f;
-                            var priceVal = tradeData.ContainsKey("price") ? (float)tradeData["price"] : 0f;
-                            LogAndPrint($"ENTRY_EMIT: Submitting new entry to Bridge - Action={actionStr}, BaseID={baseId}, Instrument={e.Execution.Instrument.FullName}, Account={e.Execution.Account.Name}, Qty={qtyVal}, Price={priceVal}");
-
-                            // Send trade data to bridge via gRPC
-                            Task.Run(async () => await SendToBridge(tradeData));
-                            
-                            LogAndPrint($"SINGLE_MESSAGE_FIX: Successfully sent ONE message for execution {e.Execution.ExecutionId} with quantity {executionQuantity}");
-                        }
-                        else
-                        {
-                            LogAndPrint($"SINGLE_MESSAGE_FIX: Skipped duplicate execution {e.Execution.ExecutionId}");
-                        }
-
-                        // WebSocket removed - using gRPC only for real-time processing
-                        
-                        // Add elastic position tracking for new entry
-                        LogAndPrint($"ELASTIC_DEBUG: Checking elastic tracking - EnableElasticHedging: {EnableElasticHedging}, Order: {e.Execution.Order != null}, Execution.Quantity: {e.Execution.Quantity}");
-                        
-                        if (EnableElasticHedging && e.Execution.Order != null && e.Execution.Quantity > 0)
-                        {
-                            LogAndPrint($"ELASTIC_DEBUG: Attempting to add elastic tracking for baseId: {baseId}");
-                            
-                            // Find the position for this instrument
-                            LogAndPrint($"ELASTIC_DEBUG: Looking for position with instrument: {e.Execution.Instrument.FullName}");
-                            LogAndPrint($"ELASTIC_DEBUG: Available positions in account:");
-                            foreach (var pos in monitoredAccount.Positions)
-                            {
-                                LogAndPrint($"ELASTIC_DEBUG: - Position: {pos.Instrument.FullName}, MarketPosition: {pos.MarketPosition}, Quantity: {pos.Quantity}");
-                            }
-                            
-                            var position = monitoredAccount.Positions.FirstOrDefault(p => 
-                                p.Instrument.FullName == e.Execution.Instrument.FullName);
-                            
-                            if (position != null)
-                            {
-                                double execCurrentPrice = GetCurrentPrice(position.Instrument);
-                                LogAndPrint($"ELASTIC_DEBUG: Found position for tracking - Instrument: {position.Instrument.FullName}, MarketPosition: {position.MarketPosition}, Current P&L: ${position.GetUnrealizedProfitLoss(PerformanceUnit.Currency, execCurrentPrice):F2}");
-                                trailingAndElasticManager?.AddElasticPositionTracking(baseId, position, e.Execution.Price);
-                            }
-                            else
-                            {
-                                LogAndPrint($"ELASTIC_DEBUG: No position found for instrument {e.Execution.Instrument.FullName}");
-                                LogAndPrint($"ELASTIC_DEBUG: Creating tracking anyway with execution data");
-                                
-                                // Delegate manual tracker creation to TrailingAndElasticManager
-                                trailingAndElasticManager?.AddElasticPositionTrackingFromExecution(baseId, e.Execution);
-                            }
-                        }
-                        else
-                        {
-                            LogAndPrint($"ELASTIC_DEBUG: NOT adding elastic tracking - conditions not met");
-                        }
-                    }
-                    catch (Exception ex_bridge)
-                    {
-                         LogError("CONNECTION", $"ERROR: [MultiStratManager] Exception sending data to bridge: {ex_bridge.Message} | URL: {this.grpcServerAddress} | Data: {jsonData} | StackTrace: {ex_bridge.StackTrace}");
-                         // Do not re-throw, allow ExecutionUpdate to complete
-                    }
-                }
-            }
-        }
-        catch (Exception ex) // Outer catch for the entire handler
-        {
-            LogAndPrint($"ERROR: [MultiStratManager] Unhandled exception in ExecutionUpdate handler: {ex.Message} | StackTrace: {ex.StackTrace} | InnerException: {ex.InnerException?.Message}");
-        }
+        tradeId = execution.Name;
+        return tradeId?.Trim() ?? string.Empty;
     }
 
     // This method replaces the problematic override that caused CS0115.
     // This is the handler for monitoredAccount.OrderUpdate.
     // Ensure SetMonitoredAccount (lines 483-506) correctly subscribes Account_OrderUpdate.
-    private void Account_OrderUpdate(object sender, NinjaTrader.Cbi.OrderEventArgs e)
-{
-    LogAndPrint($"ORDER_UPDATE_TRACE: OrderId={e.Order?.OrderId}, State={e.OrderState}, FilledThisUpdate={e.Filled}, TotalOrderFilled={e.Order?.Filled}, AvgFillPriceThisUpdate={e.AverageFillPrice}, TotalOrderAvgFillPrice={e.Order?.AverageFillPrice}, QtyThisUpdate={e.Quantity}, LimitPrice={e.LimitPrice}, StopPrice={e.StopPrice}, Time={e.Time}");
-
-    if (e.Order == null)
-    {
-        LogAndPrint("ORDER_UPDATE_ERROR: e.Order is null, exiting.");
-        return;
-    }
-
-    Order order = e.Order;
-    long unfilledQuantity = order.Quantity - order.Filled; // Correctly calculate unfilled quantity
-
-    // Log with corrected unfilled quantity
-    LogAndPrint($"ORDER_UPDATE_DETAILS: {order.Name} (ID: {order.Id}): State={e.OrderState}, FilledThisUpdate={e.Filled}, TotalOrderFilled={order.Filled}, Unfilled={unfilledQuantity}");
-
-    // HEDGE CLOSE ORDER TRACKING: Check if this is a hedge close order and update tracking
-    if (order.Name != null && order.Name.StartsWith("HEDGE_CLOSE_") && (e.OrderState == OrderState.Submitted || e.OrderState == OrderState.Accepted))
-    {
-        lock (trackedHedgeClosingOrderIds)
+        private void Account_OrderUpdate(object sender, NinjaTrader.Cbi.OrderEventArgs e)
         {
-            string orderIdStr = order.Id.ToString();
-            // Remove any old tracking IDs that match this base_id pattern
-            var oldTrackingIds = trackedHedgeClosingOrderIds.Where(id => id.StartsWith($"HEDGE_CLOSE_") && id.Contains(order.Name.Substring(12))).ToList();
-            foreach (var oldId in oldTrackingIds)
+            if (e?.Order == null)
+                return;
+
+            try
             {
-                trackedHedgeClosingOrderIds.Remove(oldId);
-                LogAndPrint($"[HEDGE_CLOSE_TRACKING] Removed old tracking ID {oldId}");
+                trailingAndElasticManager?.HandleTrailingStopOrderUpdate(e.Order);
             }
-            // Add the real order ID for tracking
-            trackedHedgeClosingOrderIds.Add(orderIdStr);
-            LogAndPrint($"[HEDGE_CLOSE_TRACKING] Added real order ID {orderIdStr} for hedge close order {order.Name}");
-        }
-    }
-
-    // CLOSURE DETECTION: Check if this filled order represents a trade closure
-    if (e.OrderState == OrderState.Filled || e.OrderState == OrderState.PartFilled)
-    {
-        LogAndPrint($"ORDER_FILLED_DETECTED: Order {order.Id} ({order.Name}) filled - checking if this is a closure");
-        
-        // Check if this order ID maps to any active trade base IDs using our mapping
-        string orderIdStr = order.Id.ToString();
-        bool isKnownTradeId = false;
-        string mappedBaseId = null;
-
-        // First check if this OrderId maps to a baseId
-        if (orderIdToBaseIdMap.TryGetValue(orderIdStr, out mappedBaseId))
-        {
-            // Check if the mapped baseId is still active
-            lock (_activeNtTradesLock)
+            catch (Exception ex)
             {
-                isKnownTradeId = activeNtTrades.ContainsKey(mappedBaseId);
-                LogAndPrint($"CLOSURE_DEBUG: Order {orderIdStr} maps to BaseID {mappedBaseId}, isActive: {isKnownTradeId}");
+                LogAndPrint($"ERROR: Account_OrderUpdate failure: {ex.Message}");
             }
         }
-        else
-        {
-            LogAndPrint($"CLOSURE_DEBUG: Order {orderIdStr} has no mapping to any BaseID");
-        }
-        
-        if (isKnownTradeId)
-        {
-            // This filled order is closing a trade with the mapped baseID
-            LogAndPrint($"CLOSURE_DETECTED_BY_MAPPING: Order {orderIdStr} is closing trade with BaseID {mappedBaseId}");
-            string closedTradeBaseId = mappedBaseId;
-            LogAndPrint($"CLOSURE_DETECTED_VIA_ORDER: Order {order.Id} closes trade {closedTradeBaseId} - sending closure request");
-            
-            // Send closure request to bridge
-            int closureQuantity = (int)e.Filled;
-            Task.Run(() => SendClosureToBridge(closedTradeBaseId, closureQuantity));
-            
-            // Update active trades tracking
-            lock (_activeNtTradesLock)
-            {
-                if (activeNtTrades.TryGetValue(closedTradeBaseId, out var tradeDetails))
-                {
-                    tradeDetails.RemainingQuantity -= closureQuantity;
-                    LogAndPrint($"CLOSURE_TRACKING: Reduced remaining quantity for {closedTradeBaseId} by {closureQuantity}. Remaining: {tradeDetails.RemainingQuantity}");
-                    
-                    if (tradeDetails.RemainingQuantity <= 0)
-                    {
-                        activeNtTrades.TryRemove(closedTradeBaseId, out _);
-
-                        // Clean up baseID mappings
-                        if (baseIdToOrderIdMap.TryRemove(closedTradeBaseId, out string removedOrderId))
-                        {
-                            orderIdToBaseIdMap.TryRemove(removedOrderId, out _);
-                            LogAndPrint($"CLOSURE_COMPLETE: Removed mapping for BaseID {closedTradeBaseId} <-> OrderID {removedOrderId}");
-                        }
-
-                        LogAndPrint($"CLOSURE_COMPLETE: All trades closed for {closedTradeBaseId}. Removed from tracking.");
-                    }
-                }
-            }
-        }
-        else
-        {
-            // Check using the standard closure detection logic
-            string closedTradeBaseId = FindTradeBeingClosedByOrder(order);
-            if (!string.IsNullOrEmpty(closedTradeBaseId))
-            {
-                LogAndPrint($"CLOSURE_DETECTED_VIA_ORDER: Order {order.Id} closes trade {closedTradeBaseId} - sending closure request");
-                
-                // Send closure request to bridge
-                int closureQuantity = (int)e.Filled;
-                Task.Run(() => SendClosureToBridge(closedTradeBaseId, closureQuantity));
-                
-                // Update active trades tracking
-                lock (_activeNtTradesLock)
-                {
-                    if (activeNtTrades.TryGetValue(closedTradeBaseId, out var tradeDetails))
-                    {
-                        tradeDetails.RemainingQuantity -= closureQuantity;
-                        LogAndPrint($"CLOSURE_TRACKING: Reduced remaining quantity for {closedTradeBaseId} by {closureQuantity}. Remaining: {tradeDetails.RemainingQuantity}");
-                        
-                        if (tradeDetails.RemainingQuantity <= 0)
-                        {
-                            activeNtTrades.TryRemove(closedTradeBaseId, out _);
-
-                            // Clean up baseID mappings
-                            if (baseIdToOrderIdMap.TryRemove(closedTradeBaseId, out string removedOrderId))
-                            {
-                                orderIdToBaseIdMap.TryRemove(removedOrderId, out _);
-                                LogAndPrint($"CLOSURE_COMPLETE: Removed mapping for BaseID {closedTradeBaseId} <-> OrderID {removedOrderId}");
-                            }
-
-                            LogAndPrint($"CLOSURE_COMPLETE: All trades closed for {closedTradeBaseId}. Removed from tracking.");
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    if (trackedHedgeClosingOrderIds.Contains(order.OrderId.ToString())) // Convert to string for HashSet
-    {
-        LogAndPrint($"Account_OrderUpdate: Tracking hedge closing order {order.OrderId}, Current State via e.OrderState: {e.OrderState}, via order.OrderState: {order.OrderState}");
-
-        // Detailed logging for CancelPending or terminal states for HedgeClose_ orders
-        if (e.Order.Name.StartsWith("HedgeClose_") &&
-            (e.OrderState == OrderState.CancelPending || e.OrderState == OrderState.Filled || e.OrderState == OrderState.PartFilled || e.OrderState == OrderState.Cancelled || e.OrderState == OrderState.Rejected))
-        {
-            LogDebug("TRADING", $"[MultiStratManager DEBUG] HedgeClose_ Order Update: Name='{e.Order.Name}', ID(int)={e.Order.Id}, State='{e.OrderState}', Filled={e.Order.Filled}/{e.Order.Quantity}, ErrorCode='{e.Error}'");
-        }
-
-        if (e.OrderState == OrderState.Filled || e.OrderState == OrderState.PartFilled)
-        {
-            LogAndPrint($"Account_OrderUpdate: Hedge closing order {order.OrderId} received fill update. Filled this update: {e.Filled}, Total Order Filled: {order.Filled}");
-            // If the order is terminally filled (fully filled), remove it from tracking.
-            if ((order.OrderState == OrderState.Filled || order.OrderState == OrderState.Cancelled || order.OrderState == OrderState.Rejected) && order.Filled == order.Quantity)
-            {
-                trackedHedgeClosingOrderIds.Remove(order.OrderId);
-                LogAndPrint($"Account_OrderUpdate: Fully filled hedge closing order {order.OrderId} removed from tracking.");
-            }
-        }
-        else if ((order.OrderState == OrderState.Filled || order.OrderState == OrderState.Cancelled || order.OrderState == OrderState.Rejected)) // e.g. Cancelled, Rejected.
-        {
-            LogAndPrint($"Account_OrderUpdate: Hedge closing order {order.OrderId} is now terminal (State via e.OrderState: {e.OrderState}, via order.OrderState: {order.OrderState}). Removing from tracking.");
-            trackedHedgeClosingOrderIds.Remove(order.OrderId);
-        }
-    }
-    
-    // MULTI_CONTRACT_FIX: Clean up contract tracking when orders reach terminal states
-    if (order.OrderState == OrderState.Filled || order.OrderState == OrderState.Cancelled || order.OrderState == OrderState.Rejected)
-    {
-        string orderId = order.Id.ToString();
-        if (orderContractCounts.ContainsKey(orderId))
-        {
-            orderContractCounts.TryRemove(orderId, out _);
-            LogAndPrint($"CONTRACT_TRACKING_CLEANUP: Removed contract tracking for completed order {orderId} (State: {order.OrderState})");
-        }
-    }
-    
-    // Handle trailing stop orders (canonical prefix)
-    if (order.Name != null && order.Name.StartsWith("MSM_TRAIL_STOP_"))
-    {
-        // Delegate trailing stop order handling to TrailingAndElasticManager
-        trailingAndElasticManager?.HandleTrailingStopOrderUpdate(order);
-    }
-}
 
     // HTTP Listener removed - using gRPC streaming instead
 
@@ -3450,14 +3371,6 @@ private HashSet<string> trackedHedgeClosingOrderIds;
 
         // Cap by live position quantity to avoid over-close
         int closeQty = Math.Min(desiredQty, Math.Abs(position.Quantity));
-
-        // Add to tracked closing orders to identify these as hedge-initiated closes
-        string trackingId = $"HEDGE_CLOSE_{notification.base_id}_{DateTime.UtcNow.Ticks}";
-        lock (trackedHedgeClosingOrderIds)
-        {
-            trackedHedgeClosingOrderIds.Add(trackingId);
-            LogAndPrint($"[HEDGE_CLOSE_TRACKING] Added tracking ID {trackingId} for hedge-initiated closure of {notification.base_id}");
-        }
 
         try
         {
@@ -3663,6 +3576,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
         if (strategy != null && !monitoredStrategies.Contains(strategy))
         {
             monitoredStrategies.Add(strategy);
+            Instance?.tradeSyncService?.RegisterStrategy(strategy);
             Instance?.LogInfo("SYSTEM", $"[MultiStratManager] Registered {strategy.Name} for state monitoring. Current state: {strategy.State}");
             // Optionally, immediately notify of current state
             // OnStrategyExternalStateChange?.Invoke(strategy, strategy.State);
@@ -3678,6 +3592,7 @@ private HashSet<string> trackedHedgeClosingOrderIds;
         if (strategy != null && monitoredStrategies.Contains(strategy))
         {
             monitoredStrategies.Remove(strategy);
+            Instance?.tradeSyncService?.UnregisterStrategy(strategy);
             Instance?.LogInfo("SYSTEM", $"[MultiStratManager] Unregistered {strategy.Name} from state monitoring.");
         }
     }
@@ -3689,851 +3604,12 @@ private HashSet<string> trackedHedgeClosingOrderIds;
     /// </summary>
     /// <param name="strategy">The strategy instance to modify.</param>
     /// <param name="newState">The desired state (State.Active to enable, State.Terminated to disable).</param>
-    public static void RequestStrategyStateChange(NinjaTrader.NinjaScript.StrategyBase strategy, NinjaTrader.NinjaScript.State newState)
-    {
-        if (strategy == null)
-        {
-            Instance?.LogError("SYSTEM", "[MultiStratManager] RequestStrategyStateChange called with null strategy.");
-            return;
-        }
-
-        // Validate that the requested state is one we expect for enabling/disabling
-        if (newState != State.Active && newState != State.Terminated)
-        {
-            Instance?.LogError("SYSTEM", $"[MultiStratManager] RequestStrategyStateChange called with unexpected state: {newState}. Expected State.Active or State.Terminated.");
-            return;
-        }
-
-        Instance?.LogInfo("SYSTEM", $"[MultiStratManager] Requesting state change for {strategy.Name} to {newState}");
-
-        try
-        {
-            // ADDED CHECK: Prevent trying to set Terminated/Finalized to Active
-            if (newState == State.Active && (strategy.State == State.Terminated || strategy.State == State.Finalized))
-            {
-                Instance?.LogWarn("SYSTEM", $"[MultiStratManager] Attempt to set strategy '{strategy.Name}' to Active from {strategy.State} state. This is not allowed by the API. Operation aborted.");
-                return; // Abort the state change
-            }
-
-            // Check if the state change is actually needed
-            if (strategy.State != newState)
-            {
-                // Execute the state change on the UI thread to ensure compatibility with NT core components
-                Application.Current.Dispatcher.InvokeAsync(() =>
-                {
-                    try
-                    {
-                        // Log before the state change
-                        Instance?.LogDebug("SYSTEM", $"[MultiStratManager] Calling SetState({newState}) for {strategy.Name}. Current state: {strategy.State}");
-
-                        // Perform the state change
-                        strategy.SetState(newState);
-
-                        // Log after the state change
-                        Instance?.LogInfo("SYSTEM", $"[MultiStratManager] SetState({newState}) called successfully for {strategy.Name}. New state: {strategy.State}");
-
-                        // Attempt to notify the Control Center to refresh its strategy display
-                        // This is a best effort - the actual refresh mechanism depends on NinjaTrader's internal implementation
-                        try
-                        {
-                            // Force a property changed notification on the strategy
-                            // This might help trigger UI updates in the Control Center
-                            if (strategy is INotifyPropertyChanged notifyPropertyChanged)
-                            {
-                                var propertyInfo = strategy.GetType().GetProperty("State");
-                                if (propertyInfo != null)
-                                {
-                                    Instance?.LogDebug("SYSTEM", $"[MultiStratManager] Attempting to trigger PropertyChanged for State property");
-
-                                    // Use reflection to invoke the OnPropertyChanged method if it exists
-                                    var methodInfo = strategy.GetType().GetMethod("OnPropertyChanged",
-                                        System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-
-                                    if (methodInfo != null)
-                                    {
-                                        methodInfo.Invoke(strategy, new object[] { "State" });
-                                        Instance?.LogDebug("SYSTEM", $"[MultiStratManager] Successfully triggered PropertyChanged for State");
-                                    }
-                                }
-                            }
-                        }
-                        catch (Exception refreshEx)
-                        {
-                            // Non-critical error - log but continue
-                            Instance?.LogWarn("SYSTEM", $"[MultiStratManager] Non-critical error while attempting to refresh UI: {refreshEx.Message}");
-                        }
-                    }
-                    catch (Exception changeStateException)
-                    {
-                        Instance?.LogError("SYSTEM", $"[MultiStratManager] Error calling SetState({newState}) for {strategy.Name}: {changeStateException.Message}\nStackTrace: {changeStateException.StackTrace}");
-                    }
-                });
-            }
-            else
-            {
-                Instance?.LogDebug("SYSTEM", $"[MultiStratManager] State for {strategy.Name} is already {newState}. No action taken.");
-                // Even if no action is taken, it might be useful to notify if the current state is what UI expects
-                // For example, if the UI tried to enable an already enabled strategy,
-                // we might still want to confirm the state back to the UI.
-                // This part can be expanded based on UI interaction needs.
-            }
-        }
-        catch (Exception ex)
-        {
-            Instance?.LogError("SYSTEM", $"[MultiStratManager] Error in RequestStrategyStateChange for {strategy.Name}: {ex.Message}\nStackTrace: {ex.StackTrace}");
-        }
-    }
-
     /// <summary>
     /// SIMPLIFIED FIFO CLOSURE DETECTION: Finds the original opening trade's base_id that corresponds to a closing execution
     /// Uses the same logic as IsPositionClosingExecution() to ensure consistency
     /// </summary>
     /// <param name="e">The closing execution event args</param>
     /// <returns>The base_id of the original opening trade, or null if not found</returns>
-    private string FindOriginalTradeBaseId(ExecutionEventArgs e)
-    {
-        if (e?.Execution?.Order == null) return null;
-
-        string orderName = e.Execution.Order.Name?.ToUpper() ?? "";
-        var orderAction = e.Execution.Order.OrderAction;
-        var instrument = e.Execution.Instrument.FullName;
-        var account = e.Execution.Account.Name;
-
-        LogAndPrint($"CLOSURE_SEARCH_DEBUG: Searching for closure match. Order: '{e.Execution.Order.Name}', Action: {orderAction}, Instrument: {instrument}, Account: {account}");
-        LogAndPrint($"CLOSURE_SEARCH_DEBUG: activeNtTrades contains {activeNtTrades.Count} entries");
-
-        // SIMPLIFIED LOGIC: Use the same position analysis that IsPositionClosingExecution() uses
-        // This ensures consistency between closure detection and closure matching
-        if (!IsPositionClosingExecution(e))
-        {
-            LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Position analysis indicates this is NOT a closure - treating as entry trade");
-            return null;
-        }
-
-        // If we get here, IsPositionClosingExecution() confirmed this is a closure
-        // Now find which specific trade to close using FIFO
-        LogAndPrint($"CLOSURE_CONFIRMED: Position analysis confirmed closure - finding specific trade to close using FIFO");
-
-        return FindClosureByPositionAnalysis(orderAction, instrument, account);
-    }
-
-    /// <summary>
-    /// Enhanced position-based closure detection that analyzes order actions and existing positions
-    /// </summary>
-    private string FindClosureByPositionAnalysis(OrderAction orderAction, string instrument, string account)
-    {
-        lock (_activeNtTradesLock)
-        {
-            LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Analyzing {activeNtTrades.Count} active trades for potential closure");
-
-            // Find trades that could be closed by this order action
-            var potentialClosures = new List<KeyValuePair<string, OriginalTradeDetails>>();
-
-            foreach (var kvp in activeNtTrades)
-            {
-                var storedTrade = kvp.Value;
-
-                // Must be same instrument and account
-                if (storedTrade.NtInstrumentSymbol != instrument || storedTrade.NtAccountName != account)
-                {
-                    LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Skipping BaseID: {kvp.Key} - Different instrument/account. Stored: {storedTrade.NtInstrumentSymbol}/{storedTrade.NtAccountName}, Current: {instrument}/{account}");
-                    continue;
-                }
-
-                bool isOppositeAction = false;
-
-                // ENHANCED: Check if this order action is opposite to the stored position
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Checking BaseID: {kvp.Key} - StoredPosition: {storedTrade.MarketPosition}, StoredAction: {storedTrade.OriginalOrderAction}, CurrentAction: {orderAction}");
-
-                // Case 1: Stored trade was a Long position (Buy action) and current is Sell action
-                if (storedTrade.MarketPosition == MarketPosition.Long &&
-                    (orderAction == OrderAction.Sell || orderAction == OrderAction.SellShort))
-                {
-                    isOppositeAction = true;
-                    LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Found potential long closure - BaseID: {kvp.Key}, Original: Long, Current: {orderAction}");
-                }
-                // Case 2: Stored trade was a Short position (Sell action) and current is Buy action
-                else if (storedTrade.MarketPosition == MarketPosition.Short &&
-                        (orderAction == OrderAction.BuyToCover || orderAction == OrderAction.Buy))
-                {
-                    isOppositeAction = true;
-                    LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Found potential short closure - BaseID: {kvp.Key}, Original: Short, Current: {orderAction}");
-                }
-                else
-                {
-                    LogAndPrint($"CLOSURE_POSITION_ANALYSIS: No closure match for BaseID: {kvp.Key} - Position: {storedTrade.MarketPosition}, OriginalAction: {storedTrade.OriginalOrderAction}, CurrentAction: {orderAction}");
-                }
-
-                if (isOppositeAction)
-                {
-                    potentialClosures.Add(kvp);
-                }
-            }
-
-            if (potentialClosures.Count == 0)
-            {
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: No potential closures found for {orderAction} on {instrument}");
-                return null;
-            }
-            else if (potentialClosures.Count == 1)
-            {
-                // Single match - most likely scenario
-                string baseId = potentialClosures[0].Key;
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Single closure match found - BaseID: {baseId}");
-                return baseId;
-            }
-            else
-            {
-                // FIFO: Multiple matches found - use First In, First Out (oldest trade first)
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Multiple potential closures found ({potentialClosures.Count}). Using FIFO (oldest trade first) to resolve ambiguity.");
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: Potential matches were:");
-                foreach (var closure in potentialClosures)
-                {
-                    LogAndPrint($"CLOSURE_POSITION_ANALYSIS:   - BaseID: {closure.Key}, Position: {closure.Value.MarketPosition}, Action: {closure.Value.OriginalOrderAction}, Timestamp: {closure.Value.Timestamp}");
-                }
-
-                // Use FIFO - select the oldest trade (earliest timestamp)
-                var oldestTrade = potentialClosures.OrderBy(kvp => kvp.Value.Timestamp).First();
-                string baseId = oldestTrade.Key;
-                LogAndPrint($"CLOSURE_POSITION_ANALYSIS: FIFO selection - BaseID: {baseId} (oldest trade)");
-                return baseId;
-            }
-        }
-    }
-
-    /// <summary>
-    /// OFFICIAL NINJATRADER BEST PRACTICE: Comprehensive Entry vs Closure Detection
-    /// Based on official NinjaTrader documentation for OnExecutionUpdate and OnPositionUpdate
-    /// </summary>
-    private bool DetectTradeClosureByExecution(ExecutionEventArgs e)
-    {
-        if (e?.Execution == null || e.Execution.Order == null) return false;
-
-        string orderName = e.Execution.Order.Name ?? "";
-        OrderAction orderAction = e.Execution.Order.OrderAction;
-        string instrumentName = e.Execution.Instrument?.FullName ?? "Unknown";
-        string accountName = e.Execution.Account?.Name ?? "Unknown";
-        MarketPosition executionMarketPosition = e.Execution.MarketPosition;
-
-        LogAndPrint($"ENTRY_VS_CLOSURE: Analyzing execution - OrderName: '{orderName}', Action: {orderAction}, MarketPosition: {executionMarketPosition}, Instrument: {instrumentName}");
-
-        // METHOD 1: Order Name Analysis (Most Reliable for Manual Trades)
-        if (IsClosingOrderByName(orderName))
-        {
-            LogAndPrint($"CLOSURE_DETECTED: Order '{orderName}' identified as closing order by name");
-            return true;
-        }
-
-        // METHOD 2: OrderAction Analysis (Official NinjaTrader Pattern)
-        if (IsExitOrderAction(orderAction))
-        {
-            LogAndPrint($"CLOSURE_DETECTED: OrderAction {orderAction} is an exit action");
-            return true;
-        }
-
-        // METHOD 3: Position State Analysis (Most Reliable for Automated Detection)
-        if (IsPositionClosingExecution(e))
-        {
-            LogAndPrint($"CLOSURE_DETECTED: Execution reduces position toward flat");
-            return true;
-        }
-
-        LogAndPrint($"ENTRY_DETECTED: Execution identified as NEW ENTRY TRADE");
-        return false;
-    }
-
-    /// <summary>
-    /// OFFICIAL NINJATRADER: Detects if OrderAction represents an exit/closure
-    /// Based on official OrderAction documentation
-    /// IMPORTANT: OrderAction.Sell can be either entry (SellShort) or exit (Sell to close long)
-    /// We need position context to determine the intent
-    /// </summary>
-    private bool IsExitOrderAction(OrderAction orderAction)
-    {
-        // From Official NinjaTrader Documentation:
-        // ONLY BuyToCover is explicitly an exit action
-        // OrderAction.Sell can be either entry (SellShort) or exit (Sell to close long)
-        // OrderAction.Buy can be either entry (Buy to open long) or exit (Buy to cover short)
-
-        // We should NOT classify Sell/Buy as exits without position context
-        // Only BuyToCover is explicitly an exit action
-        return orderAction == OrderAction.BuyToCover;
-    }
-
-    /// <summary>
-    /// OFFICIAL NINJATRADER: Detects if execution represents a new entry
-    /// Based on official OrderAction documentation
-    /// IMPORTANT: OrderAction.Buy and OrderAction.Sell can be either entry or exit
-    /// We need position context to determine the intent
-    /// </summary>
-    private bool IsEntryOrderAction(OrderAction orderAction)
-    {
-        // From Official NinjaTrader Documentation:
-        // ONLY SellShort is explicitly an entry action
-        // OrderAction.Buy can be either entry (Buy to open long) or exit (Buy to cover short)
-        // OrderAction.Sell can be either entry (SellShort) or exit (Sell to close long)
-
-        // For now, we'll consider all actions as potential entries
-        // and rely on position analysis to determine if it's actually a closure
-        return orderAction == OrderAction.Buy ||
-               orderAction == OrderAction.Sell ||
-               orderAction == OrderAction.SellShort ||
-               orderAction == OrderAction.BuyToCover;
-    }
-
-    /// <summary>
-    /// OFFICIAL NINJATRADER: Position State Analysis for Closure Detection
-    /// Based on official OnPositionUpdate documentation and best practices
-    /// </summary>
-    private bool IsPositionClosingExecution(ExecutionEventArgs e)
-    {
-        if (e?.Execution == null || e.Execution.Order == null) return false;
-
-        string instrumentName = e.Execution.Instrument?.FullName ?? "Unknown";
-        string accountName = e.Execution.Account?.Name ?? "Unknown";
-        OrderAction orderAction = e.Execution.Order.OrderAction;
-        int executionQuantity = e.Execution.Quantity;
-        
-        // 1) Primary source of truth: actual NT account position (most reliable)
-        try
-        {
-            if (monitoredAccount != null)
-            {
-                var livePos = monitoredAccount.Positions
-                    .FirstOrDefault(p => p.Instrument?.FullName == instrumentName);
-
-                if (livePos == null || livePos.MarketPosition == MarketPosition.Flat || livePos.Quantity == 0)
-                {
-                    LogAndPrint($"POSITION_ANALYSIS: Account reports FLAT for {instrumentName} on {accountName} - treat as NEW ENTRY");
-                    return false; // flat => cannot be a closure
-                }
-
-                // Positive for long, negative for short
-                int netFromAccount = livePos.MarketPosition == MarketPosition.Long ? livePos.Quantity : -livePos.Quantity;
-                LogAndPrint($"POSITION_ANALYSIS: Account position - MarketPosition: {livePos.MarketPosition}, Qty: {livePos.Quantity}, Net: {netFromAccount}");
-
-                if (netFromAccount > 0)
-                {
-                    // Currently net long → Sell reduces, Buy increases
-                    bool isClosing = (orderAction == OrderAction.Sell || orderAction == OrderAction.SellShort);
-                    LogAndPrint(isClosing
-                        ? $"POSITION_ANALYSIS: {orderAction} reduces LONG from account - CLOSURE"
-                        : $"POSITION_ANALYSIS: {orderAction} increases LONG from account - NEW ENTRY");
-                    return isClosing;
-                }
-                else if (netFromAccount < 0)
-                {
-                    // Currently net short → Buy reduces, Sell increases
-                    bool isClosing = (orderAction == OrderAction.Buy || orderAction == OrderAction.BuyToCover);
-                    LogAndPrint(isClosing
-                        ? $"POSITION_ANALYSIS: {orderAction} reduces SHORT from account - CLOSURE"
-                        : $"POSITION_ANALYSIS: {orderAction} increases SHORT from account - NEW ENTRY");
-                    return isClosing;
-                }
-            }
-        }
-        catch (Exception exPos)
-        {
-            LogAndPrint($"POSITION_ANALYSIS_ERROR: Failed to read account positions: {exPos.Message}. Falling back to internal tracking.");
-        }
-
-        // 2) Fallback to internal activeNtTrades tracking if account positions unavailable
-        lock (_activeNtTradesLock)
-        {
-            var existingPositions = activeNtTrades.Values
-                .Where(trade => trade.NtInstrumentSymbol == instrumentName &&
-                               trade.NtAccountName == accountName)
-                .ToList();
-
-            if (existingPositions.Count == 0)
-            {
-                LogAndPrint($"POSITION_ANALYSIS: No existing tracked positions - treat as NEW ENTRY");
-                return false;
-            }
-
-            int currentLongQuantity = existingPositions
-                .Where(p => p.MarketPosition == MarketPosition.Long)
-                .Sum(p => p.Quantity);
-
-            int currentShortQuantity = existingPositions
-                .Where(p => p.MarketPosition == MarketPosition.Short)
-                .Sum(p => p.Quantity);
-
-            int netPosition = currentLongQuantity - currentShortQuantity;
-            LogAndPrint($"POSITION_ANALYSIS: Tracked position - Long: {currentLongQuantity}, Short: {currentShortQuantity}, Net: {netPosition}");
-
-            if (netPosition > 0)
-            {
-                bool isClosing = (orderAction == OrderAction.Sell || orderAction == OrderAction.SellShort);
-                LogAndPrint(isClosing
-                    ? $"POSITION_ANALYSIS: {orderAction} reduces tracked LONG - CLOSURE"
-                    : $"POSITION_ANALYSIS: {orderAction} increases tracked LONG - NEW ENTRY");
-                return isClosing;
-            }
-            else if (netPosition < 0)
-            {
-                bool isClosing = (orderAction == OrderAction.Buy || orderAction == OrderAction.BuyToCover);
-                LogAndPrint(isClosing
-                    ? $"POSITION_ANALYSIS: {orderAction} reduces tracked SHORT - CLOSURE"
-                    : $"POSITION_ANALYSIS: {orderAction} increases tracked SHORT - NEW ENTRY");
-                return isClosing;
-            }
-            else
-            {
-                LogAndPrint($"POSITION_ANALYSIS: Tracked FLAT - treat as NEW ENTRY");
-                return false;
-            }
-        }
-    }
-
-    /// <summary>
-    /// OFFICIAL NINJATRADER: Comprehensive New Entry Detection
-    /// Based on official documentation best practices - ensures no new entries are missed
-    /// </summary>
-    private bool IsNewEntryTrade(ExecutionEventArgs e)
-    {
-        if (e?.Execution == null || e.Execution.Order == null) return false;
-
-        string orderName = e.Execution.Order.Name ?? "";
-        OrderAction orderAction = e.Execution.Order.OrderAction;
-        string instrumentName = e.Execution.Instrument?.FullName ?? "Unknown";
-        string accountName = e.Execution.Account?.Name ?? "Unknown";
-
-        // Do not treat tracked hedge closing orders as new entries
-        if (!string.IsNullOrEmpty(e.Execution?.Order?.Id.ToString()) && trackedHedgeClosingOrderIds.Contains(e.Execution.Order.Id.ToString()))
-        {
-            LogAndPrint($"ENTRY_DETECTION_GUARD: Order {e.Execution.Order.Id} is a tracked hedge close order - NOT a new entry");
-            return false;
-        }
-
-        LogAndPrint($"ENTRY_DETECTION: Analyzing execution - OrderName: '{orderName}', Action: {orderAction}, Instrument: {instrumentName}");
-
-        // METHOD 1: OrderAction Analysis (Primary Method)
-        if (IsEntryOrderAction(orderAction))
-        {
-            LogAndPrint($"ENTRY_DETECTION: OrderAction {orderAction} is an entry action");
-
-            // METHOD 2: Confirm it's not actually a closure by checking position state
-            if (!IsPositionClosingExecution(e))
-            {
-                LogAndPrint($"ENTRY_CONFIRMED: Position analysis confirms this is a NEW ENTRY");
-                return true;
-            }
-            else
-            {
-                LogAndPrint($"ENTRY_OVERRIDE: OrderAction suggests entry but position analysis indicates closure");
-                return false;
-            }
-        }
-
-        // METHOD 3: Order Name Analysis for Entry Detection
-        if (IsEntryOrderByName(orderName))
-        {
-            LogAndPrint($"ENTRY_DETECTION: Order '{orderName}' identified as entry order by name");
-            return true;
-        }
-
-        LogAndPrint($"ENTRY_DETECTION: Execution is NOT a new entry");
-        return false;
-    }
-
-    /// <summary>
-    /// Checks if order name indicates it's an entry order
-    /// Based on common NinjaTrader naming conventions
-    /// </summary>
-    private bool IsEntryOrderByName(string orderName)
-    {
-        if (string.IsNullOrEmpty(orderName)) return false;
-
-        string upperName = orderName.ToUpper();
-
-        // Common entry order names in NinjaTrader
-        return upperName.Contains("ENTRY") ||
-               upperName.Contains("ENTER") ||
-               upperName.Contains("LONG") ||
-               upperName.Contains("SHORT") ||
-               upperName.Contains("BUY") ||
-               upperName.Contains("SELL") ||
-               upperName == "ENTRY";           // Exact match for simple entry
-    }
-
-    /// <summary>
-    /// Checks if order name indicates it's a closing order
-    /// Based on common NinjaTrader naming conventions
-    /// </summary>
-    private bool IsClosingOrderByName(string orderName)
-    {
-        if (string.IsNullOrEmpty(orderName)) return false;
-
-        string upperName = orderName.ToUpper();
-
-        // Common closing order names in NinjaTrader
-        return upperName.Contains("CLOSE") ||
-               upperName.Contains("EXIT") ||
-               upperName.Contains("STOP") ||
-               upperName.Contains("TARGET") ||
-               upperName.Contains("TP") ||     // Take Profit
-               upperName.Contains("SL") ||     // Stop Loss
-               upperName == "CLOSE";           // Exact match for manual close
-    }
-
-    /// <summary>
-    /// Checks if this execution will close an existing position
-    /// This is the most reliable method according to NinjaTrader docs
-    /// </summary>
-    private bool WillExecutionClosePosition(ExecutionEventArgs e)
-    {
-        if (e?.Execution == null || e.Execution.Order == null) return false;
-
-        string instrumentName = e.Execution.Instrument?.FullName ?? "Unknown";
-        string accountName = e.Execution.Account?.Name ?? "Unknown";
-        OrderAction orderAction = e.Execution.Order.OrderAction;
-        int executionQuantity = e.Execution.Quantity;
-
-        lock (_activeNtTradesLock)
-        {
-            // Find existing positions that could be closed by this execution
-            var matchingPositions = activeNtTrades.Values
-                .Where(trade => trade.NtInstrumentSymbol == instrumentName &&
-                               trade.NtAccountName == accountName)
-                .ToList();
-
-            if (matchingPositions.Count == 0)
-            {
-                LogAndPrint($"CLOSURE_DETECTION: No existing positions found for {instrumentName} - this is a NEW TRADE");
-                return false;
-            }
-
-            // Check if this execution would close any existing positions
-            foreach (var position in matchingPositions)
-            {
-                bool isOppositeDirection = IsOppositeDirection(position.MarketPosition, orderAction);
-
-                if (isOppositeDirection)
-                {
-                    LogAndPrint($"CLOSURE_DETECTION: Found opposite position - Position: {position.MarketPosition}, Action: {orderAction} - this is a CLOSURE");
-                    return true;
-                }
-            }
-
-            LogAndPrint($"CLOSURE_DETECTION: No opposite positions found - this is a NEW TRADE");
-            return false;
-        }
-    }
-
-    /// <summary>
-    /// Determines if an order action is opposite to a market position
-    /// </summary>
-    private bool IsOppositeDirection(MarketPosition position, OrderAction action)
-    {
-        return (position == MarketPosition.Long && (action == OrderAction.Sell || action == OrderAction.SellShort)) ||
-               (position == MarketPosition.Short && (action == OrderAction.Buy || action == OrderAction.BuyToCover));
-    }
-
-    /// <summary>
-    /// Handles a confirmed trade closure execution
-    /// BIDIRECTIONAL_HEDGE_FIX: This function should only process user-initiated closures,
-    /// NOT hedge closing orders (which are responses to MT5 notifications).
-    /// Hedge closing orders are now filtered out in OnExecutionUpdate to prevent FIFO-based BaseID mismatches.
-    /// </summary>
-    private void HandleTradeClosureExecution(ExecutionEventArgs e)
-    {
-        string executionId = e.Execution.ExecutionId;
-        string instrumentName = e.Execution.Instrument?.FullName ?? "Unknown";
-        string accountName = e.Execution.Account?.Name ?? "Unknown";
-        OrderAction orderAction = e.Execution.Order.OrderAction;
-        int quantity = e.Execution.Quantity;
-
-        LogAndPrint($"CLOSURE_CONFIRMED: Processing closure execution {executionId}");
-
-        // FIXED: Use FIFO logic since closing orders have different OrderIds than opening orders
-        // OrderId mapping only works for the same order, but closures create new orders
-        string closedTradeBaseId = FindClosureByPositionAnalysis(orderAction, instrumentName, accountName);
-
-        if (!string.IsNullOrEmpty(closedTradeBaseId))
-        {
-            LogAndPrint($"CLOSURE_SUCCESS: Found trade being closed - BaseID: {closedTradeBaseId}");
-
-            // Look up MT5 ticket for reliable closure
-            ulong mt5Ticket = 0;
-            // Retry logic for stress testing race conditions
-            for (int retry = 0; retry < 3; retry++)
-            {
-                if (baseIdToMT5Ticket.TryGetValue(closedTradeBaseId, out mt5Ticket) && mt5Ticket > 0)
-                    break;
-                if (retry < 2) Thread.Sleep(5); // Brief delay
-            }
-            
-            if (mt5Ticket > 0)
-            {
-                LogAndPrint($"CLOSURE_TICKET: Found MT5 ticket {mt5Ticket} for BaseID {closedTradeBaseId}");
-            }
-            else
-            {
-                LogAndPrint($"CLOSURE_TICKET: No MT5 ticket found for BaseID {closedTradeBaseId}, will use comment matching");
-            }
-            
-            // Send closure notification to MT5
-            // MT5 EA expects a trade message with action="CLOSE_HEDGE" for processing
-            var closureNotification = new
-            {
-                action = "CLOSE_HEDGE",  // MT5 EA looks for this specific action
-                base_id = closedTradeBaseId,
-                // gRPC hedge-close fields expected by JsonToProtoHedgeClose
-                nt_instrument_symbol = instrumentName,
-                nt_account_name = accountName,
-                closed_hedge_quantity = (double) quantity,
-                closed_hedge_action = "CLOSE_HEDGE",
-                timestamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                // Legacy/compat fields retained for MT5 JSON consumers
-                price = 0.0,  // Not critical for closure
-                total_quantity = quantity,
-                contract_num = 1,
-                instrument_name = instrumentName,
-                account_name = accountName,
-                time = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ"),
-                nt_balance = SessionStartBalance,
-                nt_daily_pnl = DailyPnL,
-                nt_trade_result = "closed",
-                nt_session_trades = SessionTradeCount,
-                closure_reason = "NT_ORIGINAL_TRADE_CLOSED",
-                mt5_ticket = mt5Ticket // Include MT5 ticket for reliable closure
-            };
-
-            string jsonMessage = SimpleJson.SerializeObject(closureNotification);
-            LogAndPrint($"CLOSURE_NOTIFICATION: Sending to MT5: {jsonMessage}");
-
-            // Send CLOSE_HEDGE request to Bridge Server via gRPC (using background task)
-            Task.Run(() =>
-            {
-                try
-                {
-                    bool success = TradingGrpcClient.NTCloseHedge(jsonMessage);
-                    if (success)
-                    {
-                        LogAndPrint($"CLOSURE_NOTIFICATION: Successfully sent CLOSE_HEDGE via gRPC for BaseID: {closedTradeBaseId}");
-                    }
-                    else
-                    {
-                        LogAndPrint($"ERROR: Failed to send CLOSE_HEDGE via gRPC for BaseID: {closedTradeBaseId}. Error: {TradingGrpcClient.LastError}");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    LogAndPrint($"ERROR: Exception sending CLOSE_HEDGE via gRPC for BaseID: {closedTradeBaseId}. Exception: {ex.Message}");
-                }
-            });
-
-            // MULTI_TRADE_GROUP_FIX: Only remove BaseID when all trades with that BaseID are closed
-            lock (_activeNtTradesLock)
-            {
-                if (activeNtTrades.TryGetValue(closedTradeBaseId, out var tradeDetails))
-                {
-                    tradeDetails.RemainingQuantity -= quantity;
-                    LogAndPrint($"MULTI_TRADE_GROUP_CLOSURE: Reduced remaining quantity for BaseID {closedTradeBaseId} by {quantity}. Remaining: {tradeDetails.RemainingQuantity}/{tradeDetails.TotalQuantity}");
-
-                    if (tradeDetails.RemainingQuantity <= 0)
-                    {
-                        // RemainingQuantity-based completion. Avoid setting IsClosed here; cleanup will remove tracking entry shortly.
-                        tradeDetails.ClosedTimestamp = DateTime.UtcNow;
-                        
-                        // Internal trailing removed: no per-BaseID cleanup required
-                        
-                        LogAndPrint($"CLOSURE_CLEANUP: All trades closed for BaseID {closedTradeBaseId}. Will cleanup later. Remaining entries: {activeNtTrades.Count}");
-                        
-                        // Schedule delayed cleanup to allow MT5 notifications to process
-                        Task.Run(async () =>
-                        {
-                            await Task.Delay(5000); // Wait 5 seconds for any pending MT5 notifications
-                            if (activeNtTrades.TryRemove(closedTradeBaseId, out _))
-                            {
-                                LogAndPrint($"DELAYED_CLEANUP: Removed fully closed trade {closedTradeBaseId} from activeNtTrades tracking. Remaining entries: {activeNtTrades.Count}");
-                            }
-                        });
-                    }
-                    else
-                    {
-                        LogAndPrint($"CLOSURE_PARTIAL: BaseID {closedTradeBaseId} still has {tradeDetails.RemainingQuantity} trades remaining. Keeping in tracking.");
-                    }
-                }
-                else
-                {
-                    LogAndPrint($"CLOSURE_ERROR: BaseID {closedTradeBaseId} not found in activeNtTrades during closure cleanup.");
-                }
-            }
-
-            // WebSocket removed - using gRPC only for closure requests
-        }
-        else
-        {
-            LogAndPrint($"CLOSURE_ERROR: Could not find matching trade to close for {orderAction} on {instrumentName}");
-        }
-    }
-
-    /// <summary>
-    /// Finds the specific trade being closed by this order
-    /// </summary>
-    private string FindTradeBeingClosedByOrder(Order order)
-    {
-        if (order == null || order.Instrument == null || order.Account == null) return null;
-        
-        string instrument = order.Instrument.FullName;
-        string account = order.Account.Name;
-        OrderAction orderAction = order.OrderAction;
-        int quantity = (int)order.Filled;
-        
-        LogAndPrint($"CLOSURE_SEARCH_ORDER: Looking for trade closed by Order {order.Id}, Action: {orderAction}, Instrument: {instrument}, Quantity: {quantity}");
-
-        // FIXED: Use exact OrderId mapping instead of FIFO logic
-        string orderId = order.Id.ToString();
-        return FindTradeBeingClosedByOrderId(orderId);
-    }
-
-    /// <summary>
-    /// Finds the specific trade being closed by this execution using OrderId mapping
-    /// FIXED: Replaced FIFO logic with exact OrderId-to-BaseID mapping for accurate closure detection
-    /// </summary>
-    private string FindTradeBeingClosed(OrderAction orderAction, string instrument, string account, int quantity)
-    {
-        // This method is now deprecated in favor of direct OrderId mapping
-        // It's kept for backward compatibility but should not be used for new closures
-        LogAndPrint($"CLOSURE_SEARCH_DEPRECATED: FindTradeBeingClosed called - this method uses FIFO logic and may be inaccurate");
-
-        lock (_activeNtTradesLock)
-        {
-            var matchingTrades = activeNtTrades
-                .Where(kvp => kvp.Value.NtInstrumentSymbol == instrument &&
-                             kvp.Value.NtAccountName == account &&
-                             IsOppositeDirection(kvp.Value.MarketPosition, orderAction))
-                .ToList();
-
-            if (matchingTrades.Count == 0)
-            {
-                LogAndPrint($"CLOSURE_SEARCH: No matching trades found for {orderAction} on {instrument}");
-                return null;
-            }
-
-            if (matchingTrades.Count == 1)
-            {
-                LogAndPrint($"CLOSURE_SEARCH: Single matching trade found - BaseID: {matchingTrades[0].Key}");
-                return matchingTrades[0].Key;
-            }
-
-            // DEPRECATED: Multiple matches - use FIFO (first in, first out)
-            // This is the problematic logic that should be replaced with OrderId mapping
-            var oldestTrade = matchingTrades.OrderBy(kvp => kvp.Value.Timestamp).First();
-            LogAndPrint($"CLOSURE_SEARCH_FIFO_WARNING: Multiple matches found, using FIFO - BaseID: {oldestTrade.Key} (THIS MAY BE INCORRECT!)");
-            return oldestTrade.Key;
-        }
-    }
-
-    /// <summary>
-    /// NEW: Finds the specific trade being closed using exact OrderId-to-BaseID mapping
-    /// This replaces the problematic FIFO logic with accurate closure detection
-    /// </summary>
-    private string FindTradeBeingClosedByOrderId(string orderId)
-    {
-        if (string.IsNullOrEmpty(orderId))
-        {
-            LogAndPrint($"CLOSURE_SEARCH_ORDERID: OrderId is null or empty");
-            return null;
-        }
-
-        // Use our OrderId-to-BaseID mapping for exact matching
-        if (orderIdToBaseIdMap.TryGetValue(orderId, out string baseId))
-        {
-            // Verify the baseId is still active
-            lock (_activeNtTradesLock)
-            {
-                if (activeNtTrades.ContainsKey(baseId))
-                {
-                    LogAndPrint($"CLOSURE_SEARCH_ORDERID: Found exact match - OrderId {orderId} maps to BaseID {baseId}");
-                    return baseId;
-                }
-                else
-                {
-                    LogAndPrint($"CLOSURE_SEARCH_ORDERID: OrderId {orderId} maps to BaseID {baseId} but trade is no longer active");
-                    return null;
-                }
-            }
-        }
-        else
-        {
-            LogAndPrint($"CLOSURE_SEARCH_ORDERID: No mapping found for OrderId {orderId}");
-            return null;
-        }
-    }
-
-    /// <summary>
-    /// Determines if an execution represents a closing trade (exit from position)
-    /// ENHANCED: More aggressive closure detection for manual closures
-    /// </summary>
-    /// <param name="e">The execution event args</param>
-    /// <returns>True if this execution closes a position, false if it opens/adds to a position</returns>
-    private bool IsClosingExecution(ExecutionEventArgs e)
-    {
-        if (e?.Execution?.Order == null) return false;
-
-        // MOST RELIABLE: Check if order name explicitly indicates it's a closing order
-        if (!string.IsNullOrEmpty(e.Execution.Order.Name))
-        {
-            string orderName = e.Execution.Order.Name.ToUpper();
-            if (orderName.Contains("CLOSE") || orderName.Contains("EXIT") ||
-                orderName.Contains("TP") || orderName.Contains("SL"))
-            {
-                LogAndPrint($"CLOSURE_BY_NAME: Order '{e.Execution.Order.Name}' identified as closing order by name");
-                return true;
-            }
-        }
-
-        // Check for closure matches using the improved FindOriginalTradeBaseId function
-        // which now only matches when there are explicit closure indicators
-        string originalBaseId = FindOriginalTradeBaseId(e);
-        if (!string.IsNullOrEmpty(originalBaseId))
-        {
-            LogAndPrint($"CLOSURE_BY_EXPLICIT_MATCH: Order identified as closing order for base_id {originalBaseId}");
-            return true;
-        }
-
-        // CONSERVATIVE APPROACH: Only treat as closure if we have explicit evidence
-        // This prevents new entry trades from being incorrectly treated as closures
-        LogAndPrint($"ENTRY_TRADE: Order '{e.Execution.Order.Name ?? "unnamed"}' identified as entry trade (Action: {e.Execution.Order.OrderAction}, Position: {e.Execution.MarketPosition})");
-        return false;
-    }
-
-    /// <summary>
-    /// Sends a hedge closure notification to the bridge via gRPC
-    /// </summary>
-    /// <param name="closureData">The closure notification data</param>
-    private void SendHedgeClosureNotification(Dictionary<string, object> closureData)
-    {
-        try
-        {
-            string json = SimpleJson.SerializeObject(closureData);
-            LogAndPrint($"NT_CLOSURE: Sending hedge closure notification via gRPC");
-
-            bool success = TradingGrpcClient.NotifyHedgeClose(json);
-
-            if (success)
-            {
-                LogAndPrint($"NT_CLOSURE: Successfully sent hedge closure notification via gRPC");
-            }
-            else
-            {
-                string error = TradingGrpcClient.LastError;
-                LogAndPrint($"ERROR: Failed to send hedge closure notification via gRPC: {error}");
-            }
-        }
-        catch (Exception ex)
-        {
-            LogAndPrint($"ERROR: Exception sending hedge closure notification via gRPC: {ex.Message}");
-        }
-    }
-    
-    
-    /// <summary>
-    /// Get current market price for an instrument - kept locally as it's used for other purposes too
-    /// </summary>
     private double GetCurrentPrice(Instrument instrument)
     {
         if (instrument == null) return 0;

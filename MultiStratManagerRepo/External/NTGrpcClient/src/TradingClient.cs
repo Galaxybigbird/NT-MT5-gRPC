@@ -349,6 +349,12 @@ namespace NTGrpcClient
             var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             
+            var instrument = GetStringValue(root, "instrument");
+            if (string.IsNullOrWhiteSpace(instrument))
+            {
+                instrument = GetStringValue(root, "instrument_name");
+            }
+
             return new Trade
             {
                 Id = GetStringValue(root, "id"),
@@ -362,16 +368,20 @@ namespace NTGrpcClient
                 OrderType = GetStringValue(root, "order_type"),
                 MeasurementPips = GetInt32Value(root, "measurement_pips"),
                 RawMeasurement = GetDoubleValue(root, "raw_measurement"),
-                Instrument = GetStringValue(root, "instrument_name"),
+                Instrument = instrument,
                 AccountName = GetStringValue(root, "account_name"),
                 NtBalance = GetDoubleValue(root, "nt_balance"),
                 NtDailyPnl = GetDoubleValue(root, "nt_daily_pnl"),
                 NtTradeResult = GetStringValue(root, "nt_trade_result"),
                 NtSessionTrades = GetInt32Value(root, "nt_session_trades"),
-                NtPointsPer1KLoss = GetDoubleValue(root, "nt_points_per_1k_loss")
+                Mt5Ticket = GetUInt64Value(root, "mt5_ticket"),
+                NtPointsPer1KLoss = GetDoubleValue(root, "nt_points_per_1k_loss"),
+                EventType = GetStringValue(root, "event_type"),
+                ElasticCurrentProfit = GetDoubleValue(root, "elastic_current_profit"),
+                ElasticProfitLevel = GetInt32Value(root, "elastic_profit_level")
             };
         }
-        
+
         private string ProtoTradeToJson(Trade trade)
         {
             var data = new
@@ -387,6 +397,7 @@ namespace NTGrpcClient
                 order_type = trade.OrderType,
                 measurement_pips = trade.MeasurementPips,
                 raw_measurement = trade.RawMeasurement,
+                instrument = trade.Instrument,
                 instrument_name = trade.Instrument,
                 account_name = trade.AccountName,
                 nt_balance = trade.NtBalance,
@@ -394,9 +405,12 @@ namespace NTGrpcClient
                 nt_trade_result = trade.NtTradeResult,
                 nt_session_trades = trade.NtSessionTrades,
                 mt5_ticket = trade.Mt5Ticket,
-                nt_points_per_1k_loss = trade.NtPointsPer1KLoss
+                nt_points_per_1k_loss = trade.NtPointsPer1KLoss,
+                event_type = trade.EventType,
+                elastic_current_profit = trade.ElasticCurrentProfit,
+                elastic_profit_level = trade.ElasticProfitLevel
             };
-            
+
             return JsonSerializer.Serialize(data);
         }
         

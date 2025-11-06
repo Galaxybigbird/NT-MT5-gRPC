@@ -54,6 +54,17 @@ message Trade {
   uint64 mt5_ticket = 18;         // MT5 position ticket number for CLOSE_HEDGE targeting
   // Elastic sizing hint: NT points that correspond to $1000 loss for 1 contract on NT
   double nt_points_per_1k_loss = 19; // added 2025-08
+
+  // Optional event enrichment so EA can branch on elastic/trailing without synthetic trades
+  string event_type = 20;                // e.g., "elastic_ping"
+  double elastic_current_profit = 21;    // forwarded for elastic events
+  int32 elastic_profit_level = 22;       // forwarded for elastic events
+  string lifecycle_event = 23;           // "OPEN"|"PARTIAL"|"CLOSED"|"HEDGE_SET_TARGET"
+  double remaining_quantity = 24;        // Remaining NT quantity after partials
+  uint64 seq = 25;                       // Monotonic per-base_id sequence
+  uint64 epoch = 26;                     // Process restart epoch to discard stale commands
+  string direction = 27;                 // "LONG" or "SHORT"
+  double target_lots = 28;               // Desired hedge lots (for HEDGE_SET_TARGET)
 }
 
 // Hedge closure notification

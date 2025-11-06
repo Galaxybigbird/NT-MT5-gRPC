@@ -139,10 +139,10 @@ func TestBaseIdAlignmentAffectsPending_CrossRef(t *testing.T) {
 		t.Fatalf("expected no base_id-only trade enqueued; pending-only policy")
 	}
 	a.mt5TicketMux.RLock()
-	pend := a.pendingCloses["TRD_B"]
+	pend := a.pendingCloses["TRD_A"]
 	a.mt5TicketMux.RUnlock()
 	if len(pend) != 1 || pend[0].qty != 1 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected pending recorded under TRD_B with qty=1; got: %+v", pend)
+		t.Fatalf("expected pending recorded under TRD_A with qty=1; got: %+v", pend)
 	}
 }
 
@@ -173,9 +173,9 @@ func TestBaseIdAlignmentAffectsPending_ByInstrumentAccount(t *testing.T) {
 		t.Fatalf("expected no base_id-only trade enqueued; pending-only policy")
 	}
 	a.mt5TicketMux.RLock()
-	pend := a.pendingCloses["TRD_B"]
+	pend := a.pendingCloses["TRD_A"]
 	a.mt5TicketMux.RUnlock()
 	if len(pend) != 1 || pend[0].qty != 1 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected pending recorded under TRD_B with qty=1; got: %+v", pend)
+		t.Fatalf("expected pending recorded under TRD_A with qty=1; got: %+v", pend)
 	}
 }

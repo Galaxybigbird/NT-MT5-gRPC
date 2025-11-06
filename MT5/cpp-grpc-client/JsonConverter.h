@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <cstdint>
 #include <nlohmann/json.hpp>
 
 // Forward declaration
@@ -24,6 +25,7 @@ public:
     static std::string GetStringField(const nlohmann::json& json_obj, const std::string& field, const std::string& default_val = "");
     static double GetDoubleField(const nlohmann::json& json_obj, const std::string& field, double default_val = 0.0);
     static int GetIntField(const nlohmann::json& json_obj, const std::string& field, int default_val = 0);
+    static uint64_t GetUInt64Field(const nlohmann::json& json_obj, const std::string& field, uint64_t default_val = 0);
     static bool GetBoolField(const nlohmann::json& json_obj, const std::string& field, bool default_val = false);
     
     // Create standardized error responses

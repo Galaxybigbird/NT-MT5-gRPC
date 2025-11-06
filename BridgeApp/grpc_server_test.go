@@ -220,7 +220,7 @@ func TestGRPCServer(t *testing.T) {
 	// Test ElasticUpdate
 	t.Run("SubmitElasticUpdate", func(t *testing.T) {
 		update := &trading.ElasticHedgeUpdate{
-			EventType:     "elastic_hedge_update",
+		EventType:     "elastic_ping",
 			Action:        "update",
 			BaseId:        "base-001",
 			CurrentProfit: 500.0,

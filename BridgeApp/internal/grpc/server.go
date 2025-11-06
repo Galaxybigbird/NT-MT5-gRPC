@@ -637,18 +637,18 @@ func (s *Server) NotifyHedgeClose(ctx context.Context, req *trading.HedgeCloseNo
 
 // SubmitElasticUpdate handles elastic hedge updates
 func (s *Server) SubmitElasticUpdate(ctx context.Context, req *trading.ElasticHedgeUpdate) (*trading.GenericResponse, error) {
-	log.Printf("gRPC: Received elastic update - BaseID: %s, ProfitLevel: %d",
+	log.Printf("gRPC: Received elastic ping - BaseID: %s, ProfitLevel: %d",
 		req.BaseId, req.ProfitLevel)
 
 	// Convert and handle update
 	update := convertProtoToInternalElasticUpdate(req)
 	err := s.app.HandleElasticUpdate(update)
 	if err != nil {
-		log.Printf("gRPC: Failed to handle elastic update: %v", err)
+		log.Printf("gRPC: Failed to handle elastic ping: %v", err)
 		return &trading.GenericResponse{
 			Status:  "error",
-			Message: "Failed to handle elastic update: " + err.Error(),
-		}, status.Error(codes.Internal, "Failed to process elastic update")
+			Message: "Failed to handle elastic ping: " + err.Error(),
+		}, status.Error(codes.Internal, "Failed to process elastic ping")
 	}
 
 	return &trading.GenericResponse{
@@ -1224,7 +1224,7 @@ func (s *Server) StatusStream(stream trading.StreamingService_StatusStreamServer
 
 // ElasticUpdatesStream handles streaming elastic hedge updates
 func (s *Server) ElasticUpdatesStream(stream trading.StreamingService_ElasticUpdatesStreamServer) error {
-	log.Println("gRPC: New elastic updates stream connected")
+	log.Println("gRPC: New elastic ping stream connected")
 
 	for {
 		update, err := stream.Recv()
@@ -1233,12 +1233,12 @@ func (s *Server) ElasticUpdatesStream(stream trading.StreamingService_ElasticUpd
 			return err
 		}
 
-		// Process elastic update
+		// Process elastic ping
 		internalUpdate := convertProtoToInternalElasticUpdate(update)
 		if err := s.app.HandleElasticUpdate(internalUpdate); err != nil {
 			response := &trading.GenericResponse{
 				Status:  "error",
-				Message: "Failed to process elastic update: " + err.Error(),
+				Message: "Failed to process elastic ping: " + err.Error(),
 			}
 			if err := stream.Send(response); err != nil {
 				return err

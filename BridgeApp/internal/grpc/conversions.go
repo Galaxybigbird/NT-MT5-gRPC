@@ -8,25 +8,34 @@ import (
 
 // Import the Trade type from main package
 type Trade struct {
-	ID                string    `json:"id"`
-	BaseID            string    `json:"base_id"`
-	Time              time.Time `json:"time"`
-	Action            string    `json:"action"`
-	Quantity          float64   `json:"quantity"`
-	Price             float64   `json:"price"`
-	TotalQuantity     int       `json:"total_quantity"`
-	ContractNum       int       `json:"contract_num"`
-	OrderType         string    `json:"order_type"`
-	MeasurementPips   int       `json:"measurement_pips"`
-	RawMeasurement    float64   `json:"raw_measurement"`
-	Instrument        string    `json:"instrument"`
-	AccountName       string    `json:"account_name"`
-	NTBalance         float64   `json:"nt_balance,omitempty"`
-	NTDailyPnL        float64   `json:"nt_daily_pnl,omitempty"`
-	NTTradeResult     string    `json:"nt_trade_result,omitempty"`
-	NTSessionTrades   int       `json:"nt_session_trades,omitempty"`
-	MT5Ticket         uint64    `json:"mt5_ticket"`
-	NTPointsPer1kLoss float64   `json:"nt_points_per_1k_loss,omitempty"`
+	ID                   string    `json:"id"`
+	BaseID               string    `json:"base_id"`
+	Time                 time.Time `json:"time"`
+	Action               string    `json:"action"`
+	Quantity             float64   `json:"quantity"`
+	Price                float64   `json:"price"`
+	TotalQuantity        int       `json:"total_quantity"`
+	ContractNum          int       `json:"contract_num"`
+	OrderType            string    `json:"order_type"`
+	MeasurementPips      int       `json:"measurement_pips"`
+	RawMeasurement       float64   `json:"raw_measurement"`
+	Instrument           string    `json:"instrument"`
+	AccountName          string    `json:"account_name"`
+	NTBalance            float64   `json:"nt_balance,omitempty"`
+	NTDailyPnL           float64   `json:"nt_daily_pnl,omitempty"`
+	NTTradeResult        string    `json:"nt_trade_result,omitempty"`
+	NTSessionTrades      int       `json:"nt_session_trades,omitempty"`
+	MT5Ticket            uint64    `json:"mt5_ticket"`
+	NTPointsPer1kLoss    float64   `json:"nt_points_per_1k_loss,omitempty"`
+	EventType            string    `json:"event_type,omitempty"`
+	ElasticProfitLevel   int32     `json:"elastic_profit_level,omitempty"`
+	ElasticCurrentProfit float64   `json:"elastic_current_profit,omitempty"`
+	LifecycleEvent       string    `json:"lifecycle_event,omitempty"`
+	RemainingQuantity    float64   `json:"remaining_quantity,omitempty"`
+	Seq                  uint64    `json:"seq,omitempty"`
+	Epoch                uint64    `json:"epoch,omitempty"`
+	Direction            string    `json:"direction,omitempty"`
+	TargetLots           float64   `json:"target_lots,omitempty"`
 }
 
 // Internal struct definitions that match the app.go structures
@@ -56,6 +65,12 @@ type InternalTrade struct {
 	EventType            string  `json:"event_type,omitempty"`
 	ElasticCurrentProfit float64 `json:"elastic_current_profit,omitempty"`
 	ElasticProfitLevel   int32   `json:"elastic_profit_level,omitempty"`
+	LifecycleEvent       string  `json:"lifecycle_event,omitempty"`
+	RemainingQuantity    float64 `json:"remaining_quantity,omitempty"`
+	Seq                  uint64  `json:"seq,omitempty"`
+	Epoch                uint64  `json:"epoch,omitempty"`
+	Direction            string  `json:"direction,omitempty"`
+	TargetLots           float64 `json:"target_lots,omitempty"`
 }
 
 type InternalHedgeCloseNotification struct {
@@ -131,6 +146,12 @@ func convertProtoToInternalTrade(proto *trading.Trade) *InternalTrade {
 		EventType:            proto.GetEventType(),
 		ElasticCurrentProfit: proto.GetElasticCurrentProfit(),
 		ElasticProfitLevel:   proto.GetElasticProfitLevel(),
+		LifecycleEvent:       proto.GetLifecycleEvent(),
+		RemainingQuantity:    proto.GetRemainingQuantity(),
+		Seq:                  proto.GetSeq(),
+		Epoch:                proto.GetEpoch(),
+		Direction:            proto.GetDirection(),
+		TargetLots:           proto.GetTargetLots(),
 	}
 }
 
@@ -159,6 +180,12 @@ func ConvertInternalToProtoTrade(internal *InternalTrade) *trading.Trade {
 		EventType:            internal.EventType,
 		ElasticCurrentProfit: internal.ElasticCurrentProfit,
 		ElasticProfitLevel:   internal.ElasticProfitLevel,
+		LifecycleEvent:       internal.LifecycleEvent,
+		RemainingQuantity:    internal.RemainingQuantity,
+		Seq:                  internal.Seq,
+		Epoch:                internal.Epoch,
+		Direction:            internal.Direction,
+		TargetLots:           internal.TargetLots,
 	}
 }
 

@@ -120,6 +120,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="MultiStratManager.cs" />
+    <Compile Include="TradeSyncService.cs" />
     <Compile Include="UIForManager.cs" />
   </ItemGroup>
   <ItemGroup>

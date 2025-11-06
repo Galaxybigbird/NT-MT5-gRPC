@@ -24,6 +24,12 @@ export namespace main {
 	    event_type?: string;
 	    elastic_current_profit?: number;
 	    elastic_profit_level?: number;
+	    lifecycle_event?: string;
+	    remaining_quantity?: number;
+	    seq?: number;
+	    epoch?: number;
+	    direction?: string;
+	    target_lots?: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Trade(source);
@@ -53,6 +59,12 @@ export namespace main {
 	        this.event_type = source["event_type"];
 	        this.elastic_current_profit = source["elastic_current_profit"];
 	        this.elastic_profit_level = source["elastic_profit_level"];
+	        this.lifecycle_event = source["lifecycle_event"];
+	        this.remaining_quantity = source["remaining_quantity"];
+	        this.seq = source["seq"];
+	        this.epoch = source["epoch"];
+	        this.direction = source["direction"];
+	        this.target_lots = source["target_lots"];
 	    }
 	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {

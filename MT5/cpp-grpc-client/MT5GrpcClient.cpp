@@ -584,6 +584,7 @@ MT5_GRPC_API int __stdcall GrpcNotifyHedgeClose(const wchar_t* notification_json
         notification.set_closed_hedge_action(notification_data.value("closed_hedge_action", ""));
         notification.set_timestamp(notification_data.value("timestamp", ""));
         notification.set_closure_reason(notification_data.value("closure_reason", ""));
+        notification.set_mt5_ticket(notification_data.value("mt5_ticket", static_cast<uint64_t>(0)));
         
         GenericResponse response;
         Status status = g_client_state.trading_stub_->NotifyHedgeClose(&context, notification, &response);
@@ -624,7 +625,7 @@ MT5_GRPC_API int __stdcall GrpcSubmitElasticUpdate(const wchar_t* update_json) {
         return status.ok() && response.status() == "success" ? ERROR_SUCCESS : ERROR_CONNECTION_FAILED;
         
     } catch (const std::exception& e) {
-        g_client_state.SetLastError("Submit elastic update exception: " + std::string(e.what()));
+        g_client_state.SetLastError("Submit elastic ping exception: " + std::string(e.what()));
         return ERROR_SERIALIZATION;
     }
 }

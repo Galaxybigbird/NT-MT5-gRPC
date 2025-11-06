@@ -1398,7 +1398,7 @@ void ProcessTradeFromJson(const string& trade_json)
 
     // Special-case: handle elastic/trailing events delivered over the trade stream (Option B)
     // Expecting JSON fields:
-    //  - elastic_hedge_update: base_id, elastic_current_profit/current_profit, elastic_profit_level/profit_level
+    //  - elastic_ping: base_id, elastic_current_profit/current_profit, elastic_profit_level/profit_level
     //  - trailing_stop_update: base_id, new_stop_price[, current_price]
     string evtType = GetJSONStringValue(trade_json, "\"event_type\"");
     // Log event_type presence and a short JSON snippet for diagnostics
@@ -1407,7 +1407,7 @@ void ProcessTradeFromJson(const string& trade_json)
         string __log=""; StringConcatenate(__log, "EVENT_DEBUG: evtType='", evtType, "' base_id='", baseIdFromJson, "' json=", __snippet);
         Print(__log); ULogInfoPrint(__log);
     }
-    if (evtType == "elastic_hedge_update")
+    if (evtType == "elastic_ping")
     {
         string evtBaseId = GetJSONStringValue(trade_json, "\"base_id\"");
         if(StringLen(evtBaseId) == 0) evtBaseId = baseIdFromJson; // fallback to previously parsed base id
@@ -1418,7 +1418,7 @@ void ProcessTradeFromJson(const string& trade_json)
         int evtProfitLevel = GetJSONIntValue(trade_json, "elastic_profit_level", INT_MIN);
         if(evtProfitLevel == INT_MIN)
             evtProfitLevel = GetJSONIntValue(trade_json, "profit_level", 0);
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Received elastic update for BaseID: ", evtBaseId, ", Profit: $", DoubleToString(evtProfit, 2), ", Level: ", (string)IntegerToString(evtProfitLevel)); Print(__log); ULogInfoPrint(__log); }
+        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Received elastic ping for BaseID: ", evtBaseId, ", Profit: $", DoubleToString(evtProfit, 2), ", Level: ", (string)IntegerToString(evtProfitLevel)); Print(__log); ULogInfoPrint(__log); }
         ProcessElasticHedgeUpdate(evtBaseId, evtProfit, evtProfitLevel);
         // Do not process further as a regular trade
         return;
@@ -1531,222 +1531,259 @@ void ProcessTradeFromJson(const string& trade_json)
     CleanupOldOccurrences(900);
 }
 
+//──────────────────────────────────────────────────────────────────────────────
+// Deterministic hedge-closing helpers (strategy-owned trade IDs)
+//──────────────────────────────────────────────────────────────────────────────
+bool TryResolveBaseIdForTicket(ulong ticket, string &outBaseId)
+{
+    outBaseId = "";
+    if(g_map_position_id_to_base_id != NULL)
+    {
+        string mapped = "";
+        if(g_map_position_id_to_base_id.TryGetValue((long)ticket, mapped) && mapped != "")
+        {
+            outBaseId = mapped;
+            return true;
+        }
+    }
+
+    for(int i = 0; i < ArraySize(g_open_mt5_pos_ids); i++)
+    {
+        if((ulong)g_open_mt5_pos_ids[i] == ticket)
+        {
+            outBaseId = g_open_mt5_base_ids[i];
+            return (outBaseId != "");
+        }
+    }
+    return false;
+}
+
+void RemoveOpenPositionTracking(ulong ticket)
+{
+    int size = ArraySize(g_open_mt5_pos_ids);
+    if(size <= 0)
+        return;
+
+    for(int i = 0; i < size; i++)
+    {
+        if((ulong)g_open_mt5_pos_ids[i] == ticket)
+        {
+            int last = size - 1;
+            if(i != last)
+            {
+                g_open_mt5_pos_ids[i] = g_open_mt5_pos_ids[last];
+                g_open_mt5_base_ids[i] = g_open_mt5_base_ids[last];
+                g_open_mt5_nt_symbols[i] = g_open_mt5_nt_symbols[last];
+                g_open_mt5_nt_accounts[i] = g_open_mt5_nt_accounts[last];
+                g_open_mt5_actions[i] = g_open_mt5_actions[last];
+                g_open_mt5_original_nt_actions[i] = g_open_mt5_original_nt_actions[last];
+                g_open_mt5_original_nt_quantities[i] = g_open_mt5_original_nt_quantities[last];
+            }
+            ArrayResize(g_open_mt5_pos_ids, last);
+            ArrayResize(g_open_mt5_base_ids, last);
+            ArrayResize(g_open_mt5_nt_symbols, last);
+            ArrayResize(g_open_mt5_nt_accounts, last);
+            ArrayResize(g_open_mt5_actions, last);
+            ArrayResize(g_open_mt5_original_nt_actions, last);
+            ArrayResize(g_open_mt5_original_nt_quantities, last);
+            break;
+        }
+    }
+}
+
+void AppendTicketEntry(ulong &tickets[], datetime &openTimes[], double &volumes[], ulong ticket, datetime openTime, double volume)
+{
+    int newSize = ArraySize(tickets) + 1;
+    ArrayResize(tickets, newSize);
+    tickets[newSize - 1] = ticket;
+    ArrayResize(openTimes, newSize);
+    openTimes[newSize - 1] = openTime;
+    ArrayResize(volumes, newSize);
+    volumes[newSize - 1] = volume;
+}
+
+int CollectTicketsForBaseId(const string &baseId, ulong &tickets[], datetime &openTimes[], double &volumes[])
+{
+    ArrayResize(tickets, 0);
+    ArrayResize(openTimes, 0);
+    ArrayResize(volumes, 0);
+
+    if(baseId == "")
+        return 0;
+
+    int totalPositions = PositionsTotal();
+    for(int i = 0; i < totalPositions; i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(ticket == 0)
+            continue;
+        if(!PositionSelectByTicket(ticket))
+            continue;
+
+        string mappedBaseId = "";
+        TryResolveBaseIdForTicket(ticket, mappedBaseId);
+        if(mappedBaseId != baseId)
+            continue;
+
+        datetime openTime = (datetime)PositionGetInteger(POSITION_TIME);
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        AppendTicketEntry(tickets, openTimes, volumes, ticket, openTime, volume);
+    }
+    return ArraySize(tickets);
+}
+
+void SortTicketsByOpenTime(datetime &openTimes[], ulong &tickets[], double &volumes[])
+{
+    int count = ArraySize(openTimes);
+    for(int i = 0; i < count - 1; i++)
+    {
+        int minIdx = i;
+        for(int j = i + 1; j < count; j++)
+        {
+            if(openTimes[j] < openTimes[minIdx])
+                minIdx = j;
+        }
+        if(minIdx != i)
+        {
+            datetime tmpTime = openTimes[i];
+            openTimes[i] = openTimes[minIdx];
+            openTimes[minIdx] = tmpTime;
+
+            ulong tmpTicket = tickets[i];
+            tickets[i] = tickets[minIdx];
+            tickets[minIdx] = tmpTicket;
+
+            double tmpVol = volumes[i];
+            volumes[i] = volumes[minIdx];
+            volumes[minIdx] = tmpVol;
+        }
+    }
+}
+
+bool CloseHedgeTicket(const string &baseId, ulong ticket, double &closedVolume, const string &reason)
+{
+    closedVolume = 0.0;
+    if(ticket == 0)
+        return false;
+
+    if(!PositionSelectByTicket(ticket))
+    {
+        { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_WARN: Ticket ", ticket, " could not be selected for base_id ", baseId); Print(__log); ULogWarnPrint(__log); }
+        return false;
+    }
+
+    closedVolume = PositionGetDouble(POSITION_VOLUME);
+
+    trade.SetExpertMagicNumber(MagicNumber);
+    trade.SetDeviationInPoints(Slippage);
+
+    bool success = trade.PositionClose(ticket);
+    if(success)
+    {
+        SubmitTradeResult("success", ticket, closedVolume, true, baseId);
+        NotifyMT5PositionClosure(baseId, ticket, closedVolume, reason);
+        if(g_map_position_id_to_base_id != NULL)
+            g_map_position_id_to_base_id.Remove((long)ticket);
+        RemoveOpenPositionTracking(ticket);
+        return true;
+    }
+
+    int closeError = GetLastError();
+    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_ERROR: Failed to close ticket ", ticket, " for base_id ", baseId, " (error ", closeError, ")"); Print(__log); ULogErrorPrint(__log); }
+    SubmitTradeResult("failed", ticket, closedVolume, true, baseId);
+    return false;
+}
+
+int ComputeRequestedClosures(const string &trade_json)
+{
+    double requested = GetJSONDoubleValue(trade_json, "closed_hedge_quantity", -1.0);
+    if(requested < 0.0)
+        requested = GetJSONDoubleValue(trade_json, "quantity", -1.0);
+    if(requested <= 0.0)
+        return 1;
+    int contracts = (int)MathRound(requested);
+    if(contracts <= 0)
+        contracts = 1;
+    return contracts;
+}
+
 void ProcessCloseHedgeAction(const string& baseId, const string& trade_json, ulong mt5Ticket = 0)
 {
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Processing CLOSE_HEDGE for base_id: ", baseId, ", mt5Ticket: ", mt5Ticket); Print(__log); ULogInfoPrint(__log); }
-
-    bool hedgeFound = false;
-    int totalPositions = PositionsTotal();
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Total positions to search: ", totalPositions); Print(__log); ULogInfoPrint(__log); }
-
-    // If we have an MT5 ticket, try to close by ticket first (single specific position)
-    if(mt5Ticket > 0) {
-        bool selected = false;
-        for(int attempt = 0; attempt < 3 && !selected; attempt++) {
-            selected = PositionSelectByTicket(mt5Ticket);
-            if(!selected) Sleep(50);
-        }
-        if(selected) {
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Found position by ticket #", mt5Ticket, " with volume ", volume); Print(__log); ULogInfoPrint(__log); }
-            if(trade.PositionClose(mt5Ticket)) {
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: Successfully closed hedge position by ticket #", mt5Ticket, " for base_id: ", baseId); Print(__log); ULogInfoPrint(__log); }
-                SubmitTradeResult("success", mt5Ticket, volume, true, baseId);
-                if(g_map_position_id_to_base_id != NULL) {
-                    string _base = "";
-                    g_map_position_id_to_base_id.TryGetValue(mt5Ticket, _base);
-                    if(_base != "") { g_map_position_id_to_base_id.Remove(mt5Ticket); }
-                }
-            } else {
-                int closeError = GetLastError();
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: Failed to close position by ticket #", mt5Ticket, " - Error: ", closeError); Print(__log); ULogErrorPrint(__log); }
-                SubmitTradeResult("failed", mt5Ticket, volume, true, baseId);
-            }
-            return; // With explicit ticket we don't attempt further matching
-        } else {
-            // Idempotent closure: If the ticket can't be selected, treat as already closed.
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: Ticket #", mt5Ticket, " not found on CLOSE_HEDGE — treating as already closed for base_id: ", baseId); Print(__log); ULogInfoPrint(__log); }
-            // Report success to bridge so downstream mapping/pruning completes cleanly.
-            SubmitTradeResult("success", mt5Ticket, 0.0, true, baseId);
-            // Also emit a hedge close notification with an explicit reason to aid correlation.
-            NotifyMT5PositionClosure(baseId, mt5Ticket, 0.0, "already_closed");
-            return; // Do not attempt broad closure to avoid accidental closes
-        }
+    string canonicalBaseId = baseId;
+    if(canonicalBaseId == "" && mt5Ticket > 0)
+    {
+        string resolved = "";
+        if(TryResolveBaseIdForTicket(mt5Ticket, resolved))
+            canonicalBaseId = resolved;
     }
 
-    // Fallback to comment-based matching
-    // Optional: honor total_quantity from JSON to cap number of closures for this base
-    int capClosures = GetJSONIntValue(trade_json, "total_quantity", -1);
+    if(canonicalBaseId == "")
+    {
+        { string __log="ACHM_CLOSURE_WARN: CLOSE_HEDGE missing base_id and unable to resolve"; Print(__log); ULogWarnPrint(__log); }
+        return;
+    }
+
+    string closureReason = GetJSONStringValue(trade_json, "\"closure_reason\"");
+    if(closureReason == "")
+        closureReason = "NT_close_request";
+
+    int requestedClosures = ComputeRequestedClosures(trade_json);
+    if(requestedClosures <= 0)
+        requestedClosures = 1;
+
+    if(mt5Ticket > 0)
+    {
+        double closedVol = 0.0;
+        if(CloseHedgeTicket(canonicalBaseId, mt5Ticket, closedVol, closureReason))
+        {
+            { string __log=StringFormat("ACHM_CLOSURE: Closed hedge via ticket %I64u for base_id %s (vol=%.2f)", (long)mt5Ticket, canonicalBaseId, closedVol); Print(__log); ULogInfoPrint(__log); }
+        }
+        else
+        {
+            { string __log=StringFormat("ACHM_CLOSURE_WARN: Ticket %I64u could not be closed for base_id %s", (long)mt5Ticket, canonicalBaseId); Print(__log); ULogWarnPrint(__log); }
+        }
+
+        ulong remainingTickets[]; datetime remainingTimes[]; double remainingVolumes[];
+        if(CollectTicketsForBaseId(canonicalBaseId, remainingTickets, remainingTimes, remainingVolumes) == 0)
+            RemoveElasticPosition(canonicalBaseId);
+        return;
+    }
+
+    ulong tickets[]; datetime openTimes[]; double volumes[];
+    int available = CollectTicketsForBaseId(canonicalBaseId, tickets, openTimes, volumes);
+    if(available == 0)
+    {
+        { string __log=StringFormat("ACHM_CLOSURE_WARN: No open hedges found for base_id %s to satisfy CLOSE_HEDGE", canonicalBaseId); Print(__log); ULogWarnPrint(__log); }
+        SubmitTradeResult("not_found", 0, 0.0, true, canonicalBaseId);
+        return;
+    }
+
+    SortTicketsByOpenTime(openTimes, tickets, volumes);
+
+    int toClose = requestedClosures;
+    if(toClose > available)
+        toClose = available;
+
     int closedCount = 0;
-
-    for(int i = totalPositions - 1; i >= 0; i--) {
-        ulong idxTicket = PositionGetTicket(i);
-        if(idxTicket == 0) {
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position ", i, ": Failed to get ticket, skipping"); Print(__log); ULogWarnPrint(__log); }
-            continue;
-        }
-        if(!PositionSelectByTicket(idxTicket)) {
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position ", i, ": Failed to select by ticket ", idxTicket, ", skipping"); Print(__log); ULogWarnPrint(__log); }
-            continue;
-        }
-        long positionTicket = PositionGetInteger(POSITION_TICKET);
-        string comment = PositionGetString(POSITION_COMMENT);
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position ", i, ": Ticket #", positionTicket, ", Comment: '", comment, "'"); Print(__log); ULogInfoPrint(__log); }
-
-        // Check if this position matches the base_id (flexible matching for truncated comments)
-        bool commentMatches = false;
-
-        // First try exact match
-        if(StringFind(comment, baseId) >= 0) {
-            commentMatches = true;
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " EXACT match found"); Print(__log); ULogInfoPrint(__log); }
-        }
-        // MT5 truncates comments at ~31 chars, so we need smarter matching
-        else {
-            // Extract the timestamp portion from both baseId and comment
-            // BaseId format: TRADE_YYYYMMDD_HHMMSS_XXX_XXXX
-            // Comment format: NT_Hedge_DIR_TRADE_YYYYMMDD_HHM... (truncated)
-
-            // Check if comment contains the hedge prefix and extract the trade portion
-            string buyPrefix = "NT_Hedge_BUY_";
-            string sellPrefix = "NT_Hedge_SELL_";
-            string tradePortionComment = "";
-            if(StringFind(comment, buyPrefix) == 0) {
-                tradePortionComment = StringSubstr(comment, StringLen(buyPrefix));
-            } else if(StringFind(comment, sellPrefix) == 0) {
-                tradePortionComment = StringSubstr(comment, StringLen(sellPrefix));
-            }
-
-            if(tradePortionComment != "") {
-                // IMPROVED MATCHING: Handle comment truncation more precisely
-                // Instead of prefix matching, find the longest exact match possible
-
-                int maxLen = MathMin(StringLen(baseId), StringLen(tradePortionComment));
-                bool exactMatch = false;
-
-                // Check for exact match up to truncation point
-                if(maxLen > 0 && StringSubstr(baseId, 0, maxLen) == tradePortionComment) {
-                    exactMatch = true;
-                }
-
-                if(exactMatch) {
-                    // Additional validation: ensure this is the MOST specific match
-                    // Count how many positions would match this truncated comment
-                    int matchCount = 0;
-                    string currentSymbol = PositionGetString(POSITION_SYMBOL);
-
-                    for(int validatePos = 0; validatePos < PositionsTotal(); validatePos++) {
-                        ulong vpt = PositionGetTicket(validatePos);
-                        if(vpt == 0 || !PositionSelectByTicket(vpt)) continue;
-                        if(PositionGetString(POSITION_SYMBOL) == currentSymbol) {
-                            string validateComment = PositionGetString(POSITION_COMMENT);
-                            string validateTradePortionComment = "";
-
-                            if(StringFind(validateComment, buyPrefix) == 0) {
-                                validateTradePortionComment = StringSubstr(validateComment, StringLen(buyPrefix));
-                            } else if(StringFind(validateComment, sellPrefix) == 0) {
-                                validateTradePortionComment = StringSubstr(validateComment, StringLen(sellPrefix));
-                            }
-
-                            if(validateTradePortionComment == tradePortionComment) {
-                                matchCount++;
-                            }
-                        }
-                    }
-
-                    if(matchCount == 1) {
-                        // Unique match - safe to close
-                        commentMatches = true;
-                        { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " UNIQUE match found - comment: '", tradePortionComment, "' matches baseId: '", baseId, "'"); Print(__log); ULogInfoPrint(__log); }
-                    } else {
-                        // Ambiguous match - need more precision
-                        { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " AMBIGUOUS match (", matchCount, " positions) - comment: '", tradePortionComment, "' - SKIPPING for safety"); Print(__log); ULogWarnPrint(__log); }
-
-                        // Try to find a more specific match using position open time
-                        datetime posOpenTime = (datetime)PositionGetInteger(POSITION_TIME);
-                        string baseIdTimeStr = "";
-
-                        // Extract timestamp from baseId: TRADE_20250809_001417_045_5489
-                        if(StringLen(baseId) >= 19) {
-                            string dateStr = StringSubstr(baseId, 6, 8);  // 20250809
-                            string timeStr = StringSubstr(baseId, 15, 6); // 001417
-                            baseIdTimeStr = dateStr + timeStr; // 20250809001417
-                        }
-
-                        // Convert to comparable format
-                        MqlDateTime posTime;
-                        TimeToStruct(posOpenTime, posTime);
-                        string posTimeStr = StringFormat("%04d%02d%02d%02d%02d%02d",
-                            posTime.year, posTime.mon, posTime.day,
-                            posTime.hour, posTime.min, posTime.sec);
-
-                        if(StringLen(baseIdTimeStr) >= 14 && StringLen(posTimeStr) >= 14) {
-                            // Compare timestamps (within 5 seconds tolerance)
-                            long baseIdTime = StringToInteger(StringSubstr(baseIdTimeStr, 0, 14));
-                            long posTime_int = StringToInteger(StringSubstr(posTimeStr, 0, 14));
-
-                            if(MathAbs(baseIdTime - posTime_int) <= 5) { // 5 second tolerance
-                                commentMatches = true;
-                                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " TIME-VALIDATED match - baseId time: ", baseIdTimeStr, ", pos time: ", posTimeStr); Print(__log); ULogInfoPrint(__log); }
-                            }
-                        }
-                    }
-                } else {
-                    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " NO exact match - comment: '", tradePortionComment, "', baseId: '", baseId, "'"); Print(__log); ULogInfoPrint(__log); }
-                }
-            }
-
-            if(!commentMatches) {
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Position #", positionTicket, " NO MATCH - Comment: '", comment, "', BaseId: '", baseId, "'"); Print(__log); ULogInfoPrint(__log); }
-            }
-        }
-
-        if(commentMatches) {
-            hedgeFound = true;
-            // Optional cap by total_quantity
-            if(capClosures > 0 && closedCount >= capClosures) {
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Reached closure cap ", capClosures, " for base_id: ", baseId); Print(__log); ULogInfoPrint(__log); }
-                break;
-            }
-
-            // Safety: match symbol to current chart symbol to avoid cross-symbol closes
-            string sym = PositionGetString(POSITION_SYMBOL);
-            if(sym != _Symbol) {
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Skipping position #", positionTicket, " due to symbol mismatch: ", sym, " != ", _Symbol); Print(__log); ULogWarnPrint(__log); }
-                continue;
-            }
-
-            double volume = PositionGetDouble(POSITION_VOLUME);
-            { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Attempting to close position #", positionTicket, " with volume ", volume); Print(__log); ULogInfoPrint(__log); }
-            if(trade.PositionClose(positionTicket)) {
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: Successfully closed hedge position #", positionTicket, " for base_id: ", baseId); Print(__log); ULogInfoPrint(__log); }
-                SubmitTradeResult("success", positionTicket, volume, true, baseId);
-                if(g_map_position_id_to_base_id != NULL) {
-                    string _base = "";
-                    g_map_position_id_to_base_id.TryGetValue(positionTicket, _base);
-                    if(_base != "") { g_map_position_id_to_base_id.Remove(positionTicket); }
-                }
-                closedCount++;
-                // Continue searching to close additional matching positions (multi-hedge case)
-                continue;
-            } else {
-                int closeError = GetLastError();
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: Failed to close hedge position #", positionTicket, " for base_id: ", baseId, " - Error: ", closeError); Print(__log); ULogErrorPrint(__log); }
-                { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Close failure details - Volume: ", volume, ", Symbol: ", _Symbol, ", Error: ", closeError); Print(__log); ULogErrorPrint(__log); }
-                SubmitTradeResult("failed", positionTicket, volume, true, baseId);
-                // Even on failure, attempt remaining matches
-                continue;
-            }
-        }
+    for(int i = 0; i < toClose; i++)
+    {
+        double closedVol = 0.0;
+        if(CloseHedgeTicket(canonicalBaseId, tickets[i], closedVol, closureReason))
+            closedCount++;
     }
 
-    if(!hedgeFound) {
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE: No hedge position found for base_id: ", baseId); Print(__log); ULogWarnPrint(__log); }
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] SUMMARY - Searched ", totalPositions, " positions, none matched base_id: '", baseId, "'"); Print(__log); ULogWarnPrint(__log); }
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Expected comment format: 'NT_Hedge_BUY_", baseId, "' or 'NT_Hedge_SELL_", baseId, "'"); Print(__log); ULogInfoPrint(__log); }
-    } else {
-    { string __log=""; StringConcatenate(__log, "ACHM_CLOSURE_DEBUG: [ProcessCloseHedgeAction] Successfully found and processed ", closedCount, " hedge position(s) for base_id: ", baseId); Print(__log); ULogInfoPrint(__log); }
+    if(closedCount < toClose)
+    {
+        { string __log=StringFormat("ACHM_CLOSURE_WARN: Requested closures %d but only closed %d for base_id %s", toClose, closedCount, canonicalBaseId); Print(__log); ULogWarnPrint(__log); }
     }
+    else
+    {
+        { string __log=StringFormat("ACHM_CLOSURE_INFO: Closed %d hedge position(s) for base_id %s", closedCount, canonicalBaseId); Print(__log); ULogInfoPrint(__log); }
+    }
+
+    ulong remainingTickets[]; datetime remainingTimes[]; double remainingVolumes[];
+    if(CollectTicketsForBaseId(canonicalBaseId, remainingTickets, remainingTimes, remainingVolumes) == 0)
+        RemoveElasticPosition(canonicalBaseId);
 }
 
 void ProcessTPSLOrder(const string& baseId, const string& orderType, int measurementPips, const string& trade_json)
@@ -3398,7 +3435,7 @@ void ProcessElasticHedgeUpdate(string baseId, double currentProfit, int profitLe
                 Print("ELASTIC_HEDGE: Per-level reduction executed at level ", lvl, ": ", lotsToCloseIter,
                       " lots for BaseID: ", baseId, ". Remaining: ", g_elasticPositions[posIndex].remainingLots);
 
-                // Also emit the elastic update echo (keeps Bridge metrics aligned with the level applied)
+                // Also emit the elastic ping echo (keeps Bridge metrics aligned with the level applied)
                 string update_json = "{";
                 update_json += "\"base_id\":\"" + baseId + "\",";
                 update_json += "\"current_profit\":" + DoubleToString(currentProfit, 2) + ",";
@@ -3916,7 +3953,7 @@ void SendElasticUpdateNotification(string baseId, double currentProfit, int prof
     }
 
     string update_json = "{";
-    update_json += "\"event_type\":\"elastic_hedge_update\",";
+    update_json += "\"event_type\":\"elastic_ping\",";
     update_json += "\"base_id\":\"" + baseId + "\",";
     update_json += "\"current_profit\":" + DoubleToString(currentProfit, 2) + ",";
     update_json += "\"profit_level\":" + IntegerToString(profitLevel) + ",";
@@ -3924,17 +3961,17 @@ void SendElasticUpdateNotification(string baseId, double currentProfit, int prof
     update_json += "\"mt5_ticket\":" + IntegerToString(mt5Ticket);
     update_json += "}";
 
-    Print("ELASTIC_UPDATE: Sending notification with MT5 ticket: ", mt5Ticket, " for BaseID: ", baseId);
+    Print("ELASTIC_PING: Sending notification with MT5 ticket: ", mt5Ticket, " for BaseID: ", baseId);
 
     int result = GrpcSubmitElasticUpdate(update_json);
 
     if(result == 0) {
-        Print("SendElasticUpdateNotification: Successfully sent elastic update for base_id: ", baseId);
+    Print("SendElasticUpdateNotification: Successfully sent elastic ping for base_id: ", baseId);
         MarkNotificationSent(baseId, "elastic_update");
     } else {
         string error_msg;
         GrpcGetLastError(error_msg, 1024);
-        Print("SendElasticUpdateNotification: Failed to send elastic update for base_id: ", baseId, ". Error: ", result, " - ", error_msg);
+    Print("SendElasticUpdateNotification: Failed to send elastic ping for base_id: ", baseId, ". Error: ", result, " - ", error_msg);
     }
 }
 

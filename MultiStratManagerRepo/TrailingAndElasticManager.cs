@@ -47,6 +47,8 @@ namespace NinjaTrader.NinjaScript.AddOns
         // Elastic trigger/increment runtime
         public bool Triggered { get; set; }
         public double IncrementUnitsAtTrigger { get; set; }
+        public int OriginalQuantity { get; set; }
+        public int RemainingQuantity { get; set; }
     }
 
     public class TraditionalTrailingStop
@@ -171,6 +173,82 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
+        public void RegisterTrade(TradeSyncService.TradeRecord record)
+        {
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return;
+
+            if (!EnableElasticHedging)
+            {
+                LogAndPrint($"ELASTIC_ADD_DEBUG: Elastic hedging disabled, skipping tracking for {record.TradeId}");
+                return;
+            }
+
+            var tracker = new ElasticPositionTracker
+            {
+                BaseId = record.TradeId,
+                InstrumentFullName = record.Instrument ?? string.Empty,
+                InstrumentName = record.Instrument ?? string.Empty,
+                MarketPosition = record.Side,
+                EntryPrice = record.EntryPrice,
+                CurrentTrailedStopPrice = 0,
+                HighWaterMarkPrice = record.EntryPrice,
+                LowWaterMarkPrice = record.EntryPrice,
+                ProfitUpdatesSent = 0,
+                LastReportedProfitLevel = 0.0,
+                LastReportedIncrement = 0,
+                LastUpdateTime = DateTime.Now,
+                PendingBarStart = DateTime.UtcNow,
+                PendingBarOpen = record.EntryPrice,
+                PendingBarHigh = record.EntryPrice,
+                PendingBarLow = record.EntryPrice,
+                PendingBarClose = record.EntryPrice,
+                IsSLTPLogicCompleteForEntry = false,
+                Triggered = false,
+                IncrementUnitsAtTrigger = 0,
+                OriginalQuantity = record.NtQuantity,
+                RemainingQuantity = record.RemainingQuantity
+            };
+
+            elasticPositions[tracker.BaseId] = tracker;
+            LogAndPrint($"ELASTIC_ADD_DEBUG: Registered trade {tracker.BaseId} for elastic tracking (qty={tracker.OriginalQuantity})");
+        }
+
+        public void UpdateRemainingQuantity(string baseId, int remainingQuantity)
+        {
+            if (string.IsNullOrWhiteSpace(baseId))
+                return;
+
+            if (!elasticPositions.TryGetValue(baseId, out var tracker))
+                return;
+
+            tracker.RemainingQuantity = remainingQuantity;
+            tracker.LastUpdateTime = DateTime.Now;
+
+            if (remainingQuantity <= 0)
+            {
+                tracker.Triggered = false;
+                tracker.ProfitUpdatesSent = 0;
+                tracker.LastReportedIncrement = 0;
+            }
+        }
+
+        public void CompleteTrade(string baseId)
+        {
+            if (string.IsNullOrWhiteSpace(baseId))
+                return;
+
+            if (elasticPositions.Remove(baseId))
+            {
+                LogAndPrint($"ELASTIC_DEBUG: Removed elastic tracking for {baseId}");
+            }
+
+            if (traditionalTrailingStops.Remove(baseId))
+            {
+                LogAndPrint($"TRADITIONAL_TRAILING: Removed trailing tracking for {baseId}");
+            }
+        }
+
         public void AddElasticPositionTracking(string baseId, Position position, double entryPrice)
         {
             LogAndPrint($"ELASTIC_ADD_DEBUG: AddElasticPositionTracking called - BaseId: {baseId}, EnableElasticHedging: {EnableElasticHedging}");
@@ -195,7 +273,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 PendingBarHigh = entryPrice,
                 PendingBarLow = entryPrice,
                 PendingBarClose = entryPrice,
-                IsSLTPLogicCompleteForEntry = false
+                IsSLTPLogicCompleteForEntry = false,
+                OriginalQuantity = position.Quantity,
+                RemainingQuantity = position.Quantity
             };
             elasticPositions[baseId] = tracker;
             double addCurrentPrice = GetCurrentPrice(position.Instrument);
@@ -326,6 +406,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 ScanForMissingPositionTrackers(monitoredAccount);
                 foreach (var tracker in elasticPositions.Values.ToList())
                 {
+                    if (tracker.RemainingQuantity <= 0)
+                        continue;
+
                     var position = monitoredAccount.Positions.FirstOrDefault(p => p.Instrument.FullName == tracker.InstrumentFullName && p.MarketPosition == tracker.MarketPosition);
                     if (position != null)
                     {
@@ -448,28 +531,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     bool alreadyTracked = elasticPositions.Values.Any(tr => tr.InstrumentFullName == position.Instrument.FullName && tr.MarketPosition == position.MarketPosition);
                     if (!alreadyTracked)
                     {
-                        string syntheticBaseId = $"MANUAL_{position.Instrument.FullName}_{position.MarketPosition}_{DateTime.Now:HHmmss}";
-                        double currentPrice = GetCurrentPrice(position.Instrument);
-                        var tracker = new ElasticPositionTracker
-                        {
-                            BaseId = syntheticBaseId,
-                            InstrumentFullName = position.Instrument.FullName,
-                            InstrumentName = position.Instrument.FullName,
-                            MarketPosition = position.MarketPosition,
-                            EntryPrice = currentPrice,
-                            LastReportedProfitLevel = 0.0,
-                            LastUpdateTime = DateTime.Now,
-                            PendingBarStart = DateTime.UtcNow,
-                            PendingBarOpen = currentPrice,
-                            PendingBarHigh = currentPrice,
-                            PendingBarLow = currentPrice,
-                            PendingBarClose = currentPrice
-                        };
-                        if (!elasticPositions.ContainsKey(syntheticBaseId))
-                        {
-                            elasticPositions[syntheticBaseId] = tracker;
-                            LogAndPrint($"POSITION_SCAN: Created manual tracker {syntheticBaseId} for untracked position");
-                        }
+                        LogAndPrint($"POSITION_SCAN: Position {position.Instrument.FullName} ({position.MarketPosition}) not tracked yet - awaiting strategy-issued trade_id, skipping synthetic tracker");
                     }
                 }
             }
@@ -481,8 +543,8 @@ namespace NinjaTrader.NinjaScript.AddOns
             var updateData = new Dictionary<string, object>
             {
         // Keep lightweight action for diagnostics; server will convert to EVENT internally
-        { "action", "ELASTIC_UPDATE" },
-        { "event_type", "elastic_hedge_update" },
+        { "action", "ELASTIC_PING" },
+        { "event_type", "elastic_ping" },
         { "base_id", baseId },
         // Use schema-aligned keys so the gRPC client fills proto fields
         { "current_profit", currentProfit },
@@ -490,15 +552,15 @@ namespace NinjaTrader.NinjaScript.AddOns
         { "id", Guid.NewGuid().ToString() },
         { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ") }
             };
-            LogAndPrint($"Sending elastic update for {baseId}: Profit=${currentProfit:F2}, Level={profitLevel}");
+            LogAndPrint($"Sending elastic ping for {baseId}: Profit=${currentProfit:F2}, Level={profitLevel}");
             try
             {
                 var json = SimpleJson.SerializeObject(updateData);
                 bool success = TradingGrpcClient.SubmitElasticUpdate(json);
-                if (success) LogAndPrint($"Elastic update sent via gRPC for {baseId}");
-                else LogAndPrint($"Failed to send elastic update via gRPC: {TradingGrpcClient.LastError}");
+                if (success) LogAndPrint($"Elastic ping sent via gRPC for {baseId}");
+                else LogAndPrint($"Failed to send elastic ping via gRPC: {TradingGrpcClient.LastError}");
             }
-            catch (Exception grpcEx) { LogAndPrint($"ERROR sending elastic update via gRPC: {grpcEx.Message}"); }
+            catch (Exception grpcEx) { LogAndPrint($"ERROR sending elastic ping via gRPC: {grpcEx.Message}"); }
         }
         #endregion
 
@@ -1133,6 +1195,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         {
             LogAndPrint($"ELASTIC_ADD_DEBUG: AddElasticPositionTrackingFromExecution called - BaseId: {baseId}, EnableElasticHedging: {EnableElasticHedging}");
             if (!EnableElasticHedging) { LogAndPrint($"ELASTIC_ADD_DEBUG: Elastic hedging disabled, skipping tracking for {baseId}"); return; }
+            int estimatedQuantity = execution != null && execution.Order != null ? (int)Math.Abs(execution.Order.Quantity) : Math.Max(1, Math.Abs((int)execution.Quantity));
             var tracker = new ElasticPositionTracker
             {
                 BaseId = baseId,
@@ -1153,7 +1216,9 @@ namespace NinjaTrader.NinjaScript.AddOns
                 PendingBarHigh = execution.Price,
                 PendingBarLow = execution.Price,
                 PendingBarClose = execution.Price,
-                IsSLTPLogicCompleteForEntry = false
+                IsSLTPLogicCompleteForEntry = false,
+                OriginalQuantity = estimatedQuantity,
+                RemainingQuantity = estimatedQuantity
             };
             elasticPositions[baseId] = tracker;
             LogAndPrint($"ELASTIC_ADD_DEBUG: ✅ Added elastic tracking for {baseId} using execution data. Total tracked: {elasticPositions.Count}");

@@ -62,6 +62,7 @@ trading::Trade JsonConverter::JsonToTrade(const std::string& json_str) {
         trade.set_nt_daily_pnl(JsonConverter::GetDoubleField(trade_json, "nt_daily_pnl"));
         trade.set_nt_trade_result(JsonConverter::GetStringField(trade_json, "nt_trade_result"));
         trade.set_nt_session_trades(JsonConverter::GetIntField(trade_json, "nt_session_trades"));
+        trade.set_mt5_ticket(JsonConverter::GetUInt64Field(trade_json, "mt5_ticket"));
         
     } catch (const std::exception&) {
         // Return empty trade on error
@@ -114,6 +115,25 @@ int JsonConverter::GetIntField(const nlohmann::json& json_obj, const std::string
                 // Try to parse string as int
                 std::string str_val = json_obj[field].get<std::string>();
                 return std::stoi(str_val);
+            }
+        }
+    } catch (const std::exception&) {
+        // Return default on error
+    }
+    return default_val;
+}
+
+uint64_t JsonConverter::GetUInt64Field(const nlohmann::json& json_obj, const std::string& field, uint64_t default_val) {
+    try {
+        if (json_obj.contains(field)) {
+            if (json_obj[field].is_number_unsigned()) {
+                return json_obj[field].get<uint64_t>();
+            } else if (json_obj[field].is_number_integer()) {
+                auto val = json_obj[field].get<int64_t>();
+                return val < 0 ? default_val : static_cast<uint64_t>(val);
+            } else if (json_obj[field].is_string()) {
+                auto str_val = json_obj[field].get<std::string>();
+                return static_cast<uint64_t>(std::stoull(str_val));
             }
         }
     } catch (const std::exception&) {

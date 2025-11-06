@@ -1,0 +1,50 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MT5GrpcClient", "MT5\MT5GrpcClient.csproj", "{7A096530-0684-8BE3-B773-952E209A6111}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MT5GrpcClientSimple", "MT5\MT5GrpcClientSimple.csproj", "{8BDE63F8-C3D6-A658-74BA-A17BEC453D0B}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiStratManager", "MultiStratManagerRepo\MultiStratManager.csproj", "{76FACED4-AA4A-4678-165A-B9BD2AF10A9C}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "MultiStratManagerRepo", "MultiStratManagerRepo", "{D9D8547B-4240-B146-84BB-F0E012377EC0}"
+EndProject
+Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "External", "External", "{DF580E3E-EBDD-7E29-E6DC-480541B2EB78}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "NTGrpcClient", "MultiStratManagerRepo\External\NTGrpcClient\NTGrpcClient.csproj", "{6CF5596E-D741-8E8D-089C-9BE2290884D1}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{7A096530-0684-8BE3-B773-952E209A6111}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{7A096530-0684-8BE3-B773-952E209A6111}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{7A096530-0684-8BE3-B773-952E209A6111}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{7A096530-0684-8BE3-B773-952E209A6111}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8BDE63F8-C3D6-A658-74BA-A17BEC453D0B}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8BDE63F8-C3D6-A658-74BA-A17BEC453D0B}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8BDE63F8-C3D6-A658-74BA-A17BEC453D0B}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8BDE63F8-C3D6-A658-74BA-A17BEC453D0B}.Release|Any CPU.Build.0 = Release|Any CPU
+		{76FACED4-AA4A-4678-165A-B9BD2AF10A9C}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{76FACED4-AA4A-4678-165A-B9BD2AF10A9C}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{76FACED4-AA4A-4678-165A-B9BD2AF10A9C}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{76FACED4-AA4A-4678-165A-B9BD2AF10A9C}.Release|Any CPU.Build.0 = Release|Any CPU
+		{6CF5596E-D741-8E8D-089C-9BE2290884D1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6CF5596E-D741-8E8D-089C-9BE2290884D1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6CF5596E-D741-8E8D-089C-9BE2290884D1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6CF5596E-D741-8E8D-089C-9BE2290884D1}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(NestedProjects) = preSolution
+		{DF580E3E-EBDD-7E29-E6DC-480541B2EB78} = {D9D8547B-4240-B146-84BB-F0E012377EC0}
+		{6CF5596E-D741-8E8D-089C-9BE2290884D1} = {DF580E3E-EBDD-7E29-E6DC-480541B2EB78}
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {E059558C-ADB8-487F-950D-F848E25955A0}
+	EndGlobalSection
+EndGlobal
