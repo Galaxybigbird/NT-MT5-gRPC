@@ -136,6 +136,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 BreakEvenPlusTicks = 2;
 
                 Debug = false;
+                ManualOverrideMode = false;
 
                 tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
                 activeTradeId = null;
@@ -152,6 +153,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     AddDataSeries(BarsPeriodType.Tick, 1);
                 }
+
+                if (ManualOverrideMode)
+                    StrategyLogInfo("[MANUAL][CONFIG] ManualOverrideMode enabled - automated entries will be suppressed.");
 
                 // optional: log parameters once per iteration for diagnostics
                 if (Debug)
@@ -260,6 +264,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (CurrentBar < BarsRequiredToTrade)
                 return;
+
+            if (ManualOverrideMode)
+            {
+                if (Debug && IsFirstTickOfBar)
+                    StrategyLogDebug(string.Format("{0}: ManualOverrideMode active - skipping automated strategy logic.", Time[0]));
+                return;
+            }
 
             // Build signals
             int longVotes = 0, shortVotes = 0;
@@ -464,6 +475,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
                 return;
 
+            if (Account != null)
+            {
+                double acctQty = 0;
+                foreach (var acctPos in Account.Positions)
+                {
+                    if (acctPos.Instrument != null && Instrument != null && acctPos.Instrument.FullName == Instrument.FullName)
+                    {
+                        acctQty = acctPos.Quantity;
+                        break;
+                    }
+                }
+                if (acctQty == 0)
+                {
+                    StrategyLogInfo(string.Format("[MANUAL][BOOTSTRAP] Account is flat; skipping synthetic position seed despite NinjaTrader position reporting {0}", Position.MarketPosition));
+                    return;
+                }
+            }
             MarketPosition side = Position.MarketPosition;
             int qty = Math.Abs(Position.Quantity);
             string tradeId = CreateTradeId(side);
@@ -1855,6 +1883,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty, Display(Name = "Debug", GroupName = "Parameters", Order = 90)]
         public bool Debug { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "ManualOverrideMode", GroupName = "Parameters", Order = 91)]
+        public bool ManualOverrideMode { get; set; }
 
         #endregion
     }
