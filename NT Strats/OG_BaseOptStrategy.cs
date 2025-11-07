@@ -3,13 +3,14 @@ using System;
 using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Collections.Generic;
-using System.Threading;
 using System.Text;
+using System.Threading;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
+using System.Windows.Input;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui;
 using NinjaTrader.Gui.Tools;
@@ -43,29 +44,24 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Button manualBuyButton;
         private Button manualSellButton;
         private Button manualFlattenButton;
+        private bool manualBuyClickArmed;
+        private bool manualSellClickArmed;
+        private bool manualFlattenClickArmed;
+        private bool manualProcessingReady;
         private Grid manualButtonPanel;
         private Panel manualButtonHost;
         private Grid manualButtonGrid;
         private int manualButtonRowIndex = -1;
         private RowDefinition manualButtonRowDefinition;
         private Button manualButtonStyleSource;
-        private readonly Queue<ManualTradeAction> pendingManualActions = new Queue<ManualTradeAction>();
-        private readonly object manualActionLock = new object();
         private readonly List<string> openTradeOrder = new List<string>();
-        private volatile bool manualActionsPending;
         private const int ManualMinEntriesPerDirection = 8;
         private const int ManualOrderSeriesIndex = 1;
+        private const string ManualPanelTag = "BaseOptManualButtons";
         private Chart attachedChart;
         private ChartTrader attachedChartTrader;
         private bool chartTraderVisibilityHooked;
         private bool manualTreeLogged;
-
-        private enum ManualTradeAction
-        {
-            Buy,
-            Sell,
-            Flatten
-        }
 
         private class TradeRuntimeState
         {
@@ -74,6 +70,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             public int OriginalQuantity;
             public int RemainingQuantity;
             public bool OpenPublished;
+            public bool IsSynthetic;
             public string InstrumentName;
             public string AccountName;
             public double NtPointsPer1kLoss;
@@ -89,6 +86,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Name = "BaseOptStrategy";
                 Calculate = Calculate.OnBarClose;
                 IsOverlay = false;
+                StartBehavior = StartBehavior.ImmediatelySubmit;
                 // Allow stacked entries so manual Chart Trader buttons can add multiple units.
                 EntriesPerDirection = 10;
                 EntryHandling = EntryHandling.AllEntries;
@@ -144,6 +142,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Configure)
             {
+                if (StartBehavior != StartBehavior.ImmediatelySubmit)
+                {
+                    StrategyLogInfo("[MANUAL][CONFIG] Forcing StartBehavior to ImmediatelySubmit so manual orders go live immediately");
+                    StartBehavior = StartBehavior.ImmediatelySubmit;
+                }
+
                 if (BarsArray.Length == 1)
                 {
                     AddDataSeries(BarsPeriodType.Tick, 1);
@@ -162,7 +166,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 activeTradeId = null;
                 openTradeOrder.Clear();
-                manualActionsPending = false;
 
                 if (EntriesPerDirection < ManualMinEntriesPerDirection)
                 {
@@ -197,14 +200,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 					if (Debug && (MinSignalsToEnterLong > maxSignalSlots || MinSignalsToEnterShort > maxSignalSlots))
 						StrategyLogInfo($"WARN: MinSignals exceeds enabled indicators; capping in runtime. slots={maxSignalSlots} effMinL={Math.Min(MinSignalsToEnterLong, maxSignalSlots)} effMinS={Math.Min(MinSignalsToEnterShort, maxSignalSlots)}");
 
-                if (tradeStates == null)
-                    tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
-                else
-                    tradeStates.Clear();
-
-                activeTradeId = null;
-                openTradeOrder.Clear();
-                manualActionsPending = false;
+                ResetManualState();
+                manualProcessingReady = false;
 
                 if (EntriesPerDirection < ManualMinEntriesPerDirection)
                 {
@@ -228,24 +225,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.Realtime)
             {
                 // Flush any historical bookkeeping so live executions start from a clean slate.
-                if (tradeStates == null)
-                    tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
-                else
-                    tradeStates.Clear();
-
-                activeTradeId = null;
-                openTradeOrder.Clear();
-                stopSet = false;
-                targetSet = false;
-                manualActionsPending = false;
+                ResetManualState();
+                manualProcessingReady = true;
+                StrategyLogInfo("[MANUAL] Strategy entered realtime; manual buttons enabled");
 
                 if (ChartControl != null)
                     ChartControl.Dispatcher.BeginInvoke(new Action(AttachManualChartTraderControls));
 
-                ProcessPendingManualActions();
+                BootstrapExistingPositionState();
             }
             else if (State == State.Terminated)
             {
+                manualProcessingReady = false;
                 if (MultiStratManager.Instance != null && MultiStratManager.Instance.TradeSync != null)
                     MultiStratManager.Instance.TradeSync.UnregisterStrategy(this);
 
@@ -262,31 +253,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
         #endregion
 
-        protected override void OnMarketData(MarketDataEventArgs marketDataUpdate)
-        {
-            if (State != State.Realtime)
-                return;
-
-            if (!manualActionsPending)
-                return;
-
-            ProcessPendingManualActions();
-        }
-
         protected override void OnBarUpdate()
         {
-            if (BarsInProgress == ManualOrderSeriesIndex)
-            {
-                if (manualActionsPending)
-                    ProcessPendingManualActions();
-                return;
-            }
-
             if (BarsInProgress != 0)
                 return;
-
-            if (manualActionsPending && State < State.Realtime)
-                ProcessPendingManualActions();
 
             if (CurrentBar < BarsRequiredToTrade)
                 return;
@@ -362,8 +332,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (Debug)
                 StrategyLogDebug($"{Time[0]} votes L/S: {longVotes}/{shortVotes} canL={canLong} canS={canShort} bias={Bias} minL={MinSignalsToEnterLong}->{effMinLong} minS={MinSignalsToEnterShort}->{effMinShort} Pos:{Position.MarketPosition}");
-
-            ProcessPendingManualActions();
         }
 
         private void UpdateStopsTargets()
@@ -483,6 +451,66 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return "SYM";
 
             return builder.ToString();
+        }
+
+        private void BootstrapExistingPositionState()
+        {
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return;
+
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+
+            if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
+                return;
+
+            MarketPosition side = Position.MarketPosition;
+            int qty = Math.Abs(Position.Quantity);
+            string tradeId = CreateTradeId(side);
+
+            var state = new TradeRuntimeState
+            {
+                TradeId = tradeId,
+                EntrySide = side,
+                OriginalQuantity = qty,
+                RemainingQuantity = qty,
+                InstrumentName = Instrument != null ? Instrument.FullName : string.Empty,
+                AccountName = Account != null ? Account.Name : string.Empty,
+                EntryPrice = Position.AveragePrice,
+                OpenPublished = true,
+                IsSynthetic = true
+            };
+
+            try
+            {
+                double pointValue = Instrument?.MasterInstrument?.PointValue ?? 0.0;
+                state.NtPointsPer1kLoss = pointValue > 0 ? 1000.0 / pointValue : 0.0;
+            }
+            catch
+            {
+                state.NtPointsPer1kLoss = 0.0;
+            }
+
+            tradeStates[tradeId] = state;
+            openTradeOrder.Add(tradeId);
+            activeTradeId = tradeId;
+            StrategyLogInfo(string.Format("[MANUAL][BOOTSTRAP] Seeded synthetic trade {0} for existing position {1} qty={2}", tradeId, side, qty));
+        }
+
+        private void ResetManualState()
+        {
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+            else
+                tradeStates.Clear();
+
+            openTradeOrder.Clear();
+            activeTradeId = null;
+            stopSet = false;
+            targetSet = false;
+            manualBuyClickArmed = false;
+            manualSellClickArmed = false;
+            manualFlattenClickArmed = false;
         }
 
         private TradeRuntimeState PrepareTradeState(string tradeId, MarketPosition side, int quantityHint)
@@ -666,7 +694,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             activeTradeId = state.TradeId;
 
-            if (!state.OpenPublished)
+            if (!state.OpenPublished && !state.IsSynthetic)
             {
                 PublishOpenEvent(state);
                 state.OpenPublished = true;
@@ -683,11 +711,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (state.RemainingQuantity > 0)
             {
-                PublishPartialEvent(state.TradeId, state.RemainingQuantity);
+                if (!state.IsSynthetic)
+                    PublishPartialEvent(state.TradeId, state.RemainingQuantity);
             }
             else
             {
-                PublishClosedEvent(state.TradeId);
+                if (!state.IsSynthetic)
+                    PublishClosedEvent(state.TradeId);
                 tradeStates.Remove(state.TradeId);
                 openTradeOrder.Remove(state.TradeId);
 
@@ -790,6 +820,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             manualButtonGrid = traderGrid;
             manualButtonHost = traderGrid;
 
+            RemoveExistingManualPanel(traderGrid);
+
             int insertRow = -1;
             if (positionRow >= 0)
             {
@@ -843,7 +875,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Margin = new Thickness(8, 4, 8, 8),
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
-                MinHeight = 36
+                MinHeight = 36,
+                Tag = ManualPanelTag
             };
             manualButtonPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             manualButtonPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -854,6 +887,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             manualBuyButton = CreateManualButton("Manual\nBuy", manualButtonStyleSource, Brushes.DarkGreen, ManualBuyButton_Click);
             manualSellButton = CreateManualButton("Manual\nSell", manualButtonStyleSource, Brushes.DarkRed, ManualSellButton_Click);
             manualFlattenButton = CreateManualButton("Manual\nFlatten", manualButtonStyleSource, Brushes.DimGray, ManualFlattenButton_Click);
+
+            manualBuyButton.PreviewMouseLeftButtonDown += ManualBuyButton_PreviewMouseLeftButtonDown;
+            manualBuyButton.PreviewKeyDown += ManualBuyButton_PreviewKeyDown;
+            manualSellButton.PreviewMouseLeftButtonDown += ManualSellButton_PreviewMouseLeftButtonDown;
+            manualSellButton.PreviewKeyDown += ManualSellButton_PreviewKeyDown;
+            manualFlattenButton.PreviewMouseLeftButtonDown += ManualFlattenButton_PreviewMouseLeftButtonDown;
+            manualFlattenButton.PreviewKeyDown += ManualFlattenButton_PreviewKeyDown;
 
             manualButtonPanel.Children.Add(manualBuyButton);
             manualButtonPanel.Children.Add(manualSellButton);
@@ -1035,7 +1075,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
                 MinHeight = 32,
-                MinWidth = 90
+                MinWidth = 90,
+                Focusable = false,
+                IsTabStop = false,
+                UseLayoutRounding = true,
+                SnapsToDevicePixels = true
             };
 
             button.Content = label;
@@ -1066,89 +1110,146 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void ManualBuyButton_Click(object sender, RoutedEventArgs e)
         {
+            if (!manualBuyClickArmed)
+            {
+                StrategyLogDebug("[MANUAL] Buy click ignored because it was not armed by a user interaction");
+                return;
+            }
+            if (!IsManualOrderWindowReady())
+            {
+                StrategyLogInfo("[MANUAL] Buy click ignored because strategy is not in realtime yet");
+                manualBuyClickArmed = false;
+                manualSellClickArmed = false;
+                manualFlattenClickArmed = false;
+                return;
+            }
+            manualBuyClickArmed = false;
+            manualSellClickArmed = false;
+            manualFlattenClickArmed = false;
+            if (!IsPointerOverElement(manualBuyButton) && !(manualBuyButton?.IsKeyboardFocusWithin ?? false))
+            {
+                StrategyLogDebug("[MANUAL] Buy click ignored because pointer/focus is not on the manual Buy button");
+                return;
+            }
             StrategyLogDebug("[MANUAL] Buy button clicked");
-            TriggerCustomEvent(EnqueueManualAction, ManualTradeAction.Buy);
+            TriggerCustomEvent(_ => SubmitManualOrder(MarketPosition.Long), null);
         }
 
         private void ManualSellButton_Click(object sender, RoutedEventArgs e)
         {
+            if (!manualSellClickArmed)
+            {
+                StrategyLogDebug("[MANUAL] Sell click ignored because it was not armed by a user interaction");
+                return;
+            }
+            if (!IsManualOrderWindowReady())
+            {
+                StrategyLogInfo("[MANUAL] Sell click ignored because strategy is not in realtime yet");
+                manualSellClickArmed = false;
+                manualBuyClickArmed = false;
+                manualFlattenClickArmed = false;
+                return;
+            }
+            manualSellClickArmed = false;
+            manualBuyClickArmed = false;
+            manualFlattenClickArmed = false;
+            if (!IsPointerOverElement(manualSellButton) && !(manualSellButton?.IsKeyboardFocusWithin ?? false))
+            {
+                StrategyLogDebug("[MANUAL] Sell click ignored because pointer/focus is not on the manual Sell button");
+                return;
+            }
             StrategyLogDebug("[MANUAL] Sell button clicked");
-            TriggerCustomEvent(EnqueueManualAction, ManualTradeAction.Sell);
+            TriggerCustomEvent(_ => SubmitManualOrder(MarketPosition.Short), null);
         }
 
         private void ManualFlattenButton_Click(object sender, RoutedEventArgs e)
         {
+            if (!manualFlattenClickArmed)
+            {
+                StrategyLogDebug("[MANUAL] Flatten click ignored because it was not armed by a user interaction");
+                return;
+            }
+            if (!IsManualOrderWindowReady())
+            {
+                StrategyLogInfo("[MANUAL] Flatten click ignored because strategy is not in realtime yet");
+                manualFlattenClickArmed = false;
+                manualBuyClickArmed = false;
+                manualSellClickArmed = false;
+                return;
+            }
+            manualFlattenClickArmed = false;
+            manualBuyClickArmed = false;
+            manualSellClickArmed = false;
+            if (!IsPointerOverElement(manualFlattenButton) && !(manualFlattenButton?.IsKeyboardFocusWithin ?? false))
+            {
+                StrategyLogDebug("[MANUAL] Flatten click ignored because pointer/focus is not on the manual Flatten button");
+                return;
+            }
             StrategyLogDebug("[MANUAL] Flatten button clicked");
-            TriggerCustomEvent(EnqueueManualAction, ManualTradeAction.Flatten);
+            TriggerCustomEvent(_ => SubmitManualFlatten(), null);
         }
 
-        private void EnqueueManualAction(object state)
+        private void ManualBuyButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
         {
-            if (!(state is ManualTradeAction action))
-                return;
-
-            lock (manualActionLock)
-            {
-                pendingManualActions.Enqueue(action);
-            }
-
-            StrategyLogDebug(string.Format("[MANUAL] Queued manual action {0}", action));
-
-            manualActionsPending = true;
+            manualBuyClickArmed = true;
         }
 
-        private void ProcessPendingManualActions()
+        private void ManualBuyButton_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (State < State.Realtime)
-            {
-                bool hasQueued;
-                lock (manualActionLock)
-                {
-                    hasQueued = pendingManualActions.Count > 0;
-                }
-
-                if (hasQueued && Debug)
-                    StrategyLogDebug(string.Format("[MANUAL] Delaying manual action processing until Realtime (current state={0})", State));
-                return;
-            }
-
-            while (true)
-            {
-                ManualTradeAction? action = null;
-                lock (manualActionLock)
-                {
-                    if (pendingManualActions.Count > 0)
-                        action = pendingManualActions.Dequeue();
-                }
-
-                if (!action.HasValue)
-                    break;
-
-                StrategyLogDebug(string.Format("[MANUAL] Processing queued action {0} (BIP={1}, CurrentBar={2}, BarsRequired={3})", action.Value, BarsInProgress, CurrentBar, BarsRequiredToTrade));
-
-                switch (action.Value)
-                {
-                    case ManualTradeAction.Buy:
-                        SubmitManualOrder(MarketPosition.Long);
-                        break;
-                    case ManualTradeAction.Sell:
-                        SubmitManualOrder(MarketPosition.Short);
-                        break;
-                    case ManualTradeAction.Flatten:
-                        SubmitManualFlatten();
-                        break;
-                }
-            }
-
-            lock (manualActionLock)
-            {
-                manualActionsPending = pendingManualActions.Count > 0;
-            }
+            if (e.Key == Key.Space || e.Key == Key.Enter)
+                manualBuyClickArmed = true;
         }
 
+        private void ManualSellButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            manualSellClickArmed = true;
+        }
+
+        private void ManualSellButton_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Space || e.Key == Key.Enter)
+                manualSellClickArmed = true;
+        }
+
+        private void ManualFlattenButton_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            manualFlattenClickArmed = true;
+        }
+
+        private void ManualFlattenButton_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.Key == Key.Space || e.Key == Key.Enter)
+                manualFlattenClickArmed = true;
+        }
+
+        private bool IsPointerOverElement(FrameworkElement element)
+        {
+            if (element == null)
+                return false;
+
+            DependencyObject current = Mouse.DirectlyOver as DependencyObject;
+            while (current != null)
+            {
+                if (ReferenceEquals(current, element))
+                    return true;
+                current = VisualTreeHelper.GetParent(current);
+            }
+            return false;
+        }
+
+        private bool IsManualOrderWindowReady()
+        {
+            return State == State.Realtime && manualProcessingReady;
+        }
         private void SubmitManualOrder(MarketPosition direction)
         {
+            if (!IsManualOrderWindowReady())
+            {
+                StrategyLogInfo("[MANUAL][ORDER] Ignored manual order request because strategy is not realtime ready");
+                return;
+            }
             int requestedQuantity = Math.Max(1, DefaultQuantity);
+            int remainingToOpen = requestedQuantity;
 
             StrategyLogInfo(string.Format("[MANUAL][ORDER] direction={0} qty={1} currentPos={2} posQty={3} activeTradeId={4} openTrades={5} entriesPerDir={6} entryHandling={7}",
                 direction,
@@ -1164,32 +1265,47 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (Position.MarketPosition == MarketPosition.Short && Position.Quantity != 0)
                 {
-                    int qtyToCover = Math.Abs(Position.Quantity);
-                    SubmitManualExit(MarketPosition.Short, qtyToCover);
+                    int qtyToCover = Math.Min(remainingToOpen, Math.Abs(Position.Quantity));
+                    if (qtyToCover > 0)
+                    {
+                        SubmitManualExit(MarketPosition.Short, qtyToCover);
+                        remainingToOpen = Math.Max(0, remainingToOpen - qtyToCover);
+                    }
                 }
 
-                OpenManualEntry(MarketPosition.Long, requestedQuantity);
+                if (remainingToOpen > 0)
+                    OpenManualEntry(MarketPosition.Long, remainingToOpen);
             }
             else if (direction == MarketPosition.Short)
             {
                 if (Position.MarketPosition == MarketPosition.Long && Position.Quantity != 0)
                 {
-                    int qtyToClose = Math.Abs(Position.Quantity);
-                    SubmitManualExit(MarketPosition.Long, qtyToClose);
+                    int qtyToClose = Math.Min(remainingToOpen, Math.Abs(Position.Quantity));
+                    if (qtyToClose > 0)
+                    {
+                        SubmitManualExit(MarketPosition.Long, qtyToClose);
+                        remainingToOpen = Math.Max(0, remainingToOpen - qtyToClose);
+                    }
                 }
 
-                OpenManualEntry(MarketPosition.Short, requestedQuantity);
+                if (remainingToOpen > 0)
+                    OpenManualEntry(MarketPosition.Short, remainingToOpen);
             }
         }
 
         private void SubmitManualFlatten()
         {
+            if (!IsManualOrderWindowReady())
+            {
+                StrategyLogInfo("[MANUAL] Flatten ignored because strategy is not realtime ready");
+                return;
+            }
             if (Position.MarketPosition == MarketPosition.Long && Position.Quantity > 0)
             {
                 StrategyLogInfo("[MANUAL] Flatten requested: closing long position via manual buttons");
                 SubmitManualExit(MarketPosition.Long, Math.Abs(Position.Quantity));
             }
-            else if (Position.MarketPosition == MarketPosition.Short && Position.Quantity < 0)
+            else if (Position.MarketPosition == MarketPosition.Short && Position.Quantity > 0)
             {
                 StrategyLogInfo("[MANUAL] Flatten requested: closing short position via manual buttons");
                 SubmitManualExit(MarketPosition.Short, Math.Abs(Position.Quantity));
@@ -1404,11 +1520,23 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             if (manualBuyButton != null)
+            {
+                manualBuyButton.PreviewMouseLeftButtonDown -= ManualBuyButton_PreviewMouseLeftButtonDown;
+                manualBuyButton.PreviewKeyDown -= ManualBuyButton_PreviewKeyDown;
                 manualBuyButton.Click -= ManualBuyButton_Click;
+            }
             if (manualSellButton != null)
+            {
+                manualSellButton.PreviewMouseLeftButtonDown -= ManualSellButton_PreviewMouseLeftButtonDown;
+                manualSellButton.PreviewKeyDown -= ManualSellButton_PreviewKeyDown;
                 manualSellButton.Click -= ManualSellButton_Click;
+            }
             if (manualFlattenButton != null)
+            {
+                manualFlattenButton.PreviewMouseLeftButtonDown -= ManualFlattenButton_PreviewMouseLeftButtonDown;
+                manualFlattenButton.PreviewKeyDown -= ManualFlattenButton_PreviewKeyDown;
                 manualFlattenButton.Click -= ManualFlattenButton_Click;
+            }
 
             if (manualButtonPanel != null)
             {
@@ -1448,16 +1576,37 @@ namespace NinjaTrader.NinjaScript.Strategies
             manualButtonRowDefinition = null;
             manualButtonRowIndex = -1;
             manualButtonStyleSource = null;
-            lock (manualActionLock)
-            {
-                pendingManualActions.Clear();
-            }
-            manualActionsPending = false;
             openTradeOrder.Clear();
             manualButtonHost = null;
             attachedChartTrader = null;
             attachedChart = null;
             manualTreeLogged = false;
+            manualBuyClickArmed = false;
+            manualSellClickArmed = false;
+            manualFlattenClickArmed = false;
+        }
+
+        private void RemoveExistingManualPanel(Grid traderGrid)
+        {
+            if (traderGrid == null || traderGrid.Children == null)
+                return;
+
+            foreach (var existingPanel in traderGrid.Children.OfType<Grid>().Where(g => ManualPanelTag.Equals(g.Tag as string)).ToList())
+            {
+                int row = Grid.GetRow(existingPanel);
+                traderGrid.Children.Remove(existingPanel);
+
+                if (traderGrid.RowDefinitions != null && row >= 0 && row < traderGrid.RowDefinitions.Count)
+                {
+                    traderGrid.RowDefinitions.RemoveAt(row);
+                    foreach (UIElement child in traderGrid.Children.OfType<UIElement>().ToList())
+                    {
+                        int currentRow = Grid.GetRow(child);
+                        if (currentRow > row)
+                            Grid.SetRow(child, currentRow - 1);
+                    }
+                }
+            }
         }
 
         private void PublishOpenEvent(TradeRuntimeState state)
