@@ -149,6 +149,11 @@ namespace NinjaTrader.NinjaScript.AddOns
         public bool EnableSLTPRemoval { get; set; } = true; // Default to true
         public int SLTPRemovalDelaySeconds { get; set; } = 3; // Default to 3 seconds
 
+        // Shared exposure tracking across all participant strategies
+        private readonly object exposureLock = new object();
+        private readonly Dictionary<string, double> exposureByKey = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<StrategyBase, Dictionary<string, double>> exposureByStrategy = new Dictionary<StrategyBase, Dictionary<string, double>>();
+
         #region Trailing and Elastic Properties - Delegated to TrailingAndElasticManager
         
         // All trailing and elastic settings are now handled by TrailingAndElasticManager
@@ -455,6 +460,42 @@ public TrailingActivationType TrailingStopType
             set { if (trailingAndElasticManager != null) { trailingAndElasticManager.DEMA_ATR_Multiplier = value; OnPropertyChanged(nameof(DEMA_ATR_Multiplier)); } } 
         }
 
+        // NT Trade Run-Up (independent of general EnableTrailing)
+        private bool _enableNtRunUp = true;
+        public bool EnableNtRunUp
+        {
+            get => _enableNtRunUp;
+            set { if (_enableNtRunUp != value) { _enableNtRunUp = value; OnPropertyChanged(nameof(EnableNtRunUp)); } }
+        }
+
+        private RunUpUnits _ntRunUpDistanceUnits = RunUpUnits.Ticks;
+        public RunUpUnits NtRunUpDistanceUnits
+        {
+            get => _ntRunUpDistanceUnits;
+            set { if (_ntRunUpDistanceUnits != value) { _ntRunUpDistanceUnits = value; OnPropertyChanged(nameof(NtRunUpDistanceUnits)); } }
+        }
+
+        private double _ntRunUpDistanceValue = 16;
+        public double NtRunUpDistanceValue
+        {
+            get => _ntRunUpDistanceValue;
+            set { if (Math.Abs(_ntRunUpDistanceValue - value) > 1e-9) { _ntRunUpDistanceValue = value; OnPropertyChanged(nameof(NtRunUpDistanceValue)); } }
+        }
+
+        private RunUpUnits _ntRunUpIncrementUnits = RunUpUnits.Ticks;
+        public RunUpUnits NtRunUpIncrementUnits
+        {
+            get => _ntRunUpIncrementUnits;
+            set { if (_ntRunUpIncrementUnits != value) { _ntRunUpIncrementUnits = value; OnPropertyChanged(nameof(NtRunUpIncrementUnits)); } }
+        }
+
+        private double _ntRunUpIncrementValue = 5;
+        public double NtRunUpIncrementValue
+        {
+            get => _ntRunUpIncrementValue;
+            set { if (Math.Abs(_ntRunUpIncrementValue - value) > 1e-9) { _ntRunUpIncrementValue = value; OnPropertyChanged(nameof(NtRunUpIncrementValue)); } }
+        }
+
         // Expose unified trailing order semantics to UI (local backing fields; TrailingAndElasticManager does not define these)
         private bool _useLimitOrdersForStops = true; // default hedge-style LIMIT
         public bool UseLimitOrdersForStops
@@ -560,6 +601,10 @@ public TrailingActivationType TrailingStopType
         private int _sessionTradeCount = 0;
         private string _lastTradeResult = "";
         private double _lastTradePnL = 0.0;
+        private string _lastTradeBaseId = "";
+        private string _lastTradeInstrument = "";
+        private double _lastTradePointsPer1kLoss = 0.0;
+        private double _lastTradePnLDollars = 0.0;
 
         public double SessionStartBalance
         {
@@ -594,6 +639,10 @@ public TrailingActivationType TrailingStopType
                 _sessionTradeCount = 0;
                 _lastTradeResult = "";
                 _lastTradePnL = 0.0;
+                _lastTradeBaseId = "";
+                _lastTradeInstrument = "";
+                _lastTradePointsPer1kLoss = 0.0;
+                _lastTradePnLDollars = 0.0;
 
                 // Get current account balance
                 var balanceItem = monitoredAccount.GetAccountItem(Cbi.AccountItem.CashValue, Currency.UsDollar);
@@ -607,37 +656,87 @@ public TrailingActivationType TrailingStopType
         }
 
         // Update trade result based on execution
-        private void UpdateTradeResult(Execution execution)
+        private double GetPointsPer1kLossFromExecution(Execution execution)
+        {
+            try
+            {
+                double pointValue = execution?.Instrument?.MasterInstrument?.PointValue ?? 0.0;
+                return pointValue > 0 ? 1000.0 / pointValue : 0.0;
+            }
+            catch
+            {
+                return 0.0;
+            }
+        }
+
+        private void UpdateTradeResult(Execution execution, string tradeId, TradeSyncService.TradeRecord tradeRecord)
         {
             if (execution == null || execution.Order == null)
                 return;
 
-            if (execution.Order.OrderAction == OrderAction.Buy || execution.Order.OrderAction == OrderAction.Sell)
+            var action = execution.Order.OrderAction;
+            bool isEntry = action == OrderAction.Buy || action == OrderAction.SellShort;
+            bool isExit = action == OrderAction.Sell || action == OrderAction.BuyToCover;
+
+            if (isEntry)
             {
-                _sessionTradeCount++;
-
-                // Calculate P&L for this trade (simplified - actual P&L calculation may be more complex)
-                double tradePnL = 0.0;
-
-                // For closing trades, we can estimate P&L
-                if (execution.Order.OrderAction == OrderAction.BuyToCover || execution.Order.OrderAction == OrderAction.SellShort)
-                {
-                    // This is a closing trade - determine if win/loss
-                    // Note: This is a simplified approach. Real P&L tracking would require position tracking
-                    double currentPnL = TotalPnL;
-                    tradePnL = currentPnL - _lastTradePnL;
-                    _lastTradePnL = currentPnL;
-
-                    _lastTradeResult = tradePnL > 0 ? "win" : "loss";
-                    LogAndPrint($"Trade result updated: {_lastTradeResult} (P&L: ${tradePnL:F2})");
-                }
-                else
-                {
-                    // Opening trade - set baseline
-                    _lastTradePnL = TotalPnL;
-                    _lastTradeResult = "pending";
-                }
+                _lastTradeBaseId = tradeId ?? string.Empty;
+                _lastTradeInstrument = tradeRecord?.Instrument ?? execution.Instrument?.FullName ?? _lastTradeInstrument;
+                _lastTradePointsPer1kLoss = tradeRecord?.NtPointsPer1kLoss ?? GetPointsPer1kLossFromExecution(execution);
+                _lastTradePnL = TotalPnL;
+                _lastTradePnLDollars = 0.0;
+                _lastTradeResult = "pending";
+                return;
             }
+
+            if (!isExit)
+                return;
+
+            double tradePnL = double.NaN;
+            int quantity = Math.Max(1, Math.Abs((int)(tradeRecord?.NtQuantity ?? execution.Quantity)));
+            double entryPrice = tradeRecord?.EntryPrice ?? 0.0;
+            if (entryPrice <= 0 && execution.Order != null)
+                entryPrice = execution.Order.AverageFillPrice;
+            if (entryPrice <= 0)
+                entryPrice = execution.Price;
+
+            MarketPosition entrySide = tradeRecord?.Side ?? (action == OrderAction.Sell ? MarketPosition.Long : MarketPosition.Short);
+            double pointValue = execution.Instrument?.MasterInstrument?.PointValue ?? 0.0;
+            if (tradeRecord?.Strategy?.Instrument?.MasterInstrument != null && pointValue <= 0)
+                pointValue = tradeRecord.Strategy.Instrument.MasterInstrument.PointValue;
+
+            if (entryPrice > 0 && pointValue > 0)
+            {
+                double signed = entrySide == MarketPosition.Long
+                    ? (execution.Price - entryPrice)
+                    : (entryPrice - execution.Price);
+                tradePnL = signed * pointValue * quantity;
+            }
+
+            if (double.IsNaN(tradePnL))
+            {
+                double currentPnL = TotalPnL;
+                tradePnL = currentPnL - _lastTradePnL;
+                _lastTradePnL = currentPnL;
+            }
+            else
+            {
+                _lastTradePnL = TotalPnL;
+            }
+
+            if (!string.IsNullOrWhiteSpace(tradeId))
+                _lastTradeBaseId = tradeId;
+            _lastTradeInstrument = tradeRecord?.Instrument ?? execution.Instrument?.FullName ?? _lastTradeInstrument;
+            if (tradeRecord != null && tradeRecord.NtPointsPer1kLoss > 0)
+                _lastTradePointsPer1kLoss = tradeRecord.NtPointsPer1kLoss;
+            else if (_lastTradePointsPer1kLoss <= 0)
+                _lastTradePointsPer1kLoss = GetPointsPer1kLossFromExecution(execution);
+
+            _lastTradePnLDollars = tradePnL;
+            _lastTradeResult = tradePnL >= 0 ? "win" : "loss";
+            _sessionTradeCount++;
+
+            LogAndPrint($"Trade result updated: {_lastTradeResult} (trade_id={_lastTradeBaseId}, P&L: ${tradePnL:F2})");
         }
 
         public event PropertyChangedEventHandler PropertyChanged;
@@ -928,9 +1027,15 @@ public TrailingActivationType TrailingStopType
 
                         string dedupSuffix;
                         long ticketNumber;
+                        string quantityForDedup = ExtractJsonValue(tradeResultJson, "quantity");
+                        string profitLevelForDedup = ExtractJsonValue(tradeResultJson, "elastic_profit_level");
+                        string reasonPart = !string.IsNullOrEmpty(closureReasonForDedup) ? closureReasonForDedup : "none";
+                        string qtyPart = !string.IsNullOrEmpty(quantityForDedup) ? quantityForDedup : "0";
+                        string levelPart = !string.IsNullOrEmpty(profitLevelForDedup) ? profitLevelForDedup : "0";
+
                         if (!string.IsNullOrEmpty(ticketForDedup) && long.TryParse(ticketForDedup, out ticketNumber) && ticketNumber > 0)
                         {
-                            dedupSuffix = ticketNumber.ToString();
+                            dedupSuffix = $"{ticketNumber}_{reasonPart}_{qtyPart}_{levelPart}";
                         }
                         else
                         {
@@ -938,9 +1043,7 @@ public TrailingActivationType TrailingStopType
                             string fallbackId = !string.IsNullOrEmpty(messageId)
                                 ? messageId
                                 : (!string.IsNullOrEmpty(timestampForDedup) ? timestampForDedup : DateTime.UtcNow.Ticks.ToString());
-                            dedupSuffix = !string.IsNullOrEmpty(closureReasonForDedup)
-                                ? $"{fallbackId}_{closureReasonForDedup}"
-                                : fallbackId;
+                            dedupSuffix = $"{fallbackId}_{reasonPart}_{qtyPart}_{levelPart}";
                         }
 
                         string deduplicationKey = $"{action}_{baseId}_{dedupSuffix}"; // action + baseId + (ticket or unique id)
@@ -1007,6 +1110,10 @@ public TrailingActivationType TrailingStopType
                     closureReason = ExtractJsonValue(notificationJson, "nt_trade_result");
                 string mt5TicketStr = ExtractJsonValue(notificationJson, "id"); // Use the closure ID as reference
                 string instrument = ExtractJsonValue(notificationJson, "instrument_name");
+                string quantityStr = ExtractJsonValue(notificationJson, "quantity");
+                int requestedContracts = ParseClosureQuantity(quantityStr);
+                bool isElasticPartial = string.Equals(closureReason, "elastic_partial_close", StringComparison.OrdinalIgnoreCase);
+                bool isRunUp = IsRunUpReason(closureReason);
                 
                 LogInfo("GRPC", $"MT5 closure details - Reason: {closureReason}, Ticket: {mt5TicketStr}, Instrument: {instrument}");
                 
@@ -1027,7 +1134,13 @@ public TrailingActivationType TrailingStopType
                 
                 LogInfo("GRPC", $"Using account '{account.Name}' for MT5 closure handling");
                 LogInfo("GRPC", $"DEBUG: Available accounts: {string.Join(", ", Account.All.Select(a => $"{a.Name}({a.Positions.Count} pos)"))}");
-                
+
+                if (!isRunUp && TryDelegateClosureToStrategy(baseId, isElasticPartial, requestedContracts))
+                {
+                    LogInfo("GRPC", $"Delegated MT5 {(isElasticPartial ? "partial " : string.Empty)}closure to owning strategy for BaseID: {baseId}");
+                    return;
+                }
+
                 // HEDGING SYSTEM: Find and close ONLY the specific position matching this base_id
                 var positionsToClose = new List<NinjaTrader.Cbi.Position>();
                 LogInfo("GRPC", $"DEBUG: Looking for positions to close. Account has {account.Positions.Count} positions and {account.Orders.Count} orders");
@@ -1059,6 +1172,11 @@ public TrailingActivationType TrailingStopType
                         LogInfo("GRPC", $"DEBUG: Found matching position to close: {targetPosition.Instrument.MasterInstrument.Name} (Quantity: {targetPosition.Quantity})");
                         LogInfo("GRPC", $"SEQUENTIAL_CLOSE_OK: Proceeding even if current qty < original trade qty {originalTradeDetails.Quantity}");
                         positionsToClose.Add(targetPosition);
+                        if (IsRunUpReason(closureReason) && TryActivateNtRunUp(targetPosition, baseId, closureReason))
+                        {
+                            LogInfo("GRPC", $"[RUN_UP_BYPASS] Keeping NT trade open for {baseId}; MT5 hedge stopped out (reason={closureReason})");
+                            return;
+                        }
                         // Do NOT mark IsClosed here. We'll decrement RemainingQuantity when the NT close order actually fills
                         // in the execution/closure tracking path. This preserves sequential MT5 closes for multi-quantity trades.
                     }
@@ -1079,7 +1197,7 @@ public TrailingActivationType TrailingStopType
                     LogInfo("GRPC", $"INTELLIGENT_MATCHING: Attempting to match position using closure notification details...");
                     
                     // Extract closure details for intelligent matching
-                    string quantityStr = ExtractJsonValue(notificationJson, "quantity");
+                    quantityStr = ExtractJsonValue(notificationJson, "quantity");
                     
                     if (double.TryParse(quantityStr, out double closedQuantity) && closedQuantity > 0)
                     {
@@ -1124,6 +1242,11 @@ public TrailingActivationType TrailingStopType
                         {
                             LogInfo("GRPC", $"SAFE_MATCH: Found exactly one safe candidate position - safe to close: {safePositions[0].Instrument.FullName} (Qty: {safePositions[0].Quantity})");
                             positionsToClose.Add(safePositions[0]);
+                            if (IsRunUpReason(closureReason) && TryActivateNtRunUp(safePositions[0], baseId, closureReason))
+                            {
+                                LogInfo("GRPC", $"[RUN_UP_BYPASS] Keeping NT trade open for {baseId}; MT5 hedge stopped out (reason={closureReason})");
+                                return;
+                            }
                         }
                         else if (safePositions.Count == 0)
                         {
@@ -1288,6 +1411,44 @@ public TrailingActivationType TrailingStopType
             }
         }
 
+        private int ParseClosureQuantity(string quantityStr)
+        {
+            if (!string.IsNullOrWhiteSpace(quantityStr) && double.TryParse(quantityStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+            {
+                double normalized = Math.Max(1.0, Math.Abs(parsed));
+                return Math.Max(1, (int)Math.Round(normalized));
+            }
+            return 1;
+        }
+
+        private bool TryDelegateClosureToStrategy(string baseId, bool isElasticPartial, int requestedContracts)
+        {
+            if (tradeSyncService == null || string.IsNullOrWhiteSpace(baseId))
+                return false;
+
+            TradeSyncService.TradeRecord record;
+            if (!tradeSyncService.TryGetTrade(baseId, out record) || record?.Strategy == null)
+                return false;
+
+            if (!(record.Strategy is ITradeSyncParticipant))
+                return false;
+
+            int qty = Math.Max(1, requestedContracts);
+            if (isElasticPartial)
+            {
+                int remaining = Math.Max(1, record.RemainingQuantity);
+                qty = Math.Min(qty, remaining);
+                tradeSyncService.HandleBridgePartial(baseId, qty);
+                LogInfo("GRPC", $"Delegated elastic partial close (qty={qty}) to strategy '{record.Strategy.Name}' for BaseID: {baseId}");
+            }
+            else
+            {
+                tradeSyncService.HandleBridgeClosed(baseId);
+                LogInfo("GRPC", $"Delegated MT5 close to strategy '{record.Strategy.Name}' for BaseID: {baseId}");
+            }
+            return true;
+        }
+
         private void CancelProtectiveOrdersForBaseId(Account account, string baseId)
         {
             if (account == null || string.IsNullOrWhiteSpace(baseId))
@@ -1399,6 +1560,12 @@ public TrailingActivationType TrailingStopType
             StopHeartbeatSystem();
         }
 
+        private void ResetPnLStreamState()
+        {
+            lastPnLSent = double.NaN;
+            lastPnLSentAt = DateTime.MinValue;
+        }
+
         /// <summary>
         /// Start periodic NT PnL streaming to MT5 via SubmitTrade(EVENT) without touching elastic/trailing.
         /// EA already parses nt_daily_pnl from any incoming message and updates tier state accordingly.
@@ -1506,11 +1673,15 @@ public TrailingActivationType TrailingStopType
                 {
                     { "action", "EVENT" },
                     { "event_type", "nt_pnl_update" },
+                    { "base_id", _lastTradeBaseId ?? string.Empty },
+                    { "instrument", _lastTradeInstrument ?? string.Empty },
                     { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
                     { "account_name", account.Name },
                     { "nt_balance", (float)_sessionStartBalance },
                     { "nt_daily_pnl", (float)currentPnL },
+                    { "nt_trade_pnl", (float)_lastTradePnLDollars },
                     { "nt_trade_result", _lastTradeResult },
+                    { "nt_points_per_1k_loss", (float)_lastTradePointsPer1kLoss },
                     { "nt_session_trades", _sessionTradeCount }
                 };
 
@@ -2426,6 +2597,14 @@ public TrailingActivationType TrailingStopType
             });
         }
 
+        public void NotifyManualOverride(string tradeId, bool? stopLocked, bool? targetLocked)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId) || trailingAndElasticManager == null)
+                return;
+
+            trailingAndElasticManager.ApplyManualOverride(tradeId, stopLocked, targetLocked);
+        }
+
         private static bool IsBacktestAccount(string accountName)
         {
             if (string.IsNullOrWhiteSpace(accountName))
@@ -2668,6 +2847,36 @@ public TrailingActivationType TrailingStopType
             string baseId = record.TradeId;
             double closedQuantity = quantityToClose;
 
+            // Infer per-trade result using last known result; if unknown, estimate from current price vs entry.
+            string tradeResultField = !string.IsNullOrWhiteSpace(_lastTradeResult)
+                ? _lastTradeResult
+                : (reason == "NT_FULL_CLOSE" ? "closed" : "partial");
+
+            var instrumentObj = record.Strategy?.Instrument;
+
+            if (string.IsNullOrWhiteSpace(_lastTradeResult) && record.EntryPrice > 0 && instrumentObj != null)
+            {
+                double mark = GetCurrentPrice(instrumentObj);
+                if (mark > 0)
+                {
+                    bool isLoss = false;
+                    if (record.Side == MarketPosition.Long)
+                        isLoss = mark < record.EntryPrice - 1e-6;
+                    else if (record.Side == MarketPosition.Short)
+                        isLoss = mark > record.EntryPrice + 1e-6;
+
+                    if (isLoss)
+                        tradeResultField = "loss";
+                    else
+                        tradeResultField = "win";
+                }
+            }
+
+            // If this NT close is a loss, emit a distinct closure_reason so MT5 can trigger run-up.
+            string closureReasonField = reason;
+            if (reason == "NT_FULL_CLOSE" && tradeResultField.Equals("loss", StringComparison.OrdinalIgnoreCase))
+                closureReasonField = "NT_LOSS_CLOSE";
+
             ulong mt5Ticket = 0;
             for (int retry = 0; retry < 3; retry++)
             {
@@ -2700,15 +2909,15 @@ public TrailingActivationType TrailingStopType
                 { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
                 { "nt_balance", SessionStartBalance },
                 { "nt_daily_pnl", DailyPnL },
-                { "nt_trade_result", reason == "NT_FULL_CLOSE" ? "closed" : "partial" },
+                { "nt_trade_result", tradeResultField },
                 { "nt_session_trades", SessionTradeCount },
-                { "closure_reason", reason },
+                { "closure_reason", closureReasonField },
                 { "mt5_ticket", mt5Ticket },
                 { "remaining_quantity", (double)record.RemainingQuantity }
             };
 
             string closureJson = SimpleJson.SerializeObject(closureData);
-            LogAndPrint($"NT_CLOSURE: Sending hedge closure request for {baseId} (reason={reason}, qty={closedQuantity}) -> {closureJson}");
+            LogAndPrint($"NT_CLOSURE: Sending hedge closure request for {baseId} (reason={closureReasonField}, nt_trade_result={tradeResultField}, qty={closedQuantity}) -> {closureJson}");
 
             if (IsBacktestAccount(record.AccountName))
             {
@@ -2739,6 +2948,147 @@ public TrailingActivationType TrailingStopType
                     LogAndPrint($"ERROR: Exception sending CLOSE_HEDGE via gRPC for BaseID: {baseId}. Exception: {ex.Message}");
                 }
             });
+        }
+
+        internal void AdjustExposure(StrategyBase strategy, string accountName, string instrumentName, double delta)
+        {
+            if (Math.Abs(delta) < 1e-9)
+                return;
+
+            string key = BuildExposureKey(accountName, instrumentName);
+
+            lock (exposureLock)
+            {
+                double total = 0;
+                exposureByKey.TryGetValue(key, out total);
+                total += delta;
+                if (Math.Abs(total) < 1e-9)
+                    exposureByKey.Remove(key);
+                else
+                    exposureByKey[key] = total;
+
+                if (strategy != null)
+                {
+                    if (!exposureByStrategy.TryGetValue(strategy, out var dict))
+                    {
+                        dict = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
+                        exposureByStrategy[strategy] = dict;
+                    }
+
+                    double own = 0;
+                    dict.TryGetValue(key, out own);
+                    own += delta;
+                    if (Math.Abs(own) < 1e-9)
+                    {
+                        dict.Remove(key);
+                        if (dict.Count == 0)
+                            exposureByStrategy.Remove(strategy);
+                    }
+                    else
+                    {
+                        dict[key] = own;
+                    }
+                }
+            }
+        }
+
+        public void FlushExposureState(bool rebuildFromOpenTrades)
+        {
+            int clearedInstrumentEntries;
+            int clearedStrategyScopes;
+
+            lock (exposureLock)
+            {
+                clearedInstrumentEntries = exposureByKey.Count;
+                clearedStrategyScopes = exposureByStrategy.Count;
+                exposureByKey.Clear();
+                exposureByStrategy.Clear();
+            }
+
+            LogAndPrint($"EXPOSURE_FLUSH: Cleared {clearedInstrumentEntries} instrument entries across {clearedStrategyScopes} strategy scopes.");
+
+            if (!rebuildFromOpenTrades)
+                return;
+
+            var openTrades = tradeSyncService?.GetOpenTradesSnapshot();
+            if (openTrades == null || openTrades.Count == 0)
+            {
+                LogAndPrint("EXPOSURE_FLUSH: No open trades detected during rebuild.");
+                return;
+            }
+
+            foreach (var trade in openTrades)
+            {
+                if (trade == null)
+                    continue;
+
+                double signedQty = GetSignedQuantity(trade.Side, trade.RemainingQuantity);
+                if (Math.Abs(signedQty) < 1e-9)
+                    continue;
+
+                AdjustExposure(trade.Strategy, trade.AccountName, trade.Instrument, signedQty);
+            }
+
+            LogAndPrint($"EXPOSURE_FLUSH: Rebuilt exposure ledger from {openTrades.Count} open trade(s).");
+        }
+
+        internal void ClearExposureForStrategy(StrategyBase strategy)
+        {
+            if (strategy == null)
+                return;
+
+            lock (exposureLock)
+            {
+                if (!exposureByStrategy.TryGetValue(strategy, out var dict))
+                    return;
+
+                foreach (var kvp in dict)
+                {
+                    if (exposureByKey.TryGetValue(kvp.Key, out var total))
+                    {
+                        total -= kvp.Value;
+                        if (Math.Abs(total) < 1e-9)
+                            exposureByKey.Remove(kvp.Key);
+                        else
+                            exposureByKey[kvp.Key] = total;
+                    }
+                }
+
+                exposureByStrategy.Remove(strategy);
+            }
+        }
+
+        public double GetNetExposure(string accountName, string instrumentName, StrategyBase requestingStrategy, out bool hasData)
+        {
+            string key = BuildExposureKey(accountName, instrumentName);
+            lock (exposureLock)
+            {
+                if (!exposureByKey.TryGetValue(key, out var total))
+                {
+                    hasData = false;
+                    return 0;
+                }
+
+                hasData = true;
+                if (requestingStrategy != null && exposureByStrategy.TryGetValue(requestingStrategy, out var dict) && dict.TryGetValue(key, out var own))
+                    total -= own;
+                return total;
+            }
+        }
+
+        private static string BuildExposureKey(string accountName, string instrumentName)
+        {
+            string acct = string.IsNullOrWhiteSpace(accountName) ? "<NONE>" : accountName.Trim().ToUpperInvariant();
+            string inst = string.IsNullOrWhiteSpace(instrumentName) ? "<NONE>" : instrumentName.Trim().ToUpperInvariant();
+            return acct + "||" + inst;
+        }
+
+        private static double GetSignedQuantity(MarketPosition side, double quantity)
+        {
+            double absQty = Math.Abs(quantity);
+            if (absQty < 1e-9)
+                return 0;
+            return side == MarketPosition.Short ? -absQty : absQty;
         }
 
         private async Task SendToBridge(Dictionary<string, object> data)
@@ -3013,6 +3363,11 @@ public TrailingActivationType TrailingStopType
             LogInfo("SYSTEM", $"[MultiStratManager] Unsubscribed from events for account {monitoredAccount.Name}");
         }
 
+        // Reset PnL streaming state for any account change so the first emit uses the new account context.
+        ResetPnLStreamState();
+        // Stop the timer if it was already running; we'll restart after the new account is set.
+        StopPnLStreamingTimer();
+
         monitoredAccount = account;
 
         // Subscribe to new account if not null
@@ -3047,6 +3402,10 @@ public TrailingActivationType TrailingStopType
             {
                 trailingAndElasticManager.InitializeElasticMonitoring(monitoredAccount);
             }
+
+            // Re-start lightweight PnL streaming for the new account and emit immediately.
+            StartPnLStreamingTimer();
+            EmitPnLUpdateIfNeeded();
         }
         else
         {
@@ -3128,10 +3487,15 @@ public TrailingActivationType TrailingStopType
                     return;
                 }
 
-                UpdateTradeResult(execution);
-
                 TradeSyncService.TradeRecord record;
-                if (tradeSyncService != null && tradeSyncService.TryGetTrade(tradeId, out record))
+                if (tradeSyncService != null)
+                    tradeSyncService.TryGetTrade(tradeId, out record);
+                else
+                    record = null;
+
+                UpdateTradeResult(execution, tradeId, record);
+
+                if (record != null)
                 {
                     trailingAndElasticManager?.UpdateRemainingQuantity(tradeId, record.RemainingQuantity);
                 }
@@ -3286,6 +3650,56 @@ public TrailingActivationType TrailingStopType
         LogAndPrint($"[HEDGE_CLOSE_COMPLETE] Hedge close notification processed for BaseID {notification.base_id} via gRPC");
     }
 
+    private RunUpConfig BuildRunUpConfig()
+    {
+        return new RunUpConfig
+        {
+            Enabled = EnableNtRunUp,
+            DistanceUnits = NtRunUpDistanceUnits,
+            DistanceValue = NtRunUpDistanceValue,
+            IncrementUnits = NtRunUpIncrementUnits,
+            IncrementValue = NtRunUpIncrementValue
+        };
+    }
+
+    private bool IsRunUpReason(string closureReason)
+    {
+        return EnableNtRunUp && !string.IsNullOrWhiteSpace(closureReason) &&
+               closureReason.Equals("mt5_simple_sl", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool TryActivateNtRunUp(Position position, string baseId, string closureReason)
+    {
+        if (position == null || position.Quantity == 0 || string.IsNullOrWhiteSpace(baseId))
+            return false;
+        if (!IsRunUpReason(closureReason))
+            return false;
+        if (tradeSyncService == null)
+            return false;
+
+        double anchorPrice = GetCurrentPrice(position.Instrument);
+        if (anchorPrice <= 0 && position.Instrument?.MarketData?.Last != null)
+            anchorPrice = position.Instrument.MarketData.Last.Price;
+        if (anchorPrice <= 0)
+        {
+            LogAndPrint($"[RUN_UP_SKIP] Unable to determine current price for {baseId}; run-up not activated.");
+            return false;
+        }
+
+        var config = BuildRunUpConfig();
+        if (!config.Enabled)
+            return false;
+
+        bool started = tradeSyncService.StartRunUpTrailing(baseId, anchorPrice, config);
+        if (started)
+        {
+            LogAndPrint($"[RUN_UP_START] Activated NT Trade Run-Up for {baseId} at price {anchorPrice:F2} (reason={closureReason})");
+            return true;
+        }
+
+        return false;
+    }
+
     /// <summary>
     /// Process actual position closure for hedge notifications
     /// </summary>
@@ -3315,6 +3729,11 @@ public TrailingActivationType TrailingStopType
             var reason = notification.ClosureReason ?? ExtractJsonValue(SimpleJson.SerializeObject(notification), "closure_reason");
             bool isElasticCompletion = !string.IsNullOrEmpty(reason) && reason.Equals("elastic_completion", StringComparison.OrdinalIgnoreCase);
             bool isElasticPartial = !string.IsNullOrEmpty(reason) && reason.Equals("elastic_partial_close", StringComparison.OrdinalIgnoreCase);
+            if (IsRunUpReason(reason) && TryActivateNtRunUp(position, notification.base_id, reason))
+            {
+                LogAndPrint($"[RUN_UP_BYPASS] Keeping NT trade open for {notification.base_id}; MT5 hedge stopped out (reason={reason})");
+                return;
+            }
             // 1) elastic_partial_close: NEVER close the NT position; MT5 is reducing hedge size only
             if (isElasticPartial)
             {
@@ -3419,6 +3838,11 @@ public TrailingActivationType TrailingStopType
     /// <returns>True if a closing order should be created, false otherwise</returns>
     private bool ShouldCreateClosingOrderForReason(string closureReason)
     {
+        if (IsRunUpReason(closureReason))
+        {
+            LogAndPrint($"CLOSURE_LOGIC: Reason '{closureReason}' is handled by NT Run-Up. Skipping NT close.");
+            return false;
+        }
         if (string.IsNullOrEmpty(closureReason))
         {
             // If no closure reason is provided, default to creating closing order for backward compatibility

@@ -75,6 +75,10 @@ type App struct {
 	// Sequence counter for unique elastic event IDs
 	elasticSeqMux   sync.Mutex
 	elasticSeqCount uint64
+
+	// Sequence tracking for elastic close notifications (per base/ticket)
+	elasticCloseSeqMux sync.Mutex
+	elasticCloseSeq    map[string]int
 }
 
 type tradeSyncState struct {
@@ -117,6 +121,40 @@ func (a *App) markElasticClose(baseID string, ticket uint64, reason string, qty 
 	}
 	a.elasticMux.Unlock()
 	log.Printf("gRPC: Marked recent elastic close context: base_id=%s ticket=%d reason=%s qty=%.4f", baseID, ticket, reason, qty)
+}
+
+// nextElasticCloseLevel increments and returns the sequence number for (baseID,ticket)
+func (a *App) nextElasticCloseLevel(baseID string, ticket uint64) int {
+	key := strings.TrimSpace(baseID)
+	if key == "" && ticket == 0 {
+		return 0
+	}
+	if ticket != 0 {
+		key = fmt.Sprintf("%s:%d", key, ticket)
+	}
+	a.elasticCloseSeqMux.Lock()
+	defer a.elasticCloseSeqMux.Unlock()
+	if a.elasticCloseSeq == nil {
+		a.elasticCloseSeq = make(map[string]int)
+	}
+	a.elasticCloseSeq[key]++
+	return a.elasticCloseSeq[key]
+}
+
+// resetElasticCloseLevel clears stored sequence state for (baseID,ticket)
+func (a *App) resetElasticCloseLevel(baseID string, ticket uint64) {
+	key := strings.TrimSpace(baseID)
+	if key == "" && ticket == 0 {
+		return
+	}
+	if ticket != 0 {
+		key = fmt.Sprintf("%s:%d", key, ticket)
+	}
+	a.elasticCloseSeqMux.Lock()
+	if a.elasticCloseSeq != nil {
+		delete(a.elasticCloseSeq, key)
+	}
+	a.elasticCloseSeqMux.Unlock()
 }
 
 // recentElasticFor returns an elastic marker if found for base or ticket within a TTL
@@ -842,7 +880,8 @@ func (a *App) HandleHedgeCloseNotification(notification interface{}) error {
 	// Elastic reasons are intentful EA-side close events (partial or completion) and must NOT
 	// be turned into NT-initiated CLOSE_HEDGE requests.
 	lowerReason := strings.ToLower(strings.TrimSpace(closureReason))
-	isMT5Closure := closureReason == "MT5_position_closed" ||
+	isMT5Closure := strings.HasPrefix(lowerReason, "mt5_") ||
+		closureReason == "MT5_position_closed" ||
 		closureReason == "MT5_stop_loss" ||
 		closureReason == "MT5_manual_close" ||
 		closureReason == "MT5_take_profit" ||
@@ -853,27 +892,7 @@ func (a *App) HandleHedgeCloseNotification(notification interface{}) error {
 		log.Printf("gRPC: MT5-initiated closure detected - notifying NinjaTrader for BaseID: %s", baseID)
 
 		// Create a close notification trade for NinjaTrader
-		closeNotification := struct {
-			ID              string    `json:"id"`
-			BaseID          string    `json:"base_id"`
-			Time            time.Time `json:"time"`
-			Action          string    `json:"action"`
-			Quantity        float64   `json:"quantity"`
-			Price           float64   `json:"price"`
-			TotalQuantity   float64   `json:"total_quantity"`
-			ContractNum     int       `json:"contract_num"`
-			OrderType       string    `json:"order_type"`
-			MeasurementPips float64   `json:"measurement_pips"`
-			RawMeasurement  float64   `json:"raw_measurement"`
-			Instrument      string    `json:"instrument"`
-			AccountName     string    `json:"account_name"`
-			NTBalance       float64   `json:"nt_balance"`
-			NTDailyPnL      float64   `json:"nt_daily_pnl"`
-			NTTradeResult   string    `json:"nt_trade_result"`
-			NTSessionTrades int       `json:"nt_session_trades"`
-			MT5Ticket       uint64    `json:"mt5_ticket"`
-			ClosureReason   string    `json:"closure_reason"`
-		}{
+		closeNotification := grpcserver.MT5CloseNotification{
 			ID:              fmt.Sprintf("mt5close_%d", time.Now().UnixNano()),
 			BaseID:          baseID,
 			Time:            time.Now(),
@@ -894,6 +913,14 @@ func (a *App) HandleHedgeCloseNotification(notification interface{}) error {
 			MT5Ticket:       getMT5TicketFromRequest(notification),
 			ClosureReason:   closureReason,
 		}
+
+		level := -1
+		if strings.HasPrefix(lowerReason, "elastic_") {
+			level = a.nextElasticCloseLevel(baseID, closeNotification.MT5Ticket)
+		} else {
+			a.resetElasticCloseLevel(baseID, closeNotification.MT5Ticket)
+		}
+		closeNotification.ElasticProfitLevel = level
 
 		// If this is an elastic signaled close, mark context for correlation and avoid
 		// mutating ticket pools on partials (MT5 position remains open with reduced volume).
@@ -969,6 +996,7 @@ func (a *App) HandleHedgeCloseNotification(notification interface{}) error {
 			}
 			a.mt5TicketMux.Unlock()
 			log.Printf("gRPC: Pruned MT5 ticket mapping for closed ticket %d (BaseID: %s)", closeNotification.MT5Ticket, baseID)
+			a.resetElasticCloseLevel(baseID, closeNotification.MT5Ticket)
 		}
 
 		log.Printf("gRPC: Successfully sent MT5 closure notification to NinjaTrader for BaseID: %s", baseID)
@@ -1050,27 +1078,7 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 				}
 
 				// Broadcast MT5 close notification to NT streams (idempotent on NT side)
-				closeNotification := struct {
-					ID              string    `json:"id"`
-					BaseID          string    `json:"base_id"`
-					Time            time.Time `json:"time"`
-					Action          string    `json:"action"`
-					Quantity        float64   `json:"quantity"`
-					Price           float64   `json:"price"`
-					TotalQuantity   float64   `json:"total_quantity"`
-					ContractNum     int       `json:"contract_num"`
-					OrderType       string    `json:"order_type"`
-					MeasurementPips float64   `json:"measurement_pips"`
-					RawMeasurement  float64   `json:"raw_measurement"`
-					Instrument      string    `json:"instrument"`
-					AccountName     string    `json:"account_name"`
-					NTBalance       float64   `json:"nt_balance"`
-					NTDailyPnL      float64   `json:"nt_daily_pnl"`
-					NTTradeResult   string    `json:"nt_trade_result"`
-					NTSessionTrades int       `json:"nt_session_trades"`
-					MT5Ticket       uint64    `json:"mt5_ticket"`
-					ClosureReason   string    `json:"closure_reason"`
-				}{
+				closeNotification := grpcserver.MT5CloseNotification{
 					ID:              fmt.Sprintf("mt5close_result_%d", time.Now().UnixNano()),
 					BaseID:          base,
 					Time:            time.Now(),
@@ -1216,6 +1224,52 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 		}
 	case map[string]interface{}:
 		// Legacy map format (keep for compatibility)
+		getFloat := func(keys ...string) (float64, bool) {
+			for _, key := range keys {
+				if raw, ok := mt5Result[key]; ok && raw != nil {
+					switch v := raw.(type) {
+					case float64:
+						return v, true
+					case float32:
+						return float64(v), true
+					case int:
+						return float64(v), true
+					case int32:
+						return float64(v), true
+					case int64:
+						return float64(v), true
+					case uint:
+						return float64(v), true
+					case uint32:
+						return float64(v), true
+					case uint64:
+						return float64(v), true
+					case json.Number:
+						if f, err := v.Float64(); err == nil {
+							return f, true
+						}
+					case string:
+						if parsed, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+							return parsed, true
+						}
+					}
+				}
+			}
+			return 0, false
+		}
+		getString := func(keys ...string) string {
+			for _, key := range keys {
+				if raw, ok := mt5Result[key]; ok {
+					if str, ok := raw.(string); ok {
+						if trimmed := strings.TrimSpace(str); trimmed != "" {
+							return trimmed
+						}
+					}
+				}
+			}
+			return ""
+		}
+
 		if ticketFloat, ok := mt5Result["Ticket"].(float64); ok {
 			ticket := uint64(ticketFloat)
 
@@ -1225,6 +1279,22 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 					isClose = ic
 				}
 				if isClose {
+					qty := 1.0
+					if v, ok := getFloat("Volume", "volume", "Quantity", "quantity", "Lots", "lots"); ok && v > 0 {
+						qty = v
+					}
+					inst := getString("Instrument", "instrument", "InstrumentName", "instrument_name")
+					acct := getString("AccountName", "account_name", "Account", "account")
+					if inst == "" || acct == "" {
+						bestInst, bestAcct := a.bestInstAcctFor(baseId)
+						if inst == "" {
+							inst = bestInst
+						}
+						if acct == "" {
+							acct = bestAcct
+						}
+					}
+
 					// Prune mappings on close and notify NT
 					// Check for recent elastic context before processing
 					var baseElastic string
@@ -1254,6 +1324,12 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 							a.baseIdToTickets[baseId] = nl
 						}
 					}
+					if inst != "" {
+						a.baseIdToInstrument[baseId] = inst
+					}
+					if acct != "" {
+						a.baseIdToAccount[baseId] = acct
+					}
 					a.mt5TicketMux.Unlock()
 
 					// Determine origin for tagging
@@ -1277,40 +1353,20 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 						}
 					}
 
-					closeNotification := struct {
-						ID              string    `json:"id"`
-						BaseID          string    `json:"base_id"`
-						Time            time.Time `json:"time"`
-						Action          string    `json:"action"`
-						Quantity        float64   `json:"quantity"`
-						Price           float64   `json:"price"`
-						TotalQuantity   float64   `json:"total_quantity"`
-						ContractNum     int       `json:"contract_num"`
-						OrderType       string    `json:"order_type"`
-						MeasurementPips float64   `json:"measurement_pips"`
-						RawMeasurement  float64   `json:"raw_measurement"`
-						Instrument      string    `json:"instrument"`
-						AccountName     string    `json:"account_name"`
-						NTBalance       float64   `json:"nt_balance"`
-						NTDailyPnL      float64   `json:"nt_daily_pnl"`
-						NTTradeResult   string    `json:"nt_trade_result"`
-						NTSessionTrades int       `json:"nt_session_trades"`
-						MT5Ticket       uint64    `json:"mt5_ticket"`
-						ClosureReason   string    `json:"closure_reason"`
-					}{
+					closeNotification := grpcserver.MT5CloseNotification{
 						ID:              fmt.Sprintf("mt5close_result_%d", time.Now().UnixNano()),
 						BaseID:          baseId,
 						Time:            time.Now(),
 						Action:          "MT5_CLOSE_NOTIFICATION",
-						Quantity:        0,
+						Quantity:        qty,
 						Price:           0,
-						TotalQuantity:   0,
+						TotalQuantity:   qty,
 						ContractNum:     1,
 						OrderType:       orderType,
 						MeasurementPips: 0,
 						RawMeasurement:  0,
-						Instrument:      func() string { i, _ := a.bestInstAcctFor(baseId); return i }(),
-						AccountName:     func() string { _, ac := a.bestInstAcctFor(baseId); return ac }(),
+						Instrument:      inst,
+						AccountName:     acct,
 						NTBalance:       0,
 						NTDailyPnL:      0,
 						NTTradeResult:   "mt5_closed",

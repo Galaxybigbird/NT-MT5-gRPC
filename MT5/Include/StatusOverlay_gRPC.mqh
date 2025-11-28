@@ -11,6 +11,20 @@ color g_overlayTextColor = clrWhite;
 color g_overlayBackColor = clrDarkBlue;
 int g_overlayFontSize = 9;
 string g_overlayFont = "Consolas";
+const int OVERLAY_MAX_PLANNER_LINES = 10;
+string g_overlayPlannerLines[];
+datetime g_overlayPlannerLastUpdate = 0;
+bool g_overlayPlannerHasPlan = false;
+bool g_overlayPlannerTargetAchieved = false;
+double g_overlayPlannerProjectedLoss = 0.0;
+
+#ifndef SELF_ELASTIC_MODE
+    #ifdef Self_Elastic_Closures
+        #define SELF_ELASTIC_MODE Self_Elastic_Closures
+    #else
+        #define SELF_ELASTIC_MODE Elastic_Hedging
+    #endif
+#endif
 
 // Cushion band colors (adjusted for $300 account)
 color GetCushionColor(double cushion)
@@ -31,7 +45,7 @@ void InitStatusOverlay()
     ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, g_overlayX);
     ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, g_overlayY);
     ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 300);
-    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, 200);
+    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, 260);
     ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, g_overlayBackColor);
     ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
     ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -67,6 +81,52 @@ void CreateOrUpdateLabel(string name, string text, int yOffset, color textColor 
     ObjectSetInteger(0, fullName, OBJPROP_YDISTANCE, g_overlayY + yOffset);
     ObjectSetInteger(0, fullName, OBJPROP_COLOR, textColor);
     ObjectSetString(0, fullName, OBJPROP_TEXT, text);
+}
+
+void DeleteOverlayLabel(string name)
+{
+    string fullName = g_overlayPrefix + name;
+    if(ObjectFind(0, fullName) >= 0)
+        ObjectDelete(0, fullName);
+}
+
+void OverlayClearPlannerStatistics()
+{
+    g_overlayPlannerHasPlan = false;
+    g_overlayPlannerTargetAchieved = false;
+    g_overlayPlannerProjectedLoss = 0.0;
+    g_overlayPlannerLastUpdate = 0;
+    ArrayResize(g_overlayPlannerLines, 0);
+}
+
+void OverlaySetPlannerStatistics(const string summary, double projectedLoss, bool targetAchieved)
+{
+    g_overlayPlannerProjectedLoss = projectedLoss;
+    g_overlayPlannerTargetAchieved = targetAchieved;
+    g_overlayPlannerLastUpdate = TimeCurrent();
+    ArrayResize(g_overlayPlannerLines, 0);
+
+    if(summary == "")
+    {
+        g_overlayPlannerHasPlan = false;
+        return;
+    }
+
+    string parts[];
+    const ushort newline = 10; // avoid implicit string->number conversion warning
+    int count = StringSplit(summary, newline, parts);
+
+    if(count > 0)
+    {
+        g_overlayPlannerHasPlan = true;
+        ArrayResize(g_overlayPlannerLines, count);
+        for(int i = 0; i < count; ++i)
+            g_overlayPlannerLines[i] = parts[i];
+    }
+    else
+    {
+        g_overlayPlannerHasPlan = false;
+    }
 }
 
 // Global variables for caching overlay calculations
@@ -117,7 +177,7 @@ void ForceOverlayRecalculation()
 void UpdateStatusOverlay()
 {
     // Only show overlay when in Elastic Hedging mode
-    if(LotSizingMode != Elastic_Hedging)
+    if(LotSizingMode != SELF_ELASTIC_MODE)
     {
         RemoveStatusOverlay();
         return;
@@ -130,9 +190,9 @@ void UpdateStatusOverlay()
 
     // WHACK-A-MOLE FIX: Enhanced change detection with more state variables
     bool balance_changed = (MathAbs(balance - g_last_balance_for_calc) > 0.01);
-    bool futures_changed = (MathAbs(globalFutures - g_last_global_futures_for_calc) > 0.01);
-    bool cushion_changed = (MathAbs(cushion - g_last_cushion_for_calc) > 0.01);
-    bool ohf_changed = (MathAbs(ohf - g_last_ohf_for_calc) > 0.01);
+    bool futures_changed = false;
+    bool cushion_changed = (MathAbs(g_lastCushion - g_last_cushion_for_calc) > 0.01);
+    bool ohf_changed = (MathAbs(g_lastOHF - g_last_ohf_for_calc) > 0.01);
     bool nt_data_changed = (MathAbs(g_lastNTBalance - g_last_nt_balance_for_overlay) > 0.01) ||
                           (MathAbs(g_ntDailyPnL - g_last_nt_daily_pnl_for_overlay) > 0.01) ||
                           (g_lastNTTradeResult != g_last_nt_result_for_overlay) ||
@@ -153,10 +213,10 @@ void UpdateStatusOverlay()
         }
 
         // Calculate next lot estimate based on lot sizing mode
-        if (LotSizingMode == Elastic_Hedging) {
+        if (LotSizingMode == SELF_ELASTIC_MODE) {
             // Use tier-based calculation for elastic hedging
-            double targetProfit;
-            bool isHighRiskTier = (g_ntDailyPnL <= -1000.0); // Tier 2 threshold
+        double targetProfit;
+        bool isHighRiskTier = (g_ntDailyPnL <= -1000.0); // Tier 2 threshold
             
             if (isHighRiskTier) {
                 targetProfit = 200.0; // Tier 2 target
@@ -183,7 +243,7 @@ void UpdateStatusOverlay()
         g_cached_next_lot_est = nextLotEst;
         g_last_calculation_time = TimeCurrent();
         g_last_balance_for_calc = balance;
-        g_last_global_futures_for_calc = globalFutures;
+        g_last_global_futures_for_calc = balance;
         g_last_cushion_for_calc = cushion;
         g_last_ohf_for_calc = ohf;
         g_last_nt_balance_for_overlay = g_lastNTBalance;
@@ -194,7 +254,7 @@ void UpdateStatusOverlay()
 
         if(g_overlay_debug_enabled) {
             Print("OVERLAY_CALC: Recalculated lot estimate: ", nextLotEst,
-                  " (Balance: $", balance, ", Futures: ", globalFutures,
+                  " (Balance: $", balance, ", Futures: ", 0.0,
                   ", Cushion: $", cushion, ", OHF: ", ohf, ")");
         }
     }
@@ -211,50 +271,69 @@ void UpdateStatusOverlay()
     // Count hedge positions
     int openHedgeCount = CountAllHedgePositions();
     
-    color cushionColor = GetCushionColor(cushion);
-    
     // Create title
     CreateOrUpdateLabel("Title", "=== ELASTIC HEDGING TELEMETRY ===", 5, clrCyan);
     
     // Balance
     CreateOrUpdateLabel("Balance", StringFormat("Balance:        $%.2f", balance), 25);
     
-    // EOD High
-    CreateOrUpdateLabel("EODHigh", StringFormat("EOD High:       $%.2f", g_highWaterEOD), 40);
-    
-    // Cushion with color coding
-    CreateOrUpdateLabel("Cushion", StringFormat("Cushion:        $%.2f", cushion), 55, cushionColor);
-    
-    // OHF
-    CreateOrUpdateLabel("OHF", StringFormat("OHF:            %.3f", ohf), 70);
-    
     // Mode
-    CreateOrUpdateLabel("Mode", StringFormat("Mode:           %s", mode), 85);
+    CreateOrUpdateLabel("Mode", StringFormat("Mode:           %s", mode), 40);
     
     // Next lot estimate
-    CreateOrUpdateLabel("NextLot", StringFormat("Next Lot (est): %.2f", nextLotEst), 100);
-    
-    // Global Futures
-    CreateOrUpdateLabel("GlobalFutures", StringFormat("Global Futures: %.0f", globalFutures), 115);
-    
-    // Desired hedges
-    CreateOrUpdateLabel("DesiredHedges", StringFormat("Desired Hedges: %.0f", MathAbs(globalFutures)), 130);
+    CreateOrUpdateLabel("NextLot", StringFormat("Next Lot (est): %.2f", nextLotEst), 55);
     
     // Open hedge count
-    CreateOrUpdateLabel("OpenHedges", StringFormat("Open Hedges:    %d", openHedgeCount), 145);
-    
-    // Cushion band description
-    string bandDesc = "";
-    if(cushion >= 120) bandDesc = "SAFE";
-    else if(cushion >= 80) bandDesc = "LOW RISK";
-    else if(cushion >= 50) bandDesc = "MEDIUM RISK";
-    else if(cushion >= 25) bandDesc = "HIGH RISK";
-    else bandDesc = "DANGER";
-    
-    CreateOrUpdateLabel("BandDesc", StringFormat("Risk Level:     %s", bandDesc), 160, cushionColor);
-    
-    // Last update time
-    CreateOrUpdateLabel("LastUpdate", StringFormat("Updated:        %s", TimeToString(TimeCurrent(), TIME_SECONDS)), 175, clrGray);
+    CreateOrUpdateLabel("OpenHedges", StringFormat("Open Hedges:    %d", openHedgeCount), 70);
+
+    // Remove deprecated labels if they still exist
+    DeleteOverlayLabel("EODHigh");
+    DeleteOverlayLabel("Cushion");
+    DeleteOverlayLabel("OHF");
+    DeleteOverlayLabel("GlobalFutures");
+    DeleteOverlayLabel("DesiredHedges");
+    DeleteOverlayLabel("BandDesc");
+    DeleteOverlayLabel("LastUpdate");
+
+    int yOffset = 90;
+    CreateOrUpdateLabel("PlannerHeader", "--- Planner Statistics ---", yOffset, clrYellow);
+    yOffset += 15;
+
+    if(g_overlayPlannerHasPlan && ArraySize(g_overlayPlannerLines) > 0)
+    {
+        int linesToShow = MathMin(ArraySize(g_overlayPlannerLines), OVERLAY_MAX_PLANNER_LINES);
+        for(int i = 0; i < linesToShow; ++i)
+        {
+            string labelName = StringFormat("PlannerLine%d", i + 1);
+            CreateOrUpdateLabel(labelName, g_overlayPlannerLines[i], yOffset, clrWhite);
+            yOffset += 15;
+        }
+        for(int i = linesToShow; i < OVERLAY_MAX_PLANNER_LINES; ++i)
+        {
+            string labelName = StringFormat("PlannerLine%d", i + 1);
+            DeleteOverlayLabel(labelName);
+        }
+        string statusLabel = g_overlayPlannerTargetAchieved ? "Plan Status:    Target Achieved" : "Plan Status:    Needs Compression";
+        CreateOrUpdateLabel("PlannerStatus", statusLabel, yOffset, g_overlayPlannerTargetAchieved ? clrLime : clrOrange);
+        yOffset += 15;
+        string updatedText = StringFormat("Plan Updated:   %s",
+                                          g_overlayPlannerLastUpdate > 0
+                                          ? TimeToString(g_overlayPlannerLastUpdate, TIME_SECONDS)
+                                          : "n/a");
+        CreateOrUpdateLabel("PlannerUpdated", updatedText, yOffset, clrSilver);
+    }
+    else
+    {
+        CreateOrUpdateLabel("PlannerLine1", "Planner stats pending…", yOffset, clrSilver);
+        yOffset += 15;
+        for(int i = 1; i < OVERLAY_MAX_PLANNER_LINES; ++i)
+        {
+            string labelName = StringFormat("PlannerLine%d", i + 1);
+            DeleteOverlayLabel(labelName);
+        }
+        DeleteOverlayLabel("PlannerStatus");
+        DeleteOverlayLabel("PlannerUpdated");
+    }
 }
 
 // Count current hedge positions (all types)
@@ -283,17 +362,21 @@ int CountAllHedgePositions()
 void RemoveStatusOverlay()
 {
     string objects[] = {
-        "Background", "Title", "Balance", "EODHigh", "Cushion", "OHF", 
-        "Mode", "NextLot", "GlobalFutures", "DesiredHedges", "OpenHedges", 
-        "BandDesc", "LastUpdate"
+        "Background", "Title", "Balance", "Mode", "NextLot", "OpenHedges",
+        "PlannerHeader", "PlannerStatus", "PlannerUpdated",
+        "EODHigh", "Cushion", "OHF", "GlobalFutures", "DesiredHedges", "BandDesc", "LastUpdate"
     };
     
     for(int i = 0; i < ArraySize(objects); i++)
     {
-        string fullName = g_overlayPrefix + objects[i];
-        if(ObjectFind(0, fullName) >= 0)
-        {
-            ObjectDelete(0, fullName);
-        }
+        DeleteOverlayLabel(objects[i]);
     }
+
+    for(int i = 0; i < OVERLAY_MAX_PLANNER_LINES; ++i)
+    {
+        string labelName = StringFormat("PlannerLine%d", i + 1);
+        DeleteOverlayLabel(labelName);
+    }
+
+    OverlayClearPlannerStatistics();
 }

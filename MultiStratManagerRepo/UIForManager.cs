@@ -115,6 +115,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private TextBlock totalPnlText; // Added for Total PnL
         private ToggleButton enabledToggle;
         private Button resetDailyStatusButton; // Added for resetting daily limit status
+        private Button flushExposureButton;
         private Account selectedAccount;
         private TextBox dailyTakeProfitInput;
         private TextBox dailyLossLimitInput;
@@ -1283,6 +1284,19 @@ namespace NinjaTrader.NinjaScript.AddOns
                 resetDailyStatusButton.Click += ResetDailyStatusButton_Click;
                 statusControlsPanel.Children.Add(resetDailyStatusButton);
 
+                flushExposureButton = new Button();
+                flushExposureButton.Content = "Flush Exposure";
+                flushExposureButton.FontFamily = new FontFamily("Segoe UI");
+                flushExposureButton.FontWeight = FontWeights.Medium;
+                if (Resources.Contains("ModernButtonStyle"))
+                    flushExposureButton.Style = Resources["ModernButtonStyle"] as Style;
+                else if (Resources.Contains("StandardButtonStyle"))
+                    flushExposureButton.Style = Resources["StandardButtonStyle"] as Style;
+                flushExposureButton.Margin = new Thickness(10, 0, 0, 0);
+                flushExposureButton.VerticalAlignment = VerticalAlignment.Center;
+                flushExposureButton.Click += FlushExposureButton_Click;
+                statusControlsPanel.Children.Add(flushExposureButton);
+
                 Grid.SetRow(statusControlsPanel, 1);
                 Grid.SetColumn(statusControlsPanel, 3);
                 controlsGrid.Children.Add(statusControlsPanel);
@@ -2051,6 +2065,37 @@ namespace NinjaTrader.NinjaScript.AddOns
             
             demaGroup.Content = demaGrid;
             contentPanel.Children.Add(demaGroup);
+
+            // NT Trade Run-Up Settings
+            GroupBox runUpGroup = CreateTrailingGroupBox("NT Trade Run-Up");
+            Grid runUpGrid = CreateTrailingSettingsGrid();
+            int runUpRow = 0;
+
+            // Enable Run-Up checkbox
+            CheckBox runUpEnable = new CheckBox();
+            runUpEnable.Content = "Enable NT Trade Run-Up (independent of Enable Trailing)";
+            runUpEnable.Foreground = Brushes.White;
+            runUpEnable.Margin = new Thickness(10, 8, 5, 8);
+            runUpEnable.VerticalAlignment = VerticalAlignment.Center;
+            Binding runUpEnableBinding = new Binding("EnableNtRunUp")
+            {
+                Source = MultiStratManager.Instance,
+                Mode = BindingMode.TwoWay,
+                UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged
+            };
+            runUpEnable.SetBinding(CheckBox.IsCheckedProperty, runUpEnableBinding);
+            Grid.SetRow(runUpEnable, runUpRow++);
+            Grid.SetColumn(runUpEnable, 0);
+            Grid.SetColumnSpan(runUpEnable, 2);
+            runUpGrid.Children.Add(runUpEnable);
+
+            // Initial trail distance
+            AddRunUpTypeValueSetting(runUpGrid, runUpRow++, "Initial Distance Type:", "Initial Distance:", "NtRunUpDistanceUnits", "NtRunUpDistanceValue");
+            // Increment step
+            AddRunUpTypeValueSetting(runUpGrid, runUpRow++, "Increment Type:", "Increment Value:", "NtRunUpIncrementUnits", "NtRunUpIncrementValue");
+
+            runUpGroup.Content = runUpGrid;
+            contentPanel.Children.Add(runUpGroup);
             
             /*
             // Create Alternative Trailing Settings Section (DISABLED - merged into Elastic Hedging)
@@ -2482,6 +2527,79 @@ namespace NinjaTrader.NinjaScript.AddOns
             Grid.SetColumn(valueTextBox, 3);
             grid.Children.Add(valueTextBox);
         }
+
+        private void AddRunUpTypeValueSetting(Grid grid, int row, string typeLabel, string valueLabel,
+                                              string typePropertyName, string valuePropertyName)
+        {
+            // Type label
+            TextBlock typeLabelBlock = new TextBlock();
+            typeLabelBlock.Text = typeLabel;
+            typeLabelBlock.Foreground = Brushes.LightGray;
+            typeLabelBlock.VerticalAlignment = VerticalAlignment.Center;
+            typeLabelBlock.Margin = new Thickness(10, 5, 5, 5);
+            Grid.SetRow(typeLabelBlock, row);
+            Grid.SetColumn(typeLabelBlock, 0);
+            grid.Children.Add(typeLabelBlock);
+
+            // Type dropdown (Ticks/Dollars only)
+            ComboBox typeComboBox = new ComboBox();
+            typeComboBox.Margin = new Thickness(0, 5, 10, 5);
+            typeComboBox.Background = new SolidColorBrush(Color.FromRgb(60, 60, 60));
+            typeComboBox.Foreground = Brushes.White;
+            typeComboBox.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 80, 80));
+            if (Resources.Contains("ModernComboBoxStyle"))
+                typeComboBox.Style = Resources["ModernComboBoxStyle"] as Style;
+
+            typeComboBox.Items.Add("Ticks");
+            typeComboBox.Items.Add("Dollars");
+
+            Binding typeBinding = new Binding(typePropertyName)
+            {
+                Source = MultiStratManager.Instance,
+                Mode = BindingMode.TwoWay,
+                UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+                Converter = new EnumToStringConverter()
+            };
+            typeComboBox.SetBinding(ComboBox.SelectedValueProperty, typeBinding);
+            typeComboBox.SelectedValue = "Ticks";
+
+            Grid.SetRow(typeComboBox, row);
+            Grid.SetColumn(typeComboBox, 1);
+            grid.Children.Add(typeComboBox);
+
+            // Value label
+            TextBlock valueLabelBlock = new TextBlock();
+            valueLabelBlock.Text = valueLabel;
+            valueLabelBlock.Foreground = Brushes.LightGray;
+            valueLabelBlock.VerticalAlignment = VerticalAlignment.Center;
+            valueLabelBlock.Margin = new Thickness(10, 5, 5, 5);
+            Grid.SetRow(valueLabelBlock, row);
+            Grid.SetColumn(valueLabelBlock, 2);
+            grid.Children.Add(valueLabelBlock);
+
+            // Value textbox
+            TextBox valueTextBox = new TextBox();
+            valueTextBox.Margin = new Thickness(0, 5, 10, 5);
+            valueTextBox.Background = new SolidColorBrush(Color.FromRgb(60, 60, 60));
+            valueTextBox.Foreground = Brushes.White;
+            valueTextBox.BorderBrush = new SolidColorBrush(Color.FromRgb(80, 80, 80));
+            valueTextBox.Padding = new Thickness(5);
+            if (Resources.Contains("ModernTextBoxStyle"))
+                valueTextBox.Style = Resources["ModernTextBoxStyle"] as Style;
+
+            Binding valueBinding = new Binding(valuePropertyName)
+            {
+                Source = MultiStratManager.Instance,
+                Mode = BindingMode.TwoWay,
+                UpdateSourceTrigger = UpdateSourceTrigger.PropertyChanged,
+                ConverterCulture = CultureInfo.CurrentCulture
+            };
+            valueTextBox.SetBinding(TextBox.TextProperty, valueBinding);
+
+            Grid.SetRow(valueTextBox, row);
+            Grid.SetColumn(valueTextBox, 3);
+            grid.Children.Add(valueTextBox);
+        }
         
         private void AddTrailingSystemSetting(Grid grid, int row)
         {
@@ -2891,6 +3009,35 @@ private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
             catch (Exception ex)
             {
                 LogToBridge("ERROR", "UI", $"Error in ResetDailyStatusButton_Click: {ex.Message}");
+            }
+        }
+
+        private void FlushExposureButton_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var confirmation = MessageBox.Show(
+                    "This will clear the add-on's cross-strategy exposure tracking and rebuild it from currently open trades. Continue?",
+                    "Flush Exposure State",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (confirmation != MessageBoxResult.Yes)
+                    return;
+
+                var manager = MultiStratManager.Instance;
+                if (manager == null)
+                {
+                    LogToBridge("WARN", "UI", "Exposure flush requested but MultiStratManager instance was null.");
+                    return;
+                }
+
+                manager.FlushExposureState(true);
+                LogToBridge("INFO", "UI", "Cross-strategy exposure ledger flushed via UI button.");
+            }
+            catch (Exception ex)
+            {
+                LogToBridge("ERROR", "UI", $"Error in FlushExposureButton_Click: {ex.Message}");
             }
         }
 

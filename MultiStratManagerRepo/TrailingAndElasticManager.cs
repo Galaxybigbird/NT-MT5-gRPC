@@ -8,6 +8,7 @@ using System.Windows.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.Data;
 using NinjaTrader.NinjaScript;
+using NinjaTrader.NinjaScript.Shared;
 using NTGrpcClient;
 #endregion
 
@@ -18,38 +19,40 @@ namespace NinjaTrader.NinjaScript.AddOns
     public enum ContinuousTrailingType { None, DollarAmountTrail, PipTrail, TickTrail, DEMAAtrTrail, StepTrail }
 
     // Trackers exposed to UI/Manager
-    public class ElasticPositionTracker
-    {
-        public string BaseId { get; set; }
-        public string InstrumentFullName { get; set; }
-        public string InstrumentName { get; set; }
-        public MarketPosition MarketPosition { get; set; }
-        public double EntryPrice { get; set; }
-        public double CurrentTrailedStopPrice { get; set; }
-        public double HighWaterMarkPrice { get; set; }
-        public double LowWaterMarkPrice { get; set; }
-        public bool IsTrailingActive { get; set; }
-        public int ProfitUpdatesSent { get; set; }
-        public double LastReportedProfitLevel { get; set; }
-        public int LastReportedIncrement { get; set; }
-        public DateTime LastUpdateTime { get; set; }
-        public bool IsSLTPLogicCompleteForEntry { get; set; }
-        public List<Quote> QuoteBuffer { get; } = new List<Quote>();
-        public double CurrentAtrValue { get; set; }
-        public double CurrentDemaValue { get; set; }
-        public DateTime LastBarTimeProcessed { get; set; }
-        public DateTime PendingBarStart { get; set; } = DateTime.MinValue;
-        public double PendingBarOpen { get; set; }
-        public double PendingBarHigh { get; set; }
-        public double PendingBarLow { get; set; }
-        public double PendingBarClose { get; set; }
-        public Order ManagedStopOrder { get; set; }
-        // Elastic trigger/increment runtime
-        public bool Triggered { get; set; }
-        public double IncrementUnitsAtTrigger { get; set; }
-        public int OriginalQuantity { get; set; }
-        public int RemainingQuantity { get; set; }
-    }
+        public class ElasticPositionTracker
+        {
+            public string BaseId { get; set; }
+            public string InstrumentFullName { get; set; }
+            public string InstrumentName { get; set; }
+            public MarketPosition MarketPosition { get; set; }
+            public double EntryPrice { get; set; }
+            public double CurrentTrailedStopPrice { get; set; }
+            public double HighWaterMarkPrice { get; set; }
+            public double LowWaterMarkPrice { get; set; }
+            public bool IsTrailingActive { get; set; }
+            public int ProfitUpdatesSent { get; set; }
+            public double LastReportedProfitLevel { get; set; }
+            public int LastReportedIncrement { get; set; }
+            public DateTime LastUpdateTime { get; set; }
+            public bool IsSLTPLogicCompleteForEntry { get; set; }
+            public List<Quote> QuoteBuffer { get; } = new List<Quote>();
+            public double CurrentAtrValue { get; set; }
+            public double CurrentDemaValue { get; set; }
+            public DateTime LastBarTimeProcessed { get; set; }
+            public DateTime PendingBarStart { get; set; } = DateTime.MinValue;
+            public double PendingBarOpen { get; set; }
+            public double PendingBarHigh { get; set; }
+            public double PendingBarLow { get; set; }
+            public double PendingBarClose { get; set; }
+            public Order ManagedStopOrder { get; set; }
+            // Elastic trigger/increment runtime
+            public bool Triggered { get; set; }
+            public double IncrementUnitsAtTrigger { get; set; }
+            public int OriginalQuantity { get; set; }
+            public int RemainingQuantity { get; set; }
+            public bool ManualStopOverride { get; set; }
+            public bool ManualTargetOverride { get; set; }
+        }
 
     public class TraditionalTrailingStop
     {
@@ -100,8 +103,8 @@ namespace NinjaTrader.NinjaScript.AddOns
         public double ElasticIncrementValue { get; set; } = 10.0;
 
         // Trailing activation/stop/increments settings
-        public TrailingActivationType TrailingActivationMode { get; set; } = TrailingActivationType.Percent;
-        public double TrailingActivationValue { get; set; } = 1.0;
+        public TrailingActivationType TrailingActivationMode { get; set; } = TrailingActivationType.Ticks;
+        public double TrailingActivationValue { get; set; } = 25.0;
         public TrailingActivationType TrailingTriggerType { get; set; } = TrailingActivationType.Dollars;
         public double TrailingTriggerValue { get; set; } = 100.0;
         public TrailingActivationType TrailingStopType { get; set; } = TrailingActivationType.Dollars;
@@ -246,6 +249,30 @@ namespace NinjaTrader.NinjaScript.AddOns
             if (traditionalTrailingStops.Remove(baseId))
             {
                 LogAndPrint($"TRADITIONAL_TRAILING: Removed trailing tracking for {baseId}");
+            }
+        }
+
+        public void ApplyManualOverride(string baseId, bool? stopLocked, bool? targetLocked)
+        {
+            if (string.IsNullOrWhiteSpace(baseId))
+                return;
+
+            if (!elasticPositions.TryGetValue(baseId, out var tracker))
+            {
+                LogAndPrint($"TRAILING_MANUAL_OVERRIDE: Received override for {baseId} but no tracker exists.");
+                return;
+            }
+
+            if (stopLocked.HasValue && tracker.ManualStopOverride != stopLocked.Value)
+            {
+                tracker.ManualStopOverride = stopLocked.Value;
+                LogAndPrint($"TRAILING_MANUAL_OVERRIDE: {baseId} stopLocked => {stopLocked.Value}");
+            }
+
+            if (targetLocked.HasValue && tracker.ManualTargetOverride != targetLocked.Value)
+            {
+                tracker.ManualTargetOverride = targetLocked.Value;
+                LogAndPrint($"TRAILING_MANUAL_OVERRIDE: {baseId} targetLocked => {targetLocked.Value}");
             }
         }
 
@@ -574,6 +601,12 @@ namespace NinjaTrader.NinjaScript.AddOns
                 double currentPnL = position.GetUnrealizedProfitLoss(PerformanceUnit.Currency, trailCurrentPrice);
                 LogAndPrint($"TRAILING_DEBUG: Checking trailing for {tracker.BaseId} - EnableTrailing: {EnableTrailing}, UnrealizedPips: {unrealizedPips:F2}, PnL: ${currentPnL:F2}");
 
+                if (tracker.ManualStopOverride)
+                {
+                    LogAndPrint($"TRAILING_MANUAL_OVERRIDE: Stop locked for {tracker.BaseId}; skipping trailing update.");
+                    return;
+                }
+
                 // For Alternative trailing, activate based on the Elastic trigger settings so UI semantics match (e.g., 50 ticks)
                 TrailingActivationType activeMode = UseAlternativeTrailing ? ElasticTriggerType : TrailingActivationMode;
                 double activeThreshold = UseAlternativeTrailing ? ProfitUpdateThreshold : TrailingActivationValue;
@@ -899,11 +932,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                         double tickOffset = TickTrailDistance * tickSize;
                         stopPrice = isLong ? tracker.HighWaterMarkPrice - tickOffset : tracker.LowWaterMarkPrice + tickOffset; break;
                     case ContinuousTrailingType.DEMAAtrTrail:
-                        if (tracker.CurrentAtrValue > 0 && tracker.CurrentDemaValue > 0)
-                        {
-                            double atrOffset = tracker.CurrentAtrValue * DEMA_ATR_Multiplier;
-                            stopPrice = isLong ? tracker.CurrentDemaValue - atrOffset : tracker.CurrentDemaValue + atrOffset;
-                        }
+                        double referencePrice = tracker.PendingBarClose > 0 ? tracker.PendingBarClose : GetCurrentPrice(position.Instrument);
+                        var sharedStop = SharedDemaAtrTrailing.CalculateTrailingStop(tracker.QuoteBuffer, DEMA_ATR_Period, DEMA_ATR_Multiplier, isLong, referencePrice);
+                        if (sharedStop.HasValue)
+                            stopPrice = sharedStop.Value;
                         break;
                     case ContinuousTrailingType.StepTrail:
                         stopPrice = CalculateStepTrailPrice(tracker, position); break;

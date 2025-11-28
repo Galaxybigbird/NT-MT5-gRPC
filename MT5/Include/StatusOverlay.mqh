@@ -12,6 +12,14 @@ color g_overlayBackColor = clrDarkBlue;
 int g_overlayFontSize = 9;
 string g_overlayFont = "Consolas";
 
+#ifndef SELF_ELASTIC_MODE
+    #ifdef Self_Elastic_Closures
+        #define SELF_ELASTIC_MODE Self_Elastic_Closures
+    #else
+        #define SELF_ELASTIC_MODE Elastic_Hedging
+    #endif
+#endif
+
 // Cushion band colors (adjusted for $300 account)
 color GetCushionColor(double cushion)
 {
@@ -117,7 +125,7 @@ void ForceOverlayRecalculation()
 void UpdateStatusOverlay()
 {
     // Only show overlay when in Elastic Hedging mode
-    if(LotSizingMode != Elastic_Hedging)
+    if(LotSizingMode != SELF_ELASTIC_MODE)
     {
         RemoveStatusOverlay();
         return;
@@ -153,7 +161,7 @@ void UpdateStatusOverlay()
         }
 
         // Calculate next lot estimate based on lot sizing mode
-        if (LotSizingMode == Elastic_Hedging) {
+        if (LotSizingMode == SELF_ELASTIC_MODE) {
             // Use tier-based calculation for elastic hedging
             double targetProfit;
             bool isHighRiskTier = (g_ntDailyPnL <= -1000.0); // Tier 2 threshold

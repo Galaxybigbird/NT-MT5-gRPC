@@ -10,9 +10,9 @@
 
 // Input parameters for DEMA-ATR trailing stop
 input group    "=====DEMA-ATR Trailing=====";
-input int      DEMA_ATR_Period = 14;       // Period for DEMA-ATR calculation
-input double   DEMA_ATR_Multiplier = 1.5;  // DEMA-ATR trailing distance multiplier
-input double   TrailingActivationPercent = 1.0; // Activate trailing at this profit %
+input int      DEMA_ATR_Period = 12;       // Period for DEMA-ATR calculation
+input double   DEMA_ATR_Multiplier = 1.2;  // DEMA-ATR trailing distance multiplier
+input double   TrailingActivationPercent = 0.35; // Activate trailing at this profit %
 input bool     UseATRTrailing = true;      // Enable DEMA-ATR trailing stop
 // These are now set from the EA
 int      TrailingButtonXDistance = 120; // X distance for trailing button position
@@ -32,6 +32,7 @@ double AtrDEMA[], Ema1[], Ema2[];  // buffers for DEMA ATR, and intermediate EMA
 // Variables to store modifiable versions of input parameters
 double CurrentATRMultiplier;            // Current ATR multiplier (can be modified)
 int CurrentATRPeriod;                   // Current ATR period (can be modified)
+double g_EffectiveMinimumStopDistancePoints = MinimumStopDistance;
 
 // Statistics tracking
 int SuccessfulTrailingUpdates = 0;
@@ -121,6 +122,7 @@ void InitDEMAATR()
     // Initialize working parameters with input values
     CurrentATRMultiplier = DEMA_ATR_Multiplier;
     CurrentATRPeriod = DEMA_ATR_Period;
+    g_EffectiveMinimumStopDistancePoints = MinimumStopDistance;
     
     // Initialize arrays
     ArrayResize(AtrDEMA, 100);
@@ -433,7 +435,7 @@ bool ShouldActivateTrailing(ulong ticket, double entryPrice, double currentPrice
 double CalculateTrailingStop(string orderType, double currentPrice, double originalStop = 0.0)
 {
     double demaAtr = CalculateDEMAATR();
-    double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, MinimumStopDistance * Point());
+    double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, g_EffectiveMinimumStopDistancePoints * Point());
     
     // Calculate theoretical trailing stop level based on order type
     double theoreticalStop;
@@ -608,7 +610,7 @@ bool UpdateTrailingStop(ulong ticket, double entryPrice, string orderType)
     double demaAtr = CalculateDEMAATR(); // For logging ATR value
     
     // DIAGNOSTIC: Log detailed calculation steps
-    double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, MinimumStopDistance * Point());
+    double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, g_EffectiveMinimumStopDistancePoints * Point());
     double theoreticalStop;
     if(orderType == "BUY")
         theoreticalStop = currentPrice - trailingDistance;
@@ -617,7 +619,7 @@ bool UpdateTrailingStop(ulong ticket, double entryPrice, string orderType)
     
     PrintFormat("DIAGNOSTIC::TrailingStop (Ticket: %s) - ATR: %s, Multiplier: %s, MinDist: %s points, TrailingDist: %s, TheoreticalStop: %s",
                 IntegerToString(ticket), DoubleToString(demaAtr, _Digits), DoubleToString(CurrentATRMultiplier, 2),
-                DoubleToString(MinimumStopDistance, 0), DoubleToString(trailingDistance, _Digits), DoubleToString(theoreticalStop, _Digits));
+                DoubleToString(g_EffectiveMinimumStopDistancePoints, 0), DoubleToString(trailingDistance, _Digits), DoubleToString(theoreticalStop, _Digits));
     
     double newSL = CalculateTrailingStop(orderType, currentPrice, currentSL);
     
@@ -629,7 +631,7 @@ bool UpdateTrailingStop(ulong ticket, double entryPrice, string orderType)
     {
         PrintFormat("TrailingStop::UpdateTrailingStop (Ticket: %s) - Manual trailing activated. Applying aggressive logic.", IntegerToString(ticket));
         // double atrValue = CalculateDEMAATR(); // Already calculated as demaAtr
-        double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, MinimumStopDistance * Point());
+        double trailingDistance = MathMax(demaAtr * CurrentATRMultiplier, g_EffectiveMinimumStopDistancePoints * Point());
         
         if(orderType == "BUY")
         {
@@ -807,6 +809,14 @@ void SetATRParameters(double atrMultiplier, int atrPeriod)
     
     // Update visualization (statistics always enabled)
     UpdateVisualization();
+}
+
+void SetMinimumStopDistanceOverride(double points)
+{
+    if(points > 0.0)
+        g_EffectiveMinimumStopDistancePoints = points;
+    else
+        g_EffectiveMinimumStopDistancePoints = MinimumStopDistance;
 }
 
 //+------------------------------------------------------------------+

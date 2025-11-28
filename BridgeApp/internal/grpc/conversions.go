@@ -1,6 +1,7 @@
 package grpc
 
 import (
+	"strings"
 	"time"
 
 	trading "BridgeApp/internal/grpc/proto"
@@ -36,6 +37,29 @@ type Trade struct {
 	Epoch                uint64    `json:"epoch,omitempty"`
 	Direction            string    `json:"direction,omitempty"`
 	TargetLots           float64   `json:"target_lots,omitempty"`
+}
+
+type MT5CloseNotification struct {
+	ID                 string    `json:"id"`
+	BaseID             string    `json:"base_id"`
+	Time               time.Time `json:"time"`
+	Action             string    `json:"action"`
+	Quantity           float64   `json:"quantity"`
+	Price              float64   `json:"price"`
+	TotalQuantity      float64   `json:"total_quantity"`
+	ContractNum        int       `json:"contract_num"`
+	OrderType          string    `json:"order_type"`
+	MeasurementPips    float64   `json:"measurement_pips"`
+	RawMeasurement     float64   `json:"raw_measurement"`
+	Instrument         string    `json:"instrument"`
+	AccountName        string    `json:"account_name"`
+	NTBalance          float64   `json:"nt_balance"`
+	NTDailyPnL         float64   `json:"nt_daily_pnl"`
+	NTTradeResult      string    `json:"nt_trade_result"`
+	NTSessionTrades    int       `json:"nt_session_trades"`
+	MT5Ticket          uint64    `json:"mt5_ticket"`
+	ClosureReason      string    `json:"closure_reason"`
+	ElasticProfitLevel int       `json:"elastic_profit_level"`
 }
 
 // Internal struct definitions that match the app.go structures
@@ -321,56 +345,14 @@ func convertInternalToMainTrade(internal *InternalTrade) interface{} {
 
 // convertMT5CloseNotificationToProtoTrade converts an MT5 closure notification to a trading.Trade for streaming
 func convertMT5CloseNotificationToProtoTrade(notification interface{}) *trading.Trade {
-	// Type assertion to extract fields from the notification struct
-	if n, ok := notification.(struct {
-		ID              string    `json:"id"`
-		BaseID          string    `json:"base_id"`
-		Time            time.Time `json:"time"`
-		Action          string    `json:"action"`
-		Quantity        float64   `json:"quantity"`
-		Price           float64   `json:"price"`
-		TotalQuantity   float64   `json:"total_quantity"`
-		ContractNum     int       `json:"contract_num"`
-		OrderType       string    `json:"order_type"`
-		MeasurementPips float64   `json:"measurement_pips"`
-		RawMeasurement  float64   `json:"raw_measurement"`
-		Instrument      string    `json:"instrument"`
-		AccountName     string    `json:"account_name"`
-		NTBalance       float64   `json:"nt_balance"`
-		NTDailyPnL      float64   `json:"nt_daily_pnl"`
-		NTTradeResult   string    `json:"nt_trade_result"`
-		NTSessionTrades int       `json:"nt_session_trades"`
-		MT5Ticket       uint64    `json:"mt5_ticket"`
-		ClosureReason   string    `json:"closure_reason"`
-	}); ok {
-		// For MT5 close notifications, prefer carrying the EA's closure_reason back to NT.
-		// We map it onto NtTradeResult to avoid a proto change; NT will read closure_reason first and
-		// fall back to nt_trade_result if needed.
-		ntResult := n.NTTradeResult
-		if n.ClosureReason != "" {
-			ntResult = n.ClosureReason
+	switch n := notification.(type) {
+	case MT5CloseNotification:
+		return buildMT5CloseProto(n)
+	case *MT5CloseNotification:
+		if n == nil {
+			return nil
 		}
-
-		return &trading.Trade{
-			Id:              n.ID,
-			BaseId:          n.BaseID,
-			Timestamp:       n.Time.Unix(),
-			Action:          n.Action,
-			Quantity:        n.Quantity,
-			Price:           n.Price,
-			TotalQuantity:   int32(n.TotalQuantity),
-			ContractNum:     int32(n.ContractNum),
-			OrderType:       n.OrderType,
-			MeasurementPips: int32(n.MeasurementPips),
-			RawMeasurement:  n.RawMeasurement,
-			Instrument:      n.Instrument,
-			AccountName:     n.AccountName,
-			NtBalance:       n.NTBalance,
-			NtDailyPnl:      n.NTDailyPnL,
-			NtTradeResult:   ntResult,
-			NtSessionTrades: int32(n.NTSessionTrades),
-			Mt5Ticket:       n.MT5Ticket,
-		}
+		return buildMT5CloseProto(*n)
 	}
 
 	// Fallback - try to extract what we can from the interface{}
@@ -378,5 +360,34 @@ func convertMT5CloseNotificationToProtoTrade(notification interface{}) *trading.
 		Id:        "mt5_close_notification",
 		Action:    "MT5_CLOSE_NOTIFICATION",
 		Timestamp: time.Now().Unix(),
+	}
+}
+
+func buildMT5CloseProto(n MT5CloseNotification) *trading.Trade {
+	ntResult := n.NTTradeResult
+	if strings.TrimSpace(n.ClosureReason) != "" {
+		ntResult = n.ClosureReason
+	}
+
+	return &trading.Trade{
+		Id:                 n.ID,
+		BaseId:             n.BaseID,
+		Timestamp:          n.Time.Unix(),
+		Action:             n.Action,
+		Quantity:           n.Quantity,
+		Price:              n.Price,
+		TotalQuantity:      int32(n.TotalQuantity),
+		ContractNum:        int32(n.ContractNum),
+		OrderType:          n.OrderType,
+		MeasurementPips:    int32(n.MeasurementPips),
+		RawMeasurement:     n.RawMeasurement,
+		Instrument:         n.Instrument,
+		AccountName:        n.AccountName,
+		NtBalance:          n.NTBalance,
+		NtDailyPnl:         n.NTDailyPnL,
+		NtTradeResult:      ntResult,
+		NtSessionTrades:    int32(n.NTSessionTrades),
+		Mt5Ticket:          n.MT5Ticket,
+		ElasticProfitLevel: int32(n.ElasticProfitLevel),
 	}
 }

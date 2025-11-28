@@ -122,49 +122,18 @@ $installations | ForEach-Object {
     Write-Host "  $status $($_.Path)" -ForegroundColor $(if ($_.Exists) { "Green" } else { "Red" })
 }
 
-# Define source files to copy (only .cs files, no DLLs or dependencies)
-$sourceFiles = @(
-    'MultiStratManager.cs'
-    'UIForManager.cs'
-    'TrailingAndElasticManager.cs'
-    'IndicatorCalculator.cs'
-    'SLTPRemovalLogic.cs'
-)
-
-Write-Debug "Looking for source files in: $SourceRoot"
-
-# Validate source files exist
-$foundFiles = @()
-$missingFiles = @()
-
-foreach ($file in $sourceFiles) {
-    $filePath = Join-Path $SourceRoot $file
-    if (Test-Path $filePath) {
-        $foundFiles += [PSCustomObject]@{
-            Name = $file
-            Path = $filePath
-            Size = (Get-Item $filePath).Length
-            LastModified = (Get-Item $filePath).LastWriteTime
-        }
-        Write-Debug "Found: $file"
-    } else {
-        $missingFiles += $file
-        Write-Warning "Source file not found: $file"
-    }
-}
+# Discover .cs files directly under the source root
+Write-Debug "Scanning source root for .cs files: $SourceRoot"
+$foundFiles = Get-ChildItem -Path $SourceRoot -Filter '*.cs' -File | Select-Object Name, FullName, Length, LastWriteTime
 
 if ($foundFiles.Count -eq 0) {
-    Write-Error "No source files found in $SourceRoot"
+    Write-Error "No .cs files found in the source root: $SourceRoot"
     exit 1
 }
 
 Write-Info "Source files to deploy ($($foundFiles.Count)):"
 $foundFiles | ForEach-Object {
-    Write-Host "  [FILE] $($_.Name) ($($_.Size) bytes, modified: $($_.LastModified.ToString('yyyy-MM-dd HH:mm')))" -ForegroundColor White
-}
-
-if ($missingFiles.Count -gt 0) {
-    Write-Warning "Missing source files ($($missingFiles.Count)): $($missingFiles -join ', ')"
+    Write-Host "  [FILE] $($_.Name) ($($_.Length) bytes, modified: $($_.LastWriteTime.ToString('yyyy-MM-dd HH:mm')))" -ForegroundColor White
 }
 
 # Deployment summary
@@ -206,18 +175,18 @@ foreach ($installation in $installations) {
             $shouldCopy = $true
             if (Test-Path $targetPath) {
                 $targetFile = Get-Item $targetPath
-                if ($targetFile.LastWriteTime -ge $sourceFile.LastModified -and !$Force) {
+                if ($targetFile.LastWriteTime -ge $sourceFile.LastWriteTime -and !$Force) {
                     Write-Debug "Target is newer or same age, skipping: $($sourceFile.Name)"
                     $shouldCopy = $false
                     $skippedFiles++
                 }
             }
-            
+
             if ($shouldCopy) {
                 if ($DryRun) {
                     Write-Host "  [DRYRUN] Would copy $($sourceFile.Name)" -ForegroundColor Cyan
                 } else {
-                    Copy-Item -Path $sourceFile.Path -Destination $targetPath -Force
+                    Copy-Item -Path $sourceFile.FullName -Destination $targetPath -Force
                     Write-Success "Copied: $($sourceFile.Name)"
                     $copiedFiles++
                 }
