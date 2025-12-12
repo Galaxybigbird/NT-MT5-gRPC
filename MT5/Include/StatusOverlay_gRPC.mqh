@@ -176,10 +176,41 @@ void ForceOverlayRecalculation()
 // Update the status overlay with current data
 void UpdateStatusOverlay()
 {
-    // Only show overlay when in Elastic Hedging mode
-    if(LotSizingMode != SELF_ELASTIC_MODE)
+    bool isElastic = (LotSizingMode == SELF_ELASTIC_MODE);
+    bool isInverse = (LotSizingMode == LOTS_INVERSE_PNL);
+
+    // Only show overlay when in supported modes
+    if(!isElastic && !isInverse)
     {
         RemoveStatusOverlay();
+        return;
+    }
+
+    // Inverse PnL overlay path
+    if(isInverse)
+    {
+        double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+        double nextLotEst = (g_inversePnlNextLot > 0.0) ? g_inversePnlNextLot : Tier1_Lots;
+        int openHedgeCount = CountAllHedgePositions();
+        string tierText = IntegerToString(g_inversePnlTier);
+
+        CreateOrUpdateLabel("Title", "=== INVERSE PNL TELEMETRY ===", 5, clrCyan);
+        CreateOrUpdateLabel("Balance", StringFormat("Balance:        $%.2f", balance), 25);
+        CreateOrUpdateLabel("Mode", "Mode:           INVERSE PNL", 40);
+        CreateOrUpdateLabel("NTDailyPnL", StringFormat("NT Daily PnL:   $%.2f", g_NT_Daily_PnL), 55);
+        CreateOrUpdateLabel("InverseTier", StringFormat("Current Tier:   %s", tierText), 70);
+        CreateOrUpdateLabel("NextLot", StringFormat("Next Lot (est): %.2f", nextLotEst), 85);
+        CreateOrUpdateLabel("OpenHedges", StringFormat("Open Hedges:    %d", openHedgeCount), 100);
+
+        // Clean planner-specific labels when not in elastic mode
+        DeleteOverlayLabel("PlannerHeader");
+        DeleteOverlayLabel("PlannerStatus");
+        DeleteOverlayLabel("PlannerUpdated");
+        for(int i = 0; i < OVERLAY_MAX_PLANNER_LINES; ++i)
+        {
+            string labelName = StringFormat("PlannerLine%d", i + 1);
+            DeleteOverlayLabel(labelName);
+        }
         return;
     }
 
@@ -362,7 +393,7 @@ int CountAllHedgePositions()
 void RemoveStatusOverlay()
 {
     string objects[] = {
-        "Background", "Title", "Balance", "Mode", "NextLot", "OpenHedges",
+        "Background", "Title", "Balance", "Mode", "NTDailyPnL", "InverseTier", "NextLot", "OpenHedges",
         "PlannerHeader", "PlannerStatus", "PlannerUpdated",
         "EODHigh", "Cushion", "OHF", "GlobalFutures", "DesiredHedges", "BandDesc", "LastUpdate"
     };

@@ -91,8 +91,8 @@ namespace NinjaTrader.NinjaScript.AddOns
 
 
         // Flags
-        public bool EnableElasticHedging { get; set; } = true;
-        public bool EnableTrailing { get; set; } = true;
+        public bool EnableElasticHedging { get; set; } = false;
+        public bool EnableTrailing { get; set; } = false;
         public bool UseTraditionalTrailing { get; set; } = false;
 
         // Elastic hedging trigger/increment settings
@@ -103,7 +103,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         public double ElasticIncrementValue { get; set; } = 10.0;
 
         // Trailing activation/stop/increments settings
-        public TrailingActivationType TrailingActivationMode { get; set; } = TrailingActivationType.Ticks;
+        public TrailingActivationType TrailingActivationMode { get; set; } = TrailingActivationType.Percent;
         public double TrailingActivationValue { get; set; } = 25.0;
         public TrailingActivationType TrailingTriggerType { get; set; } = TrailingActivationType.Dollars;
         public double TrailingTriggerValue { get; set; } = 100.0;

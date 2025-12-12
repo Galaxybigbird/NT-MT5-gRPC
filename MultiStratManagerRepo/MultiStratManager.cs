@@ -146,7 +146,7 @@ namespace NinjaTrader.NinjaScript.AddOns
         private SLTPRemovalLogic sltpRemovalLogic;
 
         // Properties for SLTP Removal Logic
-        public bool EnableSLTPRemoval { get; set; } = true; // Default to true
+        public bool EnableSLTPRemoval { get; set; } = false; // Default off (matches current UI usage)
         public int SLTPRemovalDelaySeconds { get; set; } = 3; // Default to 3 seconds
 
         // Shared exposure tracking across all participant strategies
@@ -489,7 +489,7 @@ public TrailingActivationType TrailingStopType
             set { if (_ntRunUpIncrementUnits != value) { _ntRunUpIncrementUnits = value; OnPropertyChanged(nameof(NtRunUpIncrementUnits)); } }
         }
 
-        private double _ntRunUpIncrementValue = 5;
+        private double _ntRunUpIncrementValue = 1;
         public double NtRunUpIncrementValue
         {
             get => _ntRunUpIncrementValue;
@@ -598,6 +598,7 @@ public TrailingActivationType TrailingStopType
         private double _sessionStartBalance = 0.0;
         private double _dailyStartPnL = 0.0;
         private DateTime _sessionStartTime = DateTime.MinValue;
+        private DateTime _lastPnLResetDate = DateTime.MinValue;
         private int _sessionTradeCount = 0;
         private string _lastTradeResult = "";
         private double _lastTradePnL = 0.0;
@@ -635,7 +636,8 @@ public TrailingActivationType TrailingStopType
             if (monitoredAccount != null)
             {
                 _sessionStartTime = DateTime.UtcNow;
-                _dailyStartPnL = TotalPnL;
+                // Do not baseline to current total; stream absolute TotalPnL as source of truth for tiers.
+                _dailyStartPnL = 0.0;
                 _sessionTradeCount = 0;
                 _lastTradeResult = "";
                 _lastTradePnL = 0.0;
@@ -651,8 +653,50 @@ public TrailingActivationType TrailingStopType
                     _sessionStartBalance = (double)balanceItem.Value;
                 }
 
+                _lastPnLResetDate = DateTime.UtcNow.Date;
                 LogAndPrint($"Session tracking initialized: Balance=${_sessionStartBalance:F2}, StartPnL=${_dailyStartPnL:F2}");
             }
+        }
+
+        private void EnsureDailyPnLBaseline()
+        {
+            if (monitoredAccount == null)
+                return;
+
+            var today = DateTime.UtcNow.Date;
+            if (_lastPnLResetDate == DateTime.MinValue || _lastPnLResetDate != today)
+            {
+                InitializeSessionTracking();
+                _lastPnLResetDate = today;
+                LogDebug("EXECUTION", $"PNL_SESSION_RESET: Daily PnL baseline reset for {today:yyyy-MM-dd}");
+            }
+        }
+
+        private double ComputeCurrentDailyPnL(StrategyBase strategyContext = null)
+        {
+            EnsureDailyPnLBaseline();
+
+            double accountPnL = TotalPnL - _dailyStartPnL;
+            if (double.IsNaN(accountPnL))
+                accountPnL = 0.0;
+
+            if (strategyContext != null)
+            {
+                try
+                {
+                    double stratRealized = strategyContext.SystemPerformance?.AllTrades?.TradesPerformance?.Currency?.CumProfit ?? double.NaN;
+                    double stratUnrealized = strategyContext.Position?.GetUnrealizedProfitLoss(PerformanceUnit.Currency, strategyContext.Close[0]) ?? double.NaN;
+                    double stratPnL = (double.IsNaN(stratRealized) ? 0.0 : stratRealized) + (double.IsNaN(stratUnrealized) ? 0.0 : stratUnrealized);
+                    if (!double.IsNaN(stratPnL))
+                        accountPnL = stratPnL;
+                }
+                catch (Exception ex)
+                {
+                    LogDebug("EXECUTION", $"PNL_COMPUTE_FALLBACK: Strategy performance unavailable: {ex.Message}");
+                }
+            }
+
+            return accountPnL;
         }
 
         // Update trade result based on execution
@@ -704,6 +748,10 @@ public TrailingActivationType TrailingStopType
             double pointValue = execution.Instrument?.MasterInstrument?.PointValue ?? 0.0;
             if (tradeRecord?.Strategy?.Instrument?.MasterInstrument != null && pointValue <= 0)
                 pointValue = tradeRecord.Strategy.Instrument.MasterInstrument.PointValue;
+            if (pointValue <= 0 && tradeRecord?.NtPointsPer1kLoss > 0)
+                pointValue = 1000.0 / tradeRecord.NtPointsPer1kLoss;
+            if (pointValue <= 0 && _lastTradePointsPer1kLoss > 0)
+                pointValue = 1000.0 / _lastTradePointsPer1kLoss;
 
             if (entryPrice > 0 && pointValue > 0)
             {
@@ -1657,7 +1705,10 @@ public TrailingActivationType TrailingStopType
                     return;
                 }
 
-                double currentPnL = DailyPnL;
+                double currentPnL = ComputeCurrentDailyPnL();
+
+                string messageId = $"nt_pnl_{(!string.IsNullOrWhiteSpace(_lastTradeBaseId) ? _lastTradeBaseId : "session")}_{DateTime.UtcNow.Ticks}";
+                string instrumentName = !string.IsNullOrWhiteSpace(_lastTradeInstrument) ? _lastTradeInstrument : string.Empty;
 
                 // Change filter: send if first time or changed by >= $5 or at least every 15s
                 bool shouldSend = double.IsNaN(lastPnLSent) || Math.Abs(currentPnL - lastPnLSent) >= 5.0 || (DateTime.UtcNow - lastPnLSentAt) >= TimeSpan.FromSeconds(15);
@@ -1671,10 +1722,11 @@ public TrailingActivationType TrailingStopType
 
                 var data = new Dictionary<string, object>
                 {
+                    { "id", messageId },
                     { "action", "EVENT" },
                     { "event_type", "nt_pnl_update" },
                     { "base_id", _lastTradeBaseId ?? string.Empty },
-                    { "instrument", _lastTradeInstrument ?? string.Empty },
+                    { "instrument", instrumentName },
                     { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
                     { "account_name", account.Name },
                     { "nt_balance", (float)_sessionStartBalance },
@@ -2693,7 +2745,7 @@ public TrailingActivationType TrailingStopType
                 { "price", record.EntryPrice },
                 { "nt_points_per_1k_loss", record.NtPointsPer1kLoss },
                 { "nt_balance", SessionStartBalance },
-                { "nt_daily_pnl", DailyPnL },
+                { "nt_daily_pnl", ComputeCurrentDailyPnL(record?.Strategy) },
                 { "nt_trade_result", "open" },
                 { "nt_session_trades", SessionTradeCount },
                 { "epoch", record.Epoch },
@@ -2908,7 +2960,7 @@ public TrailingActivationType TrailingStopType
                 { "account_name", record.AccountName ?? string.Empty },
                 { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
                 { "nt_balance", SessionStartBalance },
-                { "nt_daily_pnl", DailyPnL },
+                { "nt_daily_pnl", ComputeCurrentDailyPnL(record?.Strategy) },
                 { "nt_trade_result", tradeResultField },
                 { "nt_session_trades", SessionTradeCount },
                 { "closure_reason", closureReasonField },

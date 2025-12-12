@@ -1,5 +1,5 @@
 #property link      ""
-#property version   "1.17"
+#property version   "1.21"
 #property strict
 #property description "gRPC Hedge Receiver with self-managed elastic closures"
 
@@ -14,7 +14,7 @@ input int    BridgeServerPort = 50051;            // gRPC Server Port
 //| Trading Settings                                                |
 //+------------------------------------------------------------------+
 input group "===== Trading Settings =====";
-enum LOT_MODE { Fixed_Lot_Size = 0, Self_Elastic_Closures = 1 };
+enum LOT_MODE { Fixed_Lot_Size = 0, Self_Elastic_Closures = 1, LOTS_INVERSE_PNL = 2 };
 input LOT_MODE LotSizingMode = Self_Elastic_Closures;    // Lot sizing method
 
 input bool   EnableHedging = true;   // Enable hedging? (false = copy direction)
@@ -23,11 +23,25 @@ input int    Slippage = 200;         // Slippage
 input int    MagicNumber = 12345;    // MagicNumber for trades
 
 input bool   SelfElastic_Enabled              = true;    // Enable planner-based closures
-input double SimpleStopLoss_Points            = 0;       // Static SL distance (points) when planner-based closures are disabled (0 = off)
+input double SimpleStopLoss_Points            = 4000;       // Static SL distance (points) when planner-based closures are disabled (0 = off)
+
+input group "===== Inverse PnL Settings =====";
+input double Tier1_Limit           = -400.0;  // Tier1_Limit (Safe Zone threshold)
+input double Tier1_Lots            = 0.03;    // Tier1_Lots (Safe Zone lot size)
+input double Tier2_Limit           = -800.0;  // Tier2_Limit (Loading Zone threshold)
+input double Tier2_Lots            = 0.10;    // Tier2_Lots (Loading Zone lot size)
+input double Tier3_MaxLots         = 0.20;    // Tier3_MaxLots (Kill Zone hard cap)
+input double Safety_MaxMarginPct   = 90.0;    // Safety_MaxMarginPct (max % Free Margin in Tier 3)
+input double Tier2_InitialSL_Points = 2500.0; // Tier 2 initial SL distance (points) for LOTS_INVERSE_PNL
+input double Tier3_InitialSL_Points = 1100.0; // Tier 3 initial SL distance (points) for LOTS_INVERSE_PNL
+input double Tier2_RunUp_PointDist = 250.0;   // Run-up distance override for Tier 2 (points)
+input double Tier2_RunUp_PointStep = 25.0;    // Run-up step override for Tier 2 (points)
+input double Tier3_RunUp_PointDist = 100.0;   // Run-up distance override for Tier 3 (points)
+input double Tier3_RunUp_PointStep = 10.0;    // Run-up step override for Tier 3 (points)
 
 input group "===== Planner Inputs =====";
 input double Planner_EntryLots            = 0.16;   // Starting lot size to analyze
-input double Planner_StopDistancePoints   = 4900;   // Stop distance (points from entry)
+input double Planner_StopDistancePoints   = 4000;   // Stop distance (points from entry)
 input double Planner_MaxLoss              = 175.0;  // Desired max total loss (account currency)
 input int    Planner_MaxClosures          = 25;     // Maximum closures to search for
 
@@ -136,9 +150,10 @@ void ClearAtrTrailingState(ulong ticket);
 int  FindRunUpStateIndex(ulong ticket);
 bool IsRunUpActiveForTicket(ulong ticket);
 void RemoveRunUpState(ulong ticket);
+void GetRunUpParameters(double &outDistancePts, double &outStepPts);
 bool StartHedgeRunUpForBaseId(const string &baseId, const string &closureReason, ulong explicitTicket = 0);
 bool UpdateRunUpTrailingForTicket(ulong ticket, ENUM_POSITION_TYPE posType, double currentPrice);
-double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr);
+double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr, double pointIncrementPts);
 double ComputeRunUpDemaAtrPrice(int period, double &outDemaAtr);
 
 // Map trade mode integer to readable string (MQL5 requires top-level, cannot nest functions)
@@ -152,6 +167,9 @@ string TradeModeName(const long mode)
     return StringFormat("UNKNOWN(%d)", (int)mode);
 }
 double AdjustLotForMargin(double desiredLot, ENUM_ORDER_TYPE orderType); // Downscale lot to fit free margin
+int    DetermineInversePnlTier();               // Determine current inverse PnL tier
+double CalculateInversePnLLot(ENUM_ORDER_TYPE orderType); // Inverse PnL tiered lot sizing
+double CalculateLotSize(double ntQuantity, const string& baseId, const string& trade_json, ENUM_ORDER_TYPE orderType);
 
 // Forward declarations for JSON helpers used before their definitions
 double GetJSONDouble(string json, string key);
@@ -356,10 +374,14 @@ double g_ntCumulativeLoss = 0.0;  // Track cumulative NT losses for progressive 
 int g_ntLossStreak = 0;           // Count consecutive losing days
 double g_lastNTBalance = 0.0;     // Track NT balance changes
 double g_ntDailyPnL = 0.0;        // Current day's NT P&L
+double g_NT_Daily_PnL = 0.0;      // Parsed nt_daily_pnl value for inverse sizing
 string g_lastNTTradeResult = "";  // Last trade result: "win" or "loss"
 int g_ntSessionTrades = 0;        // Number of trades in current session
 datetime g_lastNTUpdateTime = 0;  // Last time NT data was updated
 bool g_ntDataAvailable = false;   // Flag to indicate if NT data is available
+bool g_hasNtDailyPnl = false;     // Flag to indicate if last message included nt_daily_pnl
+int g_inversePnlTier = 1;         // Active tier for inverse PnL sizing
+double g_inversePnlNextLot = 0.0; // Last computed lot for inverse PnL mode
 
 // WHACK-A-MOLE FIX: State change tracking for overlay calculations
 static datetime g_lastNTDataUpdate = 0;
@@ -411,6 +433,7 @@ bool g_isMT5Closed[];         // Flag if all MT5 hedges for this group are close
 
 CHashMap<long, string> *g_map_position_id_to_base_id = NULL; // Map PositionID (long) to original base_id as plain string
 CHashMap<long, int>    *g_simple_sl_tickets = NULL;         // Tickets where a simple SL (non-planner) was applied
+CHashMap<long, double> *g_inverse_sl_locks = NULL;          // Locked SL price per ticket for inverse PnL hedges (prevents tier drift)
 
 // New parallel arrays for MT5 position details
 long g_open_mt5_pos_ids[];       // Stores MT5 Position IDs
@@ -647,6 +670,7 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
                                  ENUM_POSITION_TYPE posType,
                                  double entryPrice)
 {
+    // Self-elastic positions manage their own protection.
     if(SelfElastic_Enabled)
     {
         { string __log="SIMPLE_SL_SKIP: SelfElastic enabled; simple SL not applied."; Print(__log); ULogInfoPrint(__log); }
@@ -663,12 +687,45 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
         return;
     }
 
+    bool inverseMode = (LotSizingMode == LOTS_INVERSE_PNL);
+
+    // If run-up is active, do not interfere with its trailing.
+    if(inverseMode && IsRunUpActiveForTicket(positionTicket))
+        return;
+
     double brokerMinPts = GetBrokerMinimumStopPoints();
-    double distPts = MathMax(SimpleStopLoss_Points, brokerMinPts);
-    double dist = distPts * _Point;
-    double slPrice = (posType == POSITION_TYPE_BUY)
-        ? entryPrice - dist
-        : entryPrice + dist;
+    double distPts = 0.0;
+    double slPrice = 0.0;
+
+    if(inverseMode && g_inverse_sl_locks != NULL)
+    {
+        // Use locked SL if already computed for this ticket to prevent tier-based drift.
+        if(g_inverse_sl_locks.TryGetValue((long)positionTicket, slPrice))
+        {
+            distPts = MathMax(MathAbs(entryPrice - slPrice) / _Point, brokerMinPts);
+        }
+    }
+
+    if(distPts <= 0.0 || slPrice <= 0.0)
+    {
+        // First-time calculation: lock the SL at current tier distance, then never change it unless run-up moves it.
+        double dist = GetStopLossDistance(); // tier-aware at entry time
+        if(dist <= 0.0)
+        {
+            { string __log="SIMPLE_SL_SKIP: Stop distance unavailable; not applying SL."; Print(__log); ULogWarnPrint(__log); }
+            return;
+        }
+        distPts = dist / _Point;
+        if(distPts < brokerMinPts)
+            distPts = brokerMinPts;
+        dist = distPts * _Point;
+        slPrice = (posType == POSITION_TYPE_BUY)
+            ? entryPrice - dist
+            : entryPrice + dist;
+
+        if(g_inverse_sl_locks != NULL)
+            g_inverse_sl_locks.Add((long)positionTicket, slPrice);
+    }
 
     if(!PositionSelectByTicket(positionTicket))
     {
@@ -677,6 +734,19 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
     }
 
     double existingSL = PositionGetDouble(POSITION_SL);
+
+    // In inverse-PnL mode, once an SL exists we never adjust it here (run-up may still trail separately).
+    if(inverseMode && existingSL > 0.0)
+    {
+        if(g_inverse_sl_locks != NULL)
+        {
+            double _tmp = 0.0;
+            if(!g_inverse_sl_locks.TryGetValue((long)positionTicket, _tmp))
+                g_inverse_sl_locks.Add((long)positionTicket, existingSL);
+        }
+        return;
+    }
+
     // If already set and roughly same, skip
     if(existingSL > 0.0 && MathAbs(existingSL - slPrice) <= _Point * 0.5)
         return;
@@ -744,6 +814,14 @@ void UpdateNTPerformanceTrackingPartial(double nt_balance, double nt_daily_pnl,
     if(has_daily_pnl) g_ntDailyPnL = new_pnl;
     if(has_trade_result) g_lastNTTradeResult = new_result;
     if(has_session_trades) g_ntSessionTrades = new_trades;
+    if(has_daily_pnl) {
+        g_NT_Daily_PnL = new_pnl;
+        g_hasNtDailyPnl = true;
+        g_inversePnlTier = DetermineInversePnlTierFromValue(g_NT_Daily_PnL); // keep tier in sync with latest PnL
+    } else if(g_ntDataAvailable && g_NT_Daily_PnL != 0.0) {
+        // Preserve previously parsed PnL so inverse-tier logic doesn’t fall back to Tier 1
+        g_hasNtDailyPnl = true;
+    }
     g_lastNTUpdateTime = TimeCurrent();
     g_ntDataAvailable = g_ntDataAvailable || has_balance || has_daily_pnl || has_trade_result || has_session_trades;
 
@@ -1257,6 +1335,14 @@ int OnInit()
         }
         { string __log="Simple SL ticket map initialized"; Print(__log); ULogInfoPrint(__log); }
     }
+    if(g_inverse_sl_locks == NULL) {
+        g_inverse_sl_locks = new CHashMap<long, double>();
+        if(CheckPointer(g_inverse_sl_locks) == POINTER_INVALID) {
+            { string __log="FATAL ERROR: Failed to initialize inverse SL lock map!"; Print(__log); ULogErrorPrint(__log); }
+            return(INIT_FAILED);
+        }
+        { string __log="Inverse SL lock map initialized"; Print(__log); ULogInfoPrint(__log); }
+    }
 
     // Initialize arrays
     ArrayResize(g_ntInstrumentSymbols, 0);
@@ -1528,6 +1614,12 @@ void ProcessTradeFromJson(const string& trade_json)
         __hasPnL = false;
         { string __log="NT_PARSE_GUARD: Ignoring zero nt_daily_pnl on non-entry action to preserve tier state"; Print(__log); ULogInfoPrint(__log); }
     }
+    // Additional guard: entry messages sometimes send nt_daily_pnl=0.0 even when session is in drawdown.
+    // If we already have a non-zero cached PnL, keep it instead of overwriting with zero.
+    if(__hasPnL && nt_daily_pnl == 0.0 && g_ntDataAvailable && MathAbs(g_NT_Daily_PnL) > 0.01) {
+        __hasPnL = false;
+        { string __log="NT_PARSE_GUARD: Suppressing zero nt_daily_pnl on entry to keep cached drawdown for inverse tiering"; Print(__log); ULogInfoPrint(__log); }
+    }
     if(__hasBal || __hasPnL || __hasRes || __hasTrades) {
         UpdateNTPerformanceTrackingPartial(nt_balance, nt_daily_pnl, nt_trade_result, nt_session_trades, __hasBal, __hasPnL, __hasRes, __hasTrades);
     }
@@ -1591,6 +1683,17 @@ void ProcessTradeFromJson(const string& trade_json)
         if(newSL > 0.0)
             ProcessTrailingStopUpdate(evtBaseId2, newSL, curPx);
         // Do not process further as a regular trade
+        return;
+    }
+    else if (evtType == "nt_pnl_update")
+    {
+        // Refresh inverse PnL overlay/estimates without opening trades
+        if(LotSizingMode == LOTS_INVERSE_PNL)
+        {
+            CalculateInversePnLLot(ORDER_TYPE_BUY);
+            ForceOverlayRecalculation();
+            UpdateStatusOverlay();
+        }
         return;
     }
     else if (evtType == "hedge_close_notification")
@@ -2042,7 +2145,8 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
     { string __log = StringFormat("ACHM_HEDGE_DEBUG: [ProcessRegularTrade] Final orderType: %s", EnumToString(orderType)); Print(__log); ULogInfoPrint(__log); }
 
     // Calculate lot size based on mode
-    double lotSize = CalculateLotSize(quantity, baseId, trade_json);
+    double lotSize = CalculateLotSize(quantity, baseId, trade_json, orderType);
+    { string __log = StringFormat("ACHM_HEDGE_DEBUG: [ProcessRegularTrade] Inverse tier=%d lotSize(before margin)=%.4f nt_daily_pnl=%.2f hasPnl=%d", (int)g_inversePnlTier, (double)lotSize, (double)g_NT_Daily_PnL, (int)g_hasNtDailyPnl); Print(__log); ULogInfoPrint(__log); }
 
     // Validate lot size
     double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -2072,6 +2176,8 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
         return;
     }
     lotSize = adjLot;
+    if(LotSizingMode == LOTS_INVERSE_PNL)
+        g_inversePnlNextLot = lotSize;
 
     // Execute the trades - loop for multiple contracts
     string comment = commentPrefix + baseId;
@@ -2369,7 +2475,109 @@ bool IsTradingPermitted(string &reason)
     return true;
 }
 
-double CalculateLotSize(double ntQuantity, const string& baseId, const string& trade_json)
+int DetermineInversePnlTier()
+{
+    double ntPnl = g_NT_Daily_PnL;
+    bool havePnl = g_hasNtDailyPnl || (g_ntDataAvailable && ntPnl != 0.0);
+    if(havePnl)
+    {
+        if(ntPnl <= Tier2_Limit)
+            return 3;
+        if(ntPnl <= Tier1_Limit)
+            return 2;
+    }
+
+    // Missing PnL data or Safe Zone
+    return 1;
+}
+
+// Helper: resolve tier from a specific PnL value without relying on global flags
+int DetermineInversePnlTierFromValue(double ntPnl)
+{
+    if(ntPnl <= Tier2_Limit)
+        return 3;
+    if(ntPnl <= Tier1_Limit)
+        return 2;
+    return 1;
+}
+
+// Helper: prefer cached tier when PnL is missing, otherwise compute from latest PnL.
+int ResolveInversePnlTier()
+{
+    double ntPnl = g_NT_Daily_PnL;
+    bool havePnl = g_hasNtDailyPnl || (g_ntDataAvailable && MathAbs(ntPnl) > 0.01);
+    if(havePnl)
+        return DetermineInversePnlTierFromValue(ntPnl);
+
+    if(g_inversePnlTier > 0)
+        return g_inversePnlTier;
+
+    return DetermineInversePnlTier();
+}
+
+double CalculateInversePnLLot(ENUM_ORDER_TYPE orderType)
+{
+    double minLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    if(minLot <= 0)  minLot = 0.01;
+    if(maxLot <= 0)  maxLot = 1.0;
+    if(lotStep <= 0) lotStep = 0.01;
+
+    // Use resolved tier (cached when PnL present, otherwise fallback)
+    int tier = ResolveInversePnlTier();
+    double lotChoice = Tier1_Lots;
+
+    if(tier == 2)
+    {
+        lotChoice = Tier2_Lots;
+    }
+
+    if(tier == 3)
+    {
+        double price = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
+                                                     : SymbolInfoDouble(_Symbol, SYMBOL_BID);
+        if(price <= 0) price = SymbolInfoDouble(_Symbol, SYMBOL_LAST);
+
+        double marginPerLot = 0.0;
+        double calcMargin = 0.0;
+        if(OrderCalcMargin(orderType, _Symbol, 1.0, price, calcMargin))
+            marginPerLot = calcMargin;
+        if(marginPerLot <= 0.0 && g_brokerSpecs.marginRequired > 0.0)
+            marginPerLot = g_brokerSpecs.marginRequired;
+
+        double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
+        double rawMaxLots = 0.0;
+        if(marginPerLot > 0.0 && freeMargin > 0.0)
+            rawMaxLots = freeMargin / marginPerLot;
+
+        double safetyFactor = Safety_MaxMarginPct / 100.0;
+        if(safetyFactor <= 0.0 || safetyFactor > 1.0)
+            safetyFactor = 0.9;
+
+        double safeMaxLots = rawMaxLots * safetyFactor;
+        double cappedLots = (safeMaxLots > 0.0) ? MathMin(Tier3_MaxLots, safeMaxLots)
+                                                : MathMin(Tier3_MaxLots, Tier2_Lots);
+
+        // Do not shrink below Tier 2 unless margin forces it
+        if(cappedLots < Tier2_Lots && safeMaxLots >= Tier2_Lots)
+            cappedLots = Tier2_Lots;
+
+        lotChoice = cappedLots;
+    }
+
+    lotChoice = MathMin(MathMax(lotChoice, minLot), maxLot);
+    lotChoice = MathFloor(lotChoice / lotStep + 0.5) * lotStep;
+    if(lotChoice < minLot) lotChoice = minLot;
+
+    g_inversePnlTier = tier;
+    g_inversePnlNextLot = lotChoice;
+    { string __log = StringFormat("ACHM_TIER_DEBUG: tier=%d nt_daily_pnl=%.2f hasPnl=%d lot(before margin)=%.4f", (int)tier, (double)g_NT_Daily_PnL, (int)g_hasNtDailyPnl, (double)lotChoice); Print(__log); ULogInfoPrint(__log); }
+
+    return lotChoice;
+}
+
+double CalculateLotSize(double ntQuantity, const string& baseId, const string& trade_json, ENUM_ORDER_TYPE orderType)
 {
     double lotSize = DefaultLot;
 
@@ -2380,6 +2588,10 @@ double CalculateLotSize(double ntQuantity, const string& baseId, const string& t
 
         case Self_Elastic_Closures:
             lotSize = Planner_EntryLots;
+            break;
+
+        case LOTS_INVERSE_PNL:
+            lotSize = CalculateInversePnLLot(orderType);
             break;
     }
 
@@ -2848,6 +3060,9 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
     // Clean up any run-up state now that the position is closed
     RemoveRunUpState((ulong)position_ticket);
+    // Clean up locked inverse SL tracking for this ticket
+    if(g_inverse_sl_locks != NULL)
+        g_inverse_sl_locks.Remove((long)position_ticket);
 
     // Determine closure reason based on context
     string closure_reason = "MT5_position_closed";
@@ -3632,21 +3847,28 @@ bool BuildSelfElasticPlan(double entryLots,
 double GetStopLossDistance()
 {
     double brokerMinPts = GetBrokerMinimumStopPoints();
-    // When planner-based closures are disabled, honor the simple SL points override
-    if(!SelfElastic_Enabled)
+    // LOTS_INVERSE_PNL: tier-specific stop based on simple SL for tier 1, overrides for tiers 2/3.
+    if(LotSizingMode == LOTS_INVERSE_PNL)
     {
-        if(SimpleStopLoss_Points > 0.0)
-        {
-            double pts = MathMax(SimpleStopLoss_Points, brokerMinPts);
-            return pts * _Point;
-        }
-        // Otherwise fall back to ATR/min defaults, but enforce broker minimum
-        double atrDisabled = GetAtrDistance();          // price distance
-        double atrPts = atrDisabled > 0.0 ? atrDisabled / _Point : 0.0;
-        double effectivePts = MathMax(atrPts, brokerMinPts);
+        double basePts = (SimpleStopLoss_Points > 0.0) ? SimpleStopLoss_Points : 0.0;
+        int tier = ResolveInversePnlTier(); // always resolve from latest NT data instead of stale cache
+        g_inversePnlTier = tier;            // keep cached tier aligned for downstream logging
+        if(tier == 2 && Tier2_InitialSL_Points > 0.0)
+            basePts = Tier2_InitialSL_Points;
+        else if(tier == 3 && Tier3_InitialSL_Points > 0.0)
+            basePts = Tier3_InitialSL_Points;
+
+        double effectivePts = MathMax(basePts, brokerMinPts);
         if(effectivePts <= 0.0)
             effectivePts = brokerMinPts;
         return effectivePts * _Point;
+    }
+
+    // Non inverse-PnL path: honor SimpleStopLoss when planner is off; otherwise fallback to planner/ATR.
+    if(!SelfElastic_Enabled && SimpleStopLoss_Points > 0.0)
+    {
+        double pts = MathMax(SimpleStopLoss_Points, brokerMinPts);
+        return pts * _Point;
     }
 
     if(Planner_StopDistancePoints > 0)
@@ -3656,7 +3878,8 @@ double GetStopLossDistance()
     if(atr > 0)
         return atr;
 
-    return 100 * _Point;
+    double effectiveMin = brokerMinPts > 0 ? brokerMinPts * _Point : 100 * _Point;
+    return effectiveMin;
 }
 
 void AppendLine(string &dest, const string text)
@@ -5588,7 +5811,7 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
           Print(__log); ULogInfoPrint(__log); }
 
     /*----------------------------------------------------------------
-     3.  Determine NT quantity (from group) and calculate volume
+     3.  Determine NT quantity (from group) and MT5 order side
     ----------------------------------------------------------------*/
     // Try to locate the NT quantity for this base_id (tradeId)
     int ntQty = 0;
@@ -5599,9 +5822,26 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
         }
     }
 
-    // --- LOT SIZING (simplified) ---
+    // If EnableHedging is true, OnTimer sets hedgeOrigin to the OPPOSITE of the NT action.
+    // If EnableHedging is false (copying), OnTimer sets hedgeOrigin to the SAME as the NT action.
+    if (hedgeOrigin == "Buy") {
+        request.type = ORDER_TYPE_BUY;
+    } else if (hedgeOrigin == "Sell") {
+        request.type = ORDER_TYPE_SELL;
+    } else {
+        Print("ERROR: OpenNewHedgeOrder - Invalid hedgeOrigin '", hedgeOrigin, "'. Cannot determine order type.");
+        return false;
+    }
+
+    /*----------------------------------------------------------------
+     4.  Calculate volume based on lot mode
+    ----------------------------------------------------------------*/
     double volume = 0.0;
-    if(LotSizingMode == Self_Elastic_Closures && SelfElastic_Enabled)
+    if(LotSizingMode == LOTS_INVERSE_PNL)
+    {
+        volume = CalculateInversePnLLot(request.type);
+    }
+    else if(LotSizingMode == Self_Elastic_Closures && SelfElastic_Enabled)
     {
         volume = Planner_EntryLots;
     }
@@ -5629,26 +5869,16 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
     if(finalVol < minLot) finalVol = minLot; // ensure never below exchange minimum after rounding
 
     /*----------------------------------------------------------------
-     4.  Order type, margin-aware adjustment, and comment
+     5.  Margin-aware adjustment and comment
     ----------------------------------------------------------------*/
-    // If EnableHedging is true, OnTimer sets hedgeOrigin to the OPPOSITE of the NT action.
-    // If EnableHedging is false (copying), OnTimer sets hedgeOrigin to the SAME as the NT action.
-    // Therefore, OpenNewHedgeOrder simply executes the action specified by hedgeOrigin.
-    if (hedgeOrigin == "Buy") {
-        request.type = ORDER_TYPE_BUY;
-    } else if (hedgeOrigin == "Sell") {
-        request.type = ORDER_TYPE_SELL;
-    } else {
-        Print("ERROR: OpenNewHedgeOrder - Invalid hedgeOrigin '", hedgeOrigin, "'. Cannot determine order type.");
-        return false;
-    }
-
     // Adjust for free margin if needed
     double adjVol = AdjustLotForMargin(finalVol, request.type);
     if(adjVol < finalVol - 1e-8) {
         ULogWarnPrint(StringFormat("ACHM_MARGIN: Downscaling lot due to free margin. Requested %.4f -> adjusted %.4f", finalVol, adjVol));
         finalVol = adjVol;
     }
+    if(LotSizingMode == LOTS_INVERSE_PNL)
+        g_inversePnlNextLot = finalVol;
     if(finalVol < minLot - 1e-8) {
         ULogErrorPrint(StringFormat("ACHM_MARGIN: Insufficient free margin even for min lot %.4f. Aborting order for base_id=%s", minLot, tradeId));
         return false;
@@ -5681,7 +5911,7 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
                                                      : SYMBOL_BID);
 
     /*----------------------------------------------------------------
-     5.  SL / TP
+     6.  SL / TP
     ----------------------------------------------------------------*/
     double slPrice = (request.type == ORDER_TYPE_BUY)
                      ? request.price - slDist
@@ -6174,6 +6404,32 @@ void RemoveRunUpState(ulong ticket)
     ArrayResize(g_runUpStates, last);
 }
 
+void GetRunUpParameters(double &outDistancePts, double &outStepPts)
+{
+    outDistancePts = HedgeRunUp_InitialDistancePts;
+    outStepPts = HedgeRunUp_IncrementPoints;
+
+    if(LotSizingMode == LOTS_INVERSE_PNL)
+    {
+        int tier = DetermineInversePnlTier();
+        if(tier == 2)
+        {
+            outDistancePts = Tier2_RunUp_PointDist;
+            outStepPts = Tier2_RunUp_PointStep;
+        }
+        else if(tier == 3)
+        {
+            outDistancePts = Tier3_RunUp_PointDist;
+            outStepPts = Tier3_RunUp_PointStep;
+        }
+    }
+
+    if(outDistancePts <= 0.0)
+        outDistancePts = HedgeRunUp_InitialDistancePts;
+    if(outStepPts <= 0.0)
+        outStepPts = HedgeRunUp_IncrementPoints;
+}
+
 double ComputeRunUpDemaAtrPrice(int period, double &outDemaAtr)
 {
     outDemaAtr = 0.0;
@@ -6214,10 +6470,14 @@ double ComputeRunUpDemaAtrPrice(int period, double &outDemaAtr)
     return outDemaAtr;
 }
 
-double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr)
+double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr, double pointIncrementPts)
 {
+    double baseStep = pointIncrementPts;
+    if(baseStep <= 0.0)
+        baseStep = HedgeRunUp_IncrementPoints;
+
     if(!useDemaAtr)
-        return HedgeRunUp_IncrementPoints;
+        return baseStep;
 
     int period = useReactiveAtr ? MathMax(2, ATRReactive_Period) : MathMax(2, HedgeRunUp_DemaPeriod);
     double multiplier = useReactiveAtr ? MathMax(0.1, ATRReactive_Multiplier) : MathMax(0.1, HedgeRunUp_DemaMultiplier);
@@ -6225,11 +6485,11 @@ double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr)
     double demaAtrPrice = 0.0;
     ComputeRunUpDemaAtrPrice(period, demaAtrPrice);
     if(demaAtrPrice <= 0.0)
-        return HedgeRunUp_IncrementPoints;
+        return baseStep;
 
     double stepPoints = (demaAtrPrice * multiplier) / _Point;
     if(stepPoints <= 0.0)
-        stepPoints = HedgeRunUp_IncrementPoints;
+        stepPoints = baseStep;
     return stepPoints;
 }
 
@@ -6263,7 +6523,10 @@ bool StartHedgeRunUpForBaseId(const string &baseId, const string &closureReason,
 
     SortTicketsByOpenTime(openTimes, tickets, volumes);
     double brokerMinPts = GetBrokerMinimumStopPoints();
-    double distancePts = MathMax(HedgeRunUp_InitialDistancePts, brokerMinPts);
+    double runUpDistancePts = HedgeRunUp_InitialDistancePts;
+    double runUpStepPts = HedgeRunUp_IncrementPoints;
+    GetRunUpParameters(runUpDistancePts, runUpStepPts);
+    double distancePts = MathMax(runUpDistancePts, brokerMinPts);
     bool anyActivated = false;
 
     for(int i = 0; i < ArraySize(tickets); i++)
@@ -6316,7 +6579,7 @@ bool StartHedgeRunUpForBaseId(const string &baseId, const string &closureReason,
         g_runUpStates[idx].baseId = baseId;
         g_runUpStates[idx].anchorPrice = anchorPrice;
         g_runUpStates[idx].initialDistancePts = distancePts;
-        g_runUpStates[idx].incrementPoints = HedgeRunUp_IncrementPoints;
+        g_runUpStates[idx].incrementPoints = runUpStepPts;
         g_runUpStates[idx].useDemaAtr = (HedgeRunUp_IncrementMode == RunUpIncrement_DEMA_ATR);
         g_runUpStates[idx].useReactiveAtr = HedgeRunUp_UseReactiveATR;
         g_runUpStates[idx].lastStopPrice = shouldModify ? initialStop : currentSL;
@@ -6343,10 +6606,17 @@ bool UpdateRunUpTrailingForTicket(ulong ticket, ENUM_POSITION_TYPE posType, doub
     if(anchor <= 0.0)
         anchor = currentPrice;
 
-    double distancePts = MathMax(g_runUpStates[idx].initialDistancePts, GetBrokerMinimumStopPoints());
-    double incrementPts = ComputeRunUpIncrementPoints(g_runUpStates[idx].useDemaAtr, g_runUpStates[idx].useReactiveAtr);
+    double runUpDistancePts = HedgeRunUp_InitialDistancePts;
+    double runUpStepPts = HedgeRunUp_IncrementPoints;
+    GetRunUpParameters(runUpDistancePts, runUpStepPts);
+
+    double distancePts = MathMax(runUpDistancePts, GetBrokerMinimumStopPoints());
+    double incrementPts = ComputeRunUpIncrementPoints(g_runUpStates[idx].useDemaAtr, g_runUpStates[idx].useReactiveAtr, runUpStepPts);
     if(incrementPts <= 0.0)
-        incrementPts = HedgeRunUp_IncrementPoints;
+        incrementPts = MathMax(runUpStepPts, HedgeRunUp_IncrementPoints);
+
+    g_runUpStates[idx].initialDistancePts = runUpDistancePts;
+    g_runUpStates[idx].incrementPoints = runUpStepPts;
 
     double progress = isLong ? (currentPrice - anchor) : (anchor - currentPrice);
     if(progress < 0.0)

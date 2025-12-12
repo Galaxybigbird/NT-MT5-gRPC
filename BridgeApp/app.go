@@ -595,6 +595,15 @@ func (a *App) AddToTradeQueue(trade interface{}) error {
 					aux["time"] = time.Unix(tv, 0)
 				}
 			}
+			// Normalize nt_daily_pnl when it arrives as a string to ensure MT5 sees the value
+			if v, ok := aux["nt_daily_pnl"]; ok {
+				switch val := v.(type) {
+				case string:
+					if parsed, err := strconv.ParseFloat(strings.TrimSpace(val), 64); err == nil {
+						aux["nt_daily_pnl"] = parsed
+					}
+				}
+			}
 			// Try again after normalization
 			if reb, err3 := json.Marshal(aux); err3 == nil {
 				if err4 := json.Unmarshal(reb, &t); err4 != nil {

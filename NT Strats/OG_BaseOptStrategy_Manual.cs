@@ -1433,6 +1433,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     double execPnl = 0;
                     double pointValue = Instrument?.MasterInstrument?.PointValue ?? (execution.Instrument?.MasterInstrument?.PointValue ?? 0);
+                    if (pointValue <= 0 && state.NtPointsPer1kLoss > 0)
+                        pointValue = 1000.0 / state.NtPointsPer1kLoss;
                     if (pointValue > 0 && entryPrice > 0)
                     {
                         double signed = (state.EntrySide == MarketPosition.Long)
