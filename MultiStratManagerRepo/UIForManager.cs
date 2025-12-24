@@ -2964,7 +2964,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                 LogToBridge("ERROR", "UI", $"Error during refresh: {ex.Message}");
             }
         }
-private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
+        private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
         {
             try
             {
@@ -2978,6 +2978,10 @@ private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
                     // not just assuming it should be "Enabled".
                     enabledToggle.Content = enabledToggle.IsChecked == true ? "Enabled" : "Disabled";
                 }
+
+                var manager = MultiStratManager.Instance;
+                if (manager != null)
+                    manager.ManualResetDailyLimit(selectedAccount != null ? selectedAccount.Name : null, "ui_reset_daily_status");
 
                 LogToBridge("INFO", "SYSTEM", $"Daily P&L limit status has been manually reset for account: {(selectedAccount != null ? selectedAccount.Name : "N/A")}. All strategies for this account may need to be manually re-enabled if they were disabled by the limit.");
 
@@ -3017,7 +3021,7 @@ private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
             try
             {
                 var confirmation = MessageBox.Show(
-                    "This will clear the add-on's cross-strategy exposure tracking and rebuild it from currently open trades. Continue?",
+                    "This will clear the add-on's cross-strategy exposure tracking, rebuild it from currently open trades, and resync PnL. Daily limit overrides will be preserved. Continue?",
                     "Flush Exposure State",
                     MessageBoxButton.YesNo,
                     MessageBoxImage.Warning);
@@ -3033,7 +3037,8 @@ private void ResetDailyStatusButton_Click(object sender, RoutedEventArgs e)
                 }
 
                 manager.FlushExposureState(true);
-                LogToBridge("INFO", "UI", "Cross-strategy exposure ledger flushed via UI button.");
+                manager.ManualResyncState(selectedAccount != null ? selectedAccount.Name : null, "ui_flush_exposure", false);
+                LogToBridge("INFO", "UI", "Exposure ledger flushed and manual resync requested via UI button.");
             }
             catch (Exception ex)
             {

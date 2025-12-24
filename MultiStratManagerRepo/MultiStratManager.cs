@@ -829,6 +829,19 @@ public TrailingActivationType TrailingStopType
     private double lastPnLSent = double.NaN;
     private DateTime lastPnLSentAt = DateTime.MinValue;
 
+    // Daily PnL limit override: when active, force in-sync hedge closes (do not trigger MT5 run-up).
+    private volatile bool dailyLimitOverrideActive = false;
+    private string dailyLimitOverrideAccount = string.Empty;
+    private string dailyLimitOverrideType = string.Empty;
+    private double dailyLimitOverridePnL = 0.0;
+    private DateTime dailyLimitOverrideActivatedAt = DateTime.MinValue;
+    private volatile bool manualHaltOverrideActive = false;
+    private string manualHaltOverrideAccount = string.Empty;
+    private DateTime manualHaltOverrideActivatedAt = DateTime.MinValue;
+    private readonly object manualDailyLimitResetLock = new object();
+    private DateTime manualDailyLimitResetAtUtc = DateTime.MinValue;
+    private string manualDailyLimitResetAccount = string.Empty;
+
         // Logging infrastructure
         // Auto-logging queue removed - using local NinjaScript output only
         // Auto-logging timer removed
@@ -1481,6 +1494,12 @@ public TrailingActivationType TrailingStopType
             if (!(record.Strategy is ITradeSyncParticipant))
                 return false;
 
+            if (!HasMatchingAccountPosition(record))
+            {
+                LogInfo("GRPC", $"MT5 close for BaseID {baseId} skipped delegate; no matching NT position found (acct={record.AccountName}, instrument={record.Instrument}).");
+                return false;
+            }
+
             int qty = Math.Max(1, requestedContracts);
             if (isElasticPartial)
             {
@@ -1495,6 +1514,45 @@ public TrailingActivationType TrailingStopType
                 LogInfo("GRPC", $"Delegated MT5 close to strategy '{record.Strategy.Name}' for BaseID: {baseId}");
             }
             return true;
+        }
+
+        private bool HasMatchingAccountPosition(TradeSyncService.TradeRecord record)
+        {
+            if (record == null)
+                return false;
+
+            string acctName = (record.AccountName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(acctName))
+                return true; // no account to validate; allow delegate
+
+            Account account = Account.All.FirstOrDefault(a =>
+                a != null && string.Equals((a.Name ?? string.Empty).Trim(), acctName, StringComparison.OrdinalIgnoreCase));
+            if (account == null)
+                return true; // can't verify; allow delegate
+
+            string instrumentName = (record.Instrument ?? string.Empty).Trim();
+            foreach (var pos in account.Positions)
+            {
+                if (pos == null || pos.Quantity == 0 || pos.MarketPosition == MarketPosition.Flat)
+                    continue;
+                if (pos.MarketPosition != record.Side)
+                    continue;
+
+                if (string.IsNullOrWhiteSpace(instrumentName))
+                    return true;
+
+                var posInstrument = pos.Instrument;
+                if (posInstrument == null)
+                    continue;
+
+                if (string.Equals(posInstrument.FullName, instrumentName, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(posInstrument.MasterInstrument?.Name, instrumentName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private void CancelProtectiveOrdersForBaseId(Account account, string baseId)
@@ -1748,6 +1806,577 @@ public TrailingActivationType TrailingStopType
             catch (Exception ex)
             {
                 LogAndPrint($"PNL_STREAM_ERROR: Exception in EmitPnLUpdateIfNeeded: {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Emit a daily PnL limit hit event to MT5 via SubmitTrade(EVENT) so the EA can force-close and override run-up.
+        /// </summary>
+        public void EmitDailyLimitHit(string accountName, string limitType, double totalPnL, double dailyLossLimit, double dailyProfitLimit, string sourceStrategy)
+        {
+            try
+            {
+                string acct = !string.IsNullOrWhiteSpace(accountName) ? accountName : monitoredAccount?.Name ?? string.Empty;
+                if (IsBacktestAccount(acct))
+                {
+                    LogDebug("DAILY_LIMIT", $"Bypassing daily limit event during backtest context (acct={acct})");
+                    return;
+                }
+
+                string baseId = !string.IsNullOrWhiteSpace(_lastTradeBaseId) ? _lastTradeBaseId : "session";
+                string instrumentName = !string.IsNullOrWhiteSpace(_lastTradeInstrument) ? _lastTradeInstrument : string.Empty;
+                string limit = limitType ?? string.Empty;
+
+                var payload = new Dictionary<string, object>
+                {
+                    { "id", $"nt_daily_limit_{limit}_{DateTime.UtcNow.Ticks}" },
+                    { "action", "EVENT" },
+                    { "order_type", "EVENT" },
+                    { "event_type", "nt_daily_limit_hit" },
+                    { "base_id", baseId },
+                    { "instrument", instrumentName },
+                    { "instrument_name", instrumentName },
+                    { "account_name", acct },
+                    { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", System.Globalization.CultureInfo.InvariantCulture) },
+                    { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
+                    // Source-of-truth PnL from Accounts tab (Realized + Unrealized) as provided by strategy
+                    { "nt_daily_pnl", (float)totalPnL },
+                    // Encode which limit triggered so EA can display it without needing new proto fields
+                    { "nt_trade_result", string.IsNullOrWhiteSpace(limit) ? "daily_limit" : limit },
+                    { "nt_session_trades", SessionTradeCount },
+                    { "nt_balance", SessionStartBalance }
+                };
+
+                Task.Run(async () =>
+                {
+                    try
+                    {
+                        await SendToBridge(payload);
+                        LogAndPrint($"DAILY_LIMIT_EVENT: Sent nt_daily_limit_hit ({limit}) nt_daily_pnl=${totalPnL:F2} acct={acct} src={sourceStrategy ?? string.Empty} (DLL={dailyLossLimit:F2}, DPL={dailyProfitLimit:F2})");
+                    }
+                    catch (Exception ex)
+                    {
+                        LogError("DAILY_LIMIT", $"Failed to send daily limit event: {ex.Message}");
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                LogError("DAILY_LIMIT", $"Exception building daily limit event: {ex.Message}");
+            }
+        }
+
+        private void MaybeResetDailyLimitOverride()
+        {
+            if (!dailyLimitOverrideActive)
+                return;
+
+            // Daily limit is "today-only" by Accounts tab; clear override when the UTC day rolls.
+            if (dailyLimitOverrideActivatedAt != DateTime.MinValue &&
+                DateTime.UtcNow.Date != dailyLimitOverrideActivatedAt.Date)
+            {
+                dailyLimitOverrideActive = false;
+                dailyLimitOverrideAccount = string.Empty;
+                dailyLimitOverrideType = string.Empty;
+                dailyLimitOverridePnL = 0.0;
+                dailyLimitOverrideActivatedAt = DateTime.MinValue;
+                LogAndPrint("DAILY_LIMIT_OVERRIDE: Cleared (new UTC day).");
+            }
+        }
+
+        private void ClearDailyLimitOverride(string reason)
+        {
+            if (!dailyLimitOverrideActive)
+                return;
+
+            dailyLimitOverrideActive = false;
+            dailyLimitOverrideAccount = string.Empty;
+            dailyLimitOverrideType = string.Empty;
+            dailyLimitOverridePnL = 0.0;
+            dailyLimitOverrideActivatedAt = DateTime.MinValue;
+
+            LogAndPrint($"DAILY_LIMIT_OVERRIDE: Cleared ({reason}).");
+        }
+
+        /// <summary>
+        /// Clears the active daily-limit override for the specified account (if present).
+        /// Intended for automated workflows where a false/temporary trigger needs to be released.
+        /// </summary>
+        public void ClearDailyLimitOverrideForAccount(string accountName, string reason)
+        {
+            try
+            {
+                MaybeResetDailyLimitOverride();
+                if (!dailyLimitOverrideActive)
+                    return;
+
+                string acct = (accountName ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(acct))
+                {
+                    string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
+                    if (!string.Equals(acct, overrideAcct, StringComparison.OrdinalIgnoreCase))
+                        return;
+                }
+
+                ClearDailyLimitOverride(string.IsNullOrWhiteSpace(reason) ? "cleared_by_strategy" : reason.Trim());
+            }
+            catch (Exception ex)
+            {
+                LogDebug("DAILY_LIMIT", $"Failed to clear daily limit override: {ex.Message}");
+            }
+        }
+
+        public bool TryGetManualDailyLimitReset(string accountName, out DateTime resetAtUtc)
+        {
+            resetAtUtc = DateTime.MinValue;
+            try
+            {
+                string acct = (accountName ?? string.Empty).Trim();
+                lock (manualDailyLimitResetLock)
+                {
+                    if (manualDailyLimitResetAtUtc == DateTime.MinValue)
+                        return false;
+
+                    string resetAcct = (manualDailyLimitResetAccount ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(resetAcct) &&
+                        !string.IsNullOrWhiteSpace(acct) &&
+                        !acct.Equals(resetAcct, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return false;
+                    }
+
+                    resetAtUtc = manualDailyLimitResetAtUtc;
+                    return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static bool IsSimulatedAccountName(string accountName)
+        {
+            if (string.IsNullOrWhiteSpace(accountName))
+                return false;
+
+            string trimmed = accountName.Trim();
+            if (trimmed.StartsWith("Sim", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (trimmed.StartsWith("Playback", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        private static bool IsOrderWorkingForReset(Order order)
+        {
+            if (order == null)
+                return false;
+
+            switch (order.OrderState)
+            {
+                case OrderState.Initialized:
+                case OrderState.Submitted:
+                case OrderState.Accepted:
+                case OrderState.Working:
+                case OrderState.PartFilled:
+                case OrderState.ChangeSubmitted:
+                case OrderState.ChangePending:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static int CountOpenPositions(Account account)
+        {
+            if (account == null || account.Positions == null)
+                return 0;
+
+            int count = 0;
+            foreach (var p in account.Positions)
+            {
+                if (p == null)
+                    continue;
+                if (p.Quantity == 0 || p.MarketPosition == MarketPosition.Flat)
+                    continue;
+                count++;
+            }
+            return count;
+        }
+
+        private static int CountWorkingOrders(Account account)
+        {
+            if (account == null || account.Orders == null)
+                return 0;
+
+            int count = 0;
+            foreach (var o in account.Orders)
+            {
+                if (IsOrderWorkingForReset(o))
+                    count++;
+            }
+            return count;
+        }
+
+        private void MaybeClearDailyLimitOverrideOnSimReset(double previousTotalPnL, double currentTotalPnL)
+        {
+            try
+            {
+                if (!dailyLimitOverrideActive || monitoredAccount == null)
+                    return;
+
+                string acct = (monitoredAccount.Name ?? string.Empty).Trim();
+                if (!IsSimulatedAccountName(acct))
+                    return;
+
+                string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(overrideAcct) && !acct.Equals(overrideAcct, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                // Reset is characterized by all PnL components snapping back to ~0.
+                if (Math.Abs(currentTotalPnL) > 0.01)
+                    return;
+                if (Math.Abs(RealizedPnL) > 0.01 || Math.Abs(UnrealizedPnL) > 0.01)
+                    return;
+
+                // Extra safety: only clear when account is flat and no working orders remain.
+                int openPositions = CountOpenPositions(monitoredAccount);
+                int workingOrders = CountWorkingOrders(monitoredAccount);
+                if (openPositions > 0 || workingOrders > 0)
+                    return;
+
+                string reason = $"sim_account_reset_detected prevTotal=${previousTotalPnL:F2} currentTotal=${currentTotalPnL:F2}";
+                ClearDailyLimitOverride(reason);
+                ClearTradeTrackingForAccount(acct, "sim_account_reset");
+            }
+            catch { }
+        }
+
+        private void ClearTradeTrackingForAccount(string accountName, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(accountName))
+                return;
+
+            string acct = accountName.Trim();
+            var baseIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                var openTrades = tradeSyncService?.GetOpenTradesSnapshot();
+                if (openTrades != null)
+                {
+                    foreach (var record in openTrades)
+                    {
+                        if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                            continue;
+                        if (!string.Equals((record.AccountName ?? string.Empty).Trim(), acct, StringComparison.OrdinalIgnoreCase))
+                            continue;
+                        baseIds.Add(record.TradeId.Trim());
+                    }
+                }
+            }
+            catch { }
+
+            try
+            {
+                foreach (var kvp in activeNtTrades)
+                {
+                    var details = kvp.Value;
+                    if (details == null || string.IsNullOrWhiteSpace(details.BaseId))
+                        continue;
+                    if (!string.Equals((details.NtAccountName ?? string.Empty).Trim(), acct, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    baseIds.Add(details.BaseId.Trim());
+                }
+            }
+            catch { }
+
+            int removedTrades = 0;
+            try
+            {
+                if (tradeSyncService != null)
+                    removedTrades = tradeSyncService.ClearTradesForAccount(acct, reason);
+            }
+            catch { }
+
+            int removedActive = 0;
+            int removedTickets = 0;
+            int removedReverseTickets = 0;
+            int removedOrderIds = 0;
+
+            foreach (var baseId in baseIds)
+            {
+                if (string.IsNullOrWhiteSpace(baseId))
+                    continue;
+
+                try { trailingAndElasticManager?.CompleteTrade(baseId); } catch { }
+
+                try
+                {
+                    if (activeNtTrades.TryRemove(baseId, out _))
+                        removedActive++;
+                }
+                catch { }
+
+                try
+                {
+                    if (baseIdToMT5Ticket.TryRemove(baseId, out var ticket) && ticket > 0)
+                    {
+                        removedTickets++;
+                        if (mt5TicketToBaseId.TryRemove(ticket, out _))
+                            removedReverseTickets++;
+                    }
+                }
+                catch { }
+
+                try
+                {
+                    if (baseIdToOrderIdMap.TryRemove(baseId, out var orderId) && !string.IsNullOrWhiteSpace(orderId))
+                    {
+                        removedOrderIds++;
+                        orderIdToBaseIdMap.TryRemove(orderId, out _);
+                        orderContractCounts.TryRemove(orderId, out _);
+                    }
+                }
+                catch { }
+            }
+
+            if (baseIds.Count > 0 || removedTrades > 0)
+            {
+                LogAndPrint($"SIM_RESET_CLEANUP: acct={acct} cleared trades={removedTrades} activeNtTrades={removedActive} baseIdTickets={removedTickets} reverseTickets={removedReverseTickets} orderIds={removedOrderIds} reason={reason}");
+            }
+        }
+
+        public bool TryGetDailyLimitOverride(string accountName, out string limitType, out double triggeredPnL, out DateTime activatedAtUtc)
+        {
+            limitType = string.Empty;
+            triggeredPnL = 0.0;
+            activatedAtUtc = DateTime.MinValue;
+
+            try
+            {
+                MaybeResetDailyLimitOverride();
+                if (!dailyLimitOverrideActive)
+                    return false;
+
+                string acct = (accountName ?? string.Empty).Trim();
+                string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(overrideAcct) &&
+                    !string.IsNullOrWhiteSpace(acct) &&
+                    !acct.Equals(overrideAcct, StringComparison.OrdinalIgnoreCase))
+                {
+                    return false;
+                }
+
+                limitType = dailyLimitOverrideType ?? string.Empty;
+                triggeredPnL = dailyLimitOverridePnL;
+                activatedAtUtc = dailyLimitOverrideActivatedAt;
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Latch a daily-limit override so any CLOSE_HEDGE requests emitted during the flatten
+        /// force in-sync closures (do not trigger MT5 hedge run-up).
+        /// </summary>
+        public void ActivateDailyLimitOverride(string accountName, string limitType, double totalPnL, string sourceStrategy)
+        {
+            try
+            {
+                string acct = !string.IsNullOrWhiteSpace(accountName) ? accountName : monitoredAccount?.Name ?? string.Empty;
+                if (IsBacktestAccount(acct))
+                {
+                    LogDebug("DAILY_LIMIT", $"Bypassing daily limit override during backtest context (acct={acct})");
+                    return;
+                }
+
+                dailyLimitOverrideActive = true;
+                dailyLimitOverrideAccount = acct ?? string.Empty;
+                dailyLimitOverrideType = limitType ?? string.Empty;
+                dailyLimitOverridePnL = totalPnL;
+                dailyLimitOverrideActivatedAt = DateTime.UtcNow;
+
+                LogAndPrint($"DAILY_LIMIT_OVERRIDE: Activated acct={dailyLimitOverrideAccount} type={dailyLimitOverrideType} nt_daily_pnl=${totalPnL:F2} src={sourceStrategy ?? string.Empty}");
+
+                // IMPORTANT: Daily limit should flatten MT5 hedges immediately, even if the NT strategy
+                // flattens the account via Account.Submit (which bypasses trade close tracking and can
+                // prevent the usual NT_CLOSURE path from firing).
+                ForceCloseAllHedgesForDailyLimit(acct, sourceStrategy ?? string.Empty);
+            }
+            catch (Exception ex)
+            {
+                LogError("DAILY_LIMIT", $"Exception activating daily limit override: {ex.Message}");
+            }
+        }
+
+        public void ActivateManualHaltOverride(string accountName, string sourceStrategy)
+        {
+            try
+            {
+                string acct = !string.IsNullOrWhiteSpace(accountName) ? accountName : monitoredAccount?.Name ?? string.Empty;
+                if (IsBacktestAccount(acct))
+                {
+                    LogDebug("MANUAL_HALT", $"Bypassing manual halt override during backtest context (acct={acct})");
+                    return;
+                }
+
+                manualHaltOverrideActive = true;
+                manualHaltOverrideAccount = acct ?? string.Empty;
+                manualHaltOverrideActivatedAt = DateTime.UtcNow;
+                LogAndPrint($"MANUAL_HALT_OVERRIDE: Activated acct={manualHaltOverrideAccount} src={sourceStrategy ?? string.Empty}");
+            }
+            catch (Exception ex)
+            {
+                LogError("MANUAL_HALT", $"Exception activating manual halt override: {ex.Message}");
+            }
+        }
+
+        public void ClearManualHaltOverride(string accountName, string reason)
+        {
+            try
+            {
+                if (!manualHaltOverrideActive)
+                    return;
+
+                string acct = (accountName ?? string.Empty).Trim();
+                if (!string.IsNullOrWhiteSpace(acct))
+                {
+                    string overrideAcct = (manualHaltOverrideAccount ?? string.Empty).Trim();
+                    if (!string.IsNullOrWhiteSpace(overrideAcct) &&
+                        !overrideAcct.Equals(acct, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+
+                manualHaltOverrideActive = false;
+                manualHaltOverrideAccount = string.Empty;
+                manualHaltOverrideActivatedAt = DateTime.MinValue;
+                LogAndPrint($"MANUAL_HALT_OVERRIDE: Cleared ({reason ?? string.Empty}).");
+            }
+            catch (Exception ex)
+            {
+                LogError("MANUAL_HALT", $"Exception clearing manual halt override: {ex.Message}");
+            }
+        }
+
+        private void ForceCloseAllHedgesForDailyLimit(string accountName, string sourceStrategy)
+        {
+            try
+            {
+                string acct = (accountName ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(acct))
+                    return;
+
+                var openTrades = tradeSyncService?.GetOpenTradesSnapshot() ?? new List<TradeSyncService.TradeRecord>();
+                int requested = 0;
+
+                foreach (var record in openTrades)
+                {
+                    if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                        continue;
+
+                    string recAcct = (record.AccountName ?? string.Empty).Trim();
+                    if (!recAcct.Equals(acct, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    int qty = record.RemainingQuantity > 0 ? record.RemainingQuantity : record.NtQuantity;
+                    if (qty <= 0)
+                        continue;
+
+                    // Reason can remain NT_FULL_CLOSE; dailyLimitOverrideActive will force closure_reason to NT_DAILY_LIMIT_*.
+                    SendHedgeCloseRequest(record, qty, "NT_FULL_CLOSE");
+                    requested++;
+                }
+
+                if (requested > 0)
+                {
+                    LogAndPrint($"DAILY_LIMIT_OVERRIDE: Forced CLOSE_HEDGE for {requested} open trade(s) acct={acct} type={dailyLimitOverrideType} src={sourceStrategy}");
+                    return;
+                }
+
+                // Fallback: if TradeSyncService snapshot is empty, attempt to force-close using activeNtTrades.
+                var tracked = activeNtTrades.Values
+                    .Where(v =>
+                        v != null &&
+                        !string.IsNullOrWhiteSpace(v.BaseId) &&
+                        (v.NtAccountName ?? string.Empty).Trim().Equals(acct, StringComparison.OrdinalIgnoreCase) &&
+                        v.RemainingQuantity > 0)
+                    .ToList();
+
+                if (tracked.Count == 0)
+                {
+                    LogAndPrint($"DAILY_LIMIT_OVERRIDE: No open trades found to force CLOSE_HEDGE (acct={acct}).");
+                    return;
+                }
+
+                string suffix = string.IsNullOrWhiteSpace(dailyLimitOverrideType)
+                    ? string.Empty
+                    : "_" + dailyLimitOverrideType.Trim().ToUpperInvariant();
+                string closureReasonField = "NT_DAILY_LIMIT" + suffix;
+
+                foreach (var details in tracked)
+                {
+                    ulong mt5Ticket = 0;
+                    baseIdToMT5Ticket.TryGetValue(details.BaseId, out mt5Ticket);
+
+                    var closureData = new Dictionary<string, object>
+                    {
+                        { "action", "CLOSE_HEDGE" },
+                        { "base_id", details.BaseId },
+                        { "quantity", (float)details.RemainingQuantity },
+                        { "nt_instrument_symbol", details.NtInstrumentSymbol ?? string.Empty },
+                        { "nt_account_name", details.NtAccountName ?? string.Empty },
+                        { "closed_hedge_quantity", (double)details.RemainingQuantity },
+                        { "closed_hedge_action", "CLOSE_HEDGE" },
+                        { "timestamp", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
+                        { "price", details.Price },
+                        { "total_quantity", details.TotalQuantity > 0 ? details.TotalQuantity : details.Quantity },
+                        { "contract_num", 1 },
+                        { "instrument_name", details.NtInstrumentSymbol ?? string.Empty },
+                        { "account_name", details.NtAccountName ?? string.Empty },
+                        { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
+                        { "nt_balance", SessionStartBalance },
+                        { "nt_daily_pnl", (float)dailyLimitOverridePnL },
+                        { "nt_trade_result", string.IsNullOrWhiteSpace(dailyLimitOverrideType) ? "daily_limit" : dailyLimitOverrideType },
+                        { "nt_session_trades", SessionTradeCount },
+                        { "closure_reason", closureReasonField },
+                        { "mt5_ticket", mt5Ticket },
+                        { "remaining_quantity", (double)details.RemainingQuantity }
+                    };
+
+                    string closureJson = SimpleJson.SerializeObject(closureData);
+                    LogAndPrint($"DAILY_LIMIT_OVERRIDE: Forcing CLOSE_HEDGE for tracked base_id={details.BaseId} (reason={closureReasonField}, qty={details.RemainingQuantity}, ticket={mt5Ticket})");
+
+                    if (IsBacktestAccount(details.NtAccountName))
+                        continue;
+
+                    Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (!grpcInitialized)
+                                await InitializeGrpcClient();
+
+                            TradingGrpcClient.NTCloseHedge(closureJson);
+                        }
+                        catch (Exception ex)
+                        {
+                            LogAndPrint($"ERROR: Exception forcing CLOSE_HEDGE via gRPC for BaseID: {details.BaseId}. Exception: {ex.Message}");
+                        }
+                    });
+                }
+
+                LogAndPrint($"DAILY_LIMIT_OVERRIDE: Forced CLOSE_HEDGE for {tracked.Count} tracked trade(s) acct={acct} type={dailyLimitOverrideType} src={sourceStrategy}");
+            }
+            catch (Exception ex)
+            {
+                LogError("DAILY_LIMIT", $"Exception forcing hedge closes on daily limit: {ex.Message}");
             }
         }
 
@@ -2728,6 +3357,7 @@ public TrailingActivationType TrailingStopType
             string baseId = record.TradeId;
             string action = record.Side == MarketPosition.Short ? "sell" : "buy";
             double quantity = Math.Max(1, record.NtQuantity);
+            string orderType = record.AggregateEntry ? "ENTRY_AGG" : "ENTRY";
 
             var payload = new Dictionary<string, object>
             {
@@ -2736,7 +3366,7 @@ public TrailingActivationType TrailingStopType
                 { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
                 { "timestamp", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
                 { "action", action },
-                { "order_type", "ENTRY" },
+                { "order_type", orderType },
                 { "instrument", record.Instrument ?? string.Empty },
                 { "instrument_name", record.Instrument ?? string.Empty },
                 { "account_name", record.AccountName ?? string.Empty },
@@ -2745,7 +3375,9 @@ public TrailingActivationType TrailingStopType
                 { "price", record.EntryPrice },
                 { "nt_points_per_1k_loss", record.NtPointsPer1kLoss },
                 { "nt_balance", SessionStartBalance },
-                { "nt_daily_pnl", ComputeCurrentDailyPnL(record?.Strategy) },
+                // Always use account-level TotalPnL (Accounts tab) as the source of truth for EA tier sizing.
+                // Do NOT use per-strategy PnL here; that can be negative even when the account is positive and will mis-tier hedges.
+                { "nt_daily_pnl", ComputeCurrentDailyPnL() },
                 { "nt_trade_result", "open" },
                 { "nt_session_trades", SessionTradeCount },
                 { "epoch", record.Epoch },
@@ -2899,14 +3531,33 @@ public TrailingActivationType TrailingStopType
             string baseId = record.TradeId;
             double closedQuantity = quantityToClose;
 
-            // Infer per-trade result using last known result; if unknown, estimate from current price vs entry.
-            string tradeResultField = !string.IsNullOrWhiteSpace(_lastTradeResult)
-                ? _lastTradeResult
-                : (reason == "NT_FULL_CLOSE" ? "closed" : "partial");
+            MaybeResetDailyLimitOverride();
+
+            // Infer per-trade result for this BaseID. Prefer the last-trade cache only when it matches this base_id.
+            string tradeResultField = reason == "NT_FULL_CLOSE" ? "closed" : "partial";
+            string cachedBaseId = (_lastTradeBaseId ?? string.Empty).Trim();
+            bool cachedMatches = !string.IsNullOrWhiteSpace(cachedBaseId) && cachedBaseId.Equals(baseId, StringComparison.OrdinalIgnoreCase);
+
+            if (cachedMatches && !double.IsNaN(_lastTradePnLDollars) && Math.Abs(_lastTradePnLDollars) > 1e-6)
+            {
+                tradeResultField = _lastTradePnLDollars >= 0 ? "win" : "loss";
+            }
+            else if (cachedMatches && !string.IsNullOrWhiteSpace(_lastTradeResult))
+            {
+                string normalized = _lastTradeResult.Trim();
+                if (normalized.Equals("win", StringComparison.OrdinalIgnoreCase) ||
+                    normalized.Equals("loss", StringComparison.OrdinalIgnoreCase))
+                {
+                    tradeResultField = normalized.ToLowerInvariant();
+                }
+            }
 
             var instrumentObj = record.Strategy?.Instrument;
+            bool hasResolvedWinLoss =
+                tradeResultField.Equals("win", StringComparison.OrdinalIgnoreCase) ||
+                tradeResultField.Equals("loss", StringComparison.OrdinalIgnoreCase);
 
-            if (string.IsNullOrWhiteSpace(_lastTradeResult) && record.EntryPrice > 0 && instrumentObj != null)
+            if (!hasResolvedWinLoss && record.EntryPrice > 0 && instrumentObj != null)
             {
                 double mark = GetCurrentPrice(instrumentObj);
                 if (mark > 0)
@@ -2917,10 +3568,7 @@ public TrailingActivationType TrailingStopType
                     else if (record.Side == MarketPosition.Short)
                         isLoss = mark > record.EntryPrice + 1e-6;
 
-                    if (isLoss)
-                        tradeResultField = "loss";
-                    else
-                        tradeResultField = "win";
+                    tradeResultField = isLoss ? "loss" : "win";
                 }
             }
 
@@ -2928,6 +3576,27 @@ public TrailingActivationType TrailingStopType
             string closureReasonField = reason;
             if (reason == "NT_FULL_CLOSE" && tradeResultField.Equals("loss", StringComparison.OrdinalIgnoreCase))
                 closureReasonField = "NT_LOSS_CLOSE";
+
+            // Daily-limit override: force in-sync close even if this would normally be a loss-close/run-up.
+            if (dailyLimitOverrideActive)
+            {
+                string acct = (record.AccountName ?? string.Empty).Trim();
+                string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(overrideAcct) || acct.Equals(overrideAcct, StringComparison.OrdinalIgnoreCase))
+                {
+                    string suffix = string.IsNullOrWhiteSpace(dailyLimitOverrideType)
+                        ? string.Empty
+                        : "_" + dailyLimitOverrideType.Trim().ToUpperInvariant();
+                    closureReasonField = "NT_DAILY_LIMIT" + suffix;
+                }
+            }
+            else if (manualHaltOverrideActive)
+            {
+                string acct = (record.AccountName ?? string.Empty).Trim();
+                string overrideAcct = (manualHaltOverrideAccount ?? string.Empty).Trim();
+                if (string.IsNullOrWhiteSpace(overrideAcct) || acct.Equals(overrideAcct, StringComparison.OrdinalIgnoreCase))
+                    closureReasonField = "NT_MANUAL_HALT";
+            }
 
             ulong mt5Ticket = 0;
             for (int retry = 0; retry < 3; retry++)
@@ -2960,7 +3629,8 @@ public TrailingActivationType TrailingStopType
                 { "account_name", record.AccountName ?? string.Empty },
                 { "time", DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture) },
                 { "nt_balance", SessionStartBalance },
-                { "nt_daily_pnl", ComputeCurrentDailyPnL(record?.Strategy) },
+                // Always use account-level TotalPnL (Accounts tab) as the source of truth for EA tier sizing.
+                { "nt_daily_pnl", ComputeCurrentDailyPnL() },
                 { "nt_trade_result", tradeResultField },
                 { "nt_session_trades", SessionTradeCount },
                 { "closure_reason", closureReasonField },
@@ -3082,6 +3752,164 @@ public TrailingActivationType TrailingStopType
             }
 
             LogAndPrint($"EXPOSURE_FLUSH: Rebuilt exposure ledger from {openTrades.Count} open trade(s).");
+        }
+
+        public void ManualResyncState(string accountName, string reason)
+        {
+            ManualResyncState(accountName, reason, true);
+        }
+
+        public void ManualResyncState(string accountName, string reason, bool clearDailyLimitOverride)
+        {
+            try
+            {
+                string acct = !string.IsNullOrWhiteSpace(accountName)
+                    ? accountName.Trim()
+                    : monitoredAccount?.Name ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(acct))
+                {
+                    LogAndPrint("SYNC_RESET: Manual resync skipped (no account).");
+                    return;
+                }
+
+                var account = monitoredAccount;
+                if (account != null && !acct.Equals(account.Name ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+                    account = null;
+
+                RefreshAccountPnLSnapshot(account, "manual_resync");
+
+                string resetReason = string.IsNullOrWhiteSpace(reason) ? "manual_resync" : reason.Trim();
+                if (clearDailyLimitOverride)
+                {
+                    ClearDailyLimitOverrideForAccount(acct, resetReason);
+                    MarkManualDailyLimitReset(acct, resetReason);
+                }
+                else
+                {
+                    LogAndPrint($"SYNC_RESET: Preserved daily limit override (reason={resetReason}).");
+                }
+
+                ResetPnLStreamState();
+                EmitPnLUpdateIfNeeded();
+
+                int clearedPending = ClearPendingHedgeCommands(resetReason);
+
+                if (account != null)
+                {
+                    if (!HasOpenPositions(account))
+                        ClearTradeTrackingForAccount(acct, resetReason);
+                    else
+                        LogAndPrint($"SYNC_RESET: Skipped trade tracking clear due to open positions (acct={acct}).");
+                }
+                else
+                {
+                    LogAndPrint($"SYNC_RESET: Skipped trade tracking clear (account not monitored for acct={acct}).");
+                }
+
+                LogAndPrint($"SYNC_RESET: Manual resync completed acct={acct} pendingCleared={clearedPending}");
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"SYNC_RESET_ERROR: Manual resync failed: {ex.Message}");
+            }
+        }
+
+        public void ManualResetDailyLimit(string accountName, string reason)
+        {
+            try
+            {
+                string acct = !string.IsNullOrWhiteSpace(accountName)
+                    ? accountName.Trim()
+                    : monitoredAccount?.Name ?? string.Empty;
+
+                if (string.IsNullOrWhiteSpace(acct))
+                {
+                    LogAndPrint("DAILY_LIMIT_OVERRIDE: Manual reset skipped (no account).");
+                    return;
+                }
+
+                string resetReason = string.IsNullOrWhiteSpace(reason) ? "manual_reset" : reason.Trim();
+                ClearDailyLimitOverrideForAccount(acct, resetReason);
+                MarkManualDailyLimitReset(acct, resetReason);
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"DAILY_LIMIT_OVERRIDE: Manual reset failed: {ex.Message}");
+            }
+        }
+
+        private void MarkManualDailyLimitReset(string accountName, string reason)
+        {
+            string acct = (accountName ?? string.Empty).Trim();
+            lock (manualDailyLimitResetLock)
+            {
+                manualDailyLimitResetAtUtc = DateTime.UtcNow;
+                manualDailyLimitResetAccount = acct;
+            }
+
+            LogAndPrint($"DAILY_LIMIT_OVERRIDE: Manual reset recorded acct={acct} reason={reason ?? string.Empty}");
+        }
+
+        private void RefreshAccountPnLSnapshot(Account account, string reason)
+        {
+            if (account == null)
+                return;
+
+            try
+            {
+                var realizedItemArgs = account.GetAccountItem(Cbi.AccountItem.RealizedProfitLoss, Currency.UsDollar);
+                if (realizedItemArgs != null && realizedItemArgs.Value is double realizedValue)
+                    RealizedPnL = realizedValue;
+
+                var unrealizedItemArgs = account.GetAccountItem(Cbi.AccountItem.UnrealizedProfitLoss, Currency.UsDollar);
+                if (unrealizedItemArgs != null && unrealizedItemArgs.Value is double unrealizedValue)
+                    UnrealizedPnL = unrealizedValue;
+
+                LogAndPrint($"PNL_REFRESH: Refreshed account PnL snapshot (acct={account.Name}, total=${TotalPnL:F2}, reason={reason ?? string.Empty})");
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"PNL_REFRESH_ERROR: Failed to refresh account PnL snapshot: {ex.Message}");
+            }
+        }
+
+        private int ClearPendingHedgeCommands(string reason)
+        {
+            int removed = 0;
+            while (pendingHedgeCommands.TryDequeue(out _))
+                removed++;
+
+            if (removed > 0)
+            {
+                LogAndPrint($"GRPC: Cleared {removed} pending hedge command(s) ({reason ?? string.Empty}).");
+            }
+
+            return removed;
+        }
+
+        private bool HasOpenPositions(Account account)
+        {
+            if (account == null)
+                return false;
+
+            try
+            {
+                foreach (var position in account.Positions)
+                {
+                    if (position == null)
+                        continue;
+
+                    if (position.MarketPosition != MarketPosition.Flat && Math.Abs(position.Quantity) > 0)
+                        return true;
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            return false;
         }
 
         internal void ClearExposureForStrategy(StrategyBase strategy)
@@ -3475,6 +4303,7 @@ public TrailingActivationType TrailingStopType
         if (e.Account == null || monitoredAccount == null || e.Account.Name != monitoredAccount.Name)
             return;
 
+        double previousTotalPnL = TotalPnL;
         bool pnlChanged = false;
 
         if (e.AccountItem == Cbi.AccountItem.RealizedProfitLoss)
@@ -3506,6 +4335,9 @@ public TrailingActivationType TrailingStopType
             // TotalPnL is updated here, and OnPropertyChanged is called for it.
             TotalPnL = RealizedPnL + UnrealizedPnL;
             OnPropertyChanged(nameof(TotalPnL));
+
+            // Sim account resets set TotalPnL back to 0; clear daily-limit override so testing can continue.
+            MaybeClearDailyLimitOverrideOnSimReset(previousTotalPnL, TotalPnL);
         }
     }
         private void OnExecutionUpdate(object sender, ExecutionEventArgs e)

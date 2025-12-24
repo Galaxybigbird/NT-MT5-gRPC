@@ -20,11 +20,8 @@ int      TrailingButtonYDistance = 20;  // Y distance for trailing button positi
 
 input double   MinimumStopDistance = 400.0; // Minimum stop distance in points
 
-// Global variables for button and manual activation
-string         ButtonName = "StartTrailing";  // Unique name for the button
+// Global variables for manual activation (button removed)
 bool           ManualTrailingActivated = false;  // Flag for manual trailing activation
-color          ButtonColorActive = clrLime;     // Button color when trailing is active
-color          ButtonColorInactive = clrGray;   // Button color when trailing is inactive
 
 // Buffers for DEMA ATR calculation
 double AtrDEMA[], Ema1[], Ema2[];  // buffers for DEMA ATR, and intermediate EMAs
@@ -61,9 +58,6 @@ void CleanupATRTrailing()
         }
         Print("==========================");
     }
-    
-    // Delete the trailing button
-    ObjectDelete(0, ButtonName);
     
     // Clear all visualization
     ClearVisualization();
@@ -131,19 +125,6 @@ void InitDEMAATR()
     ArrayInitialize(AtrDEMA, 0);
     ArrayInitialize(Ema1, 0);
     ArrayInitialize(Ema2, 0);
-    
-    // Create the Start Trailing button in top-right corner
-    ObjectCreate(0, ButtonName, OBJ_BUTTON, 0, 0, 0);
-    ObjectSetInteger(0, ButtonName, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
-    ObjectSetInteger(0, ButtonName, OBJPROP_XDISTANCE, TrailingButtonXDistance);
-    ObjectSetInteger(0, ButtonName, OBJPROP_YDISTANCE, TrailingButtonYDistance);
-    ObjectSetInteger(0, ButtonName, OBJPROP_XSIZE, 100);
-    ObjectSetInteger(0, ButtonName, OBJPROP_YSIZE, 20);
-    ObjectSetString(0, ButtonName, OBJPROP_TEXT, "Start Trailing");
-    ObjectSetInteger(0, ButtonName, OBJPROP_COLOR, ButtonColorInactive);
-    ObjectSetInteger(0, ButtonName, OBJPROP_BGCOLOR, clrWhite);
-    ObjectSetInteger(0, ButtonName, OBJPROP_BORDER_COLOR, clrBlack);
-    ObjectSetInteger(0, ButtonName, OBJPROP_FONTSIZE, 10);
     
     // Reset statistics
     ResetTrailingStats();

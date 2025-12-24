@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using NinjaTrader.Cbi;
 using NinjaTrader.NinjaScript;
@@ -61,6 +62,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             public int LastDeltaQuantity;
             public bool ManualStopOverride;
             public bool ManualTargetOverride;
+            public bool AggregateEntry;
         }
 
         private readonly MultiStratManager owner;
@@ -94,6 +96,61 @@ namespace NinjaTrader.NinjaScript.AddOns
             }
         }
 
+        public int ClearTradesForAccount(string accountName, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(accountName))
+                return 0;
+
+            string acct = accountName.Trim();
+            var removed = new List<TradeRecord>();
+
+            lock (gate)
+            {
+                var idsToRemove = tradesById.Values
+                    .Where(r => r != null &&
+                                !string.IsNullOrWhiteSpace(r.TradeId) &&
+                                string.Equals((r.AccountName ?? string.Empty).Trim(), acct, StringComparison.OrdinalIgnoreCase))
+                    .Select(r => r.TradeId)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                foreach (var tradeId in idsToRemove)
+                {
+                    if (!tradesById.TryGetValue(tradeId, out var record))
+                        continue;
+
+                    removed.Add(CloneRecord(record));
+                    tradesById.Remove(tradeId);
+
+                    if (record.Strategy != null && tradesByStrategy.TryGetValue(record.Strategy, out var ids))
+                    {
+                        ids.Remove(tradeId);
+                        if (ids.Count == 0)
+                            tradesByStrategy.Remove(record.Strategy);
+                    }
+                }
+            }
+
+            foreach (var rec in removed)
+            {
+                if (rec == null)
+                    continue;
+
+                double deltaQty = rec.RemainingQuantity > 0 ? rec.RemainingQuantity : rec.NtQuantity;
+                if (Math.Abs(deltaQty) < 1e-9)
+                    continue;
+
+                owner?.AdjustExposure(rec.Strategy, rec.AccountName, rec.Instrument, -GetSignedQuantity(rec.Side, deltaQty));
+            }
+
+            if (removed.Count > 0)
+            {
+                owner.LogInfo("TRADE_SYNC", $"Cleared {removed.Count} trade(s) for acct={acct} ({reason})");
+            }
+
+            return removed.Count;
+        }
+
         public void RegisterStrategy(StrategyBase strategy)
         {
             if (strategy == null)
@@ -125,7 +182,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             owner?.ClearExposureForStrategy(strategy);
         }
 
-        public void PublishOpen(StrategyBase strategy, string tradeId, string instrument, MarketPosition side, int quantity, string accountName, double pointsPer1kLoss, double entryPrice)
+        public void PublishOpen(StrategyBase strategy, string tradeId, string instrument, MarketPosition side, int quantity, string accountName, double pointsPer1kLoss, double entryPrice, bool aggregateEntry = false)
         {
             if (strategy == null || string.IsNullOrWhiteSpace(tradeId) || quantity <= 0)
                 return;
@@ -144,7 +201,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 LastSeq = 0,
                 Epoch = epoch,
                 NtPointsPer1kLoss = pointsPer1kLoss,
-                EntryPrice = entryPrice
+                EntryPrice = entryPrice,
+                AggregateEntry = aggregateEntry
             };
 
             TradeRecord snapshot;
@@ -332,7 +390,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 Epoch = source.Epoch,
                 NtPointsPer1kLoss = source.NtPointsPer1kLoss,
                 EntryPrice = source.EntryPrice,
-                LastDeltaQuantity = source.LastDeltaQuantity
+                LastDeltaQuantity = source.LastDeltaQuantity,
+                AggregateEntry = source.AggregateEntry
             };
         }
 

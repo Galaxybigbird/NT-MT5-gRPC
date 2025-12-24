@@ -234,12 +234,14 @@ func (s *Server) enqueueTradeWithSplit(req *trading.Trade) error {
 
 	// Normalize action casing
 	act := strings.ToLower(req.Action)
+	orderType := strings.TrimSpace(req.OrderType)
+	skipSplit := strings.EqualFold(orderType, "ENTRY_AGG")
 
 	// Only split for entry actions (buy/sell). Leave CLOSE/MT5 notifications untouched.
 	if act == "buy" || act == "sell" {
 		// Split any aggregated multi-quantity entry to ensure 1:1 MT5 tickets per contract.
 		// This is robust to varying NT batching patterns (e.g., submissions of Qty=2 remaining of a 3 group).
-		if req.Quantity > 1 {
+		if req.Quantity > 1 && !skipSplit {
 			n := int(req.Quantity + 1e-9)
 			if n > 1 {
 				log.Printf("gRPC: Splitting entry (Qty=%.2f → %d units) for BaseID %s", req.Quantity, n, req.BaseId)

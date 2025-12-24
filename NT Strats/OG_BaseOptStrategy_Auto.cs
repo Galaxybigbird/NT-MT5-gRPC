@@ -6,7 +6,9 @@ using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Linq;
+using System.Reflection;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using NinjaTrader.Cbi;
 using NinjaTrader.Gui.Chart;
@@ -25,6 +27,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 {
     public class BaseOptStrategyAuto : Strategy, ITradeSyncParticipant, IRunUpParticipant
     {
+        public class ConnectedAccountNameConverter : StringConverter
+        {
+            public override bool GetStandardValuesSupported(ITypeDescriptorContext context) => true;
+            public override bool GetStandardValuesExclusive(ITypeDescriptorContext context) => false;
+
+            public override StandardValuesCollection GetStandardValues(ITypeDescriptorContext context)
+            {
+                var ordered = GetAvailableAccountNames();
+                return new StandardValuesCollection(ordered);
+            }
+        }
+
         // --- indicator refs
         private SMA sma;
         private EMA emaFast, emaSlow;
@@ -45,14 +59,47 @@ namespace NinjaTrader.NinjaScript.Strategies
         private string activeTradeId;
         private string lastStatusText;
         private bool lastStatusHealthy;
+        private bool lastStatusHasPnLLines;
+        private bool lastStatusPnlNegative;
         private bool tradeSyncWarned;
+        private readonly Dictionary<string, MultiEntrySyncGroup> multiEntrySyncGroups = new Dictionary<string, MultiEntrySyncGroup>(StringComparer.OrdinalIgnoreCase);
 
         private bool desyncHoldActive;
         private DateTime desyncHoldActivatedAt = DateTime.MinValue;
 
+        private bool accountOverrideApplied;
+        private bool accountOverrideLoggedUnavailable;
+        private DateTime lastAccountDiagnosticsAt = DateTime.MinValue;
+
+        private bool dailyPnLLimitHalted;
+        private string dailyPnLLimitStatusText;
+        private string dailyPnLLimitType;
+        private double dailyPnLLimitTriggeredPnL;
+        private DateTime dailyPnLLimitTriggeredAt = DateTime.MinValue;
+        private DateTime dailyPnLLimitLastEnforceAttemptAt = DateTime.MinValue;
+        private DateTime dailyPnLLimitLastEnforceLogAt = DateTime.MinValue;
+        private DateTime dailyPnLLimitLastManualResetAt = DateTime.MinValue;
+        private DateTime dailyPnLLimitProfitCandidateAt = DateTime.MinValue;
+        private double dailyPnLLimitProfitCandidatePnL = 0.0;
+        private const double DailyPnLLimitProfitConfirmSeconds = 0.75;
+
+        private bool manualHaltActive;
+        private string manualHaltStatusText;
+        private DateTime manualHaltActivatedAt = DateTime.MinValue;
+
+        private Chart chartWindow;
+        private ChartTrader chartTrader;
+        private Grid chartTraderGrid;
+        private RowDefinition chartTraderButtonsRow;
+        private StackPanel chartTraderButtonPanel;
+        private Button manualFlattenButton;
+        private Button manualResumeButton;
+        private bool chartTraderButtonsAdded;
+
         private class TradeRuntimeState
         {
             public string TradeId;
+            public string SyncTradeId;
             public MarketPosition EntrySide;
             public int OriginalQuantity;
             public int RemainingQuantity;
@@ -80,12 +127,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool Bootstrapped;
             public bool AllowOpenPublish;
             public bool PendingClosePublish;
+            public Order EntryOrder;
             public Order StopOrder;
             public Order TargetOrder;
             public int ProtectionRetryCount;
             public DateTime LastProtectionRetry;
             public int ProtectionRearmCount;
             public DateTime LastProtectionRearm;
+        }
+
+        private class MultiEntrySyncGroup
+        {
+            public string TradeId;
+            public int TotalQuantity;
+            public int LastPublishedRemaining;
+            public bool OpenPublished;
+            public bool ClosedPublished;
         }
 
 
@@ -117,6 +174,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Bias = TradeBias.Both;
                 MinSignalsToEnterLong = 2;
                 MinSignalsToEnterShort = 2;
+                TradesPerEntry = 1;
+                TreatMultiEntryAsSingleTrade = false;
 
                 // Indicator params
                 SmaPeriod = 50;
@@ -156,6 +215,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DemaAtrActivationMode = TrailingActivationType.Percent;
                 DemaAtrActivationValue = 1.0;
 
+                EnableDailyPnLLimits = false;
+                DailyLossLimit = -2000;
+                DailyProfitLimit = 840;
+
+                ExecutionAccountOverride = string.Empty;
+                LogAccountDiagnostics = false;
+                accountOverrideApplied = false;
+                accountOverrideLoggedUnavailable = false;
+
                 tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
                 activeTradeId = null;
             }
@@ -166,10 +234,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                     AddDataSeries(BarsPeriodType.Tick, 1);
                 }
 
+                EntriesPerDirection = Math.Max(1, TradesPerEntry);
+
                     // optional: log parameters once per iteration for diagnostics
                 if (Debug)
                 {
-                    StrategyLogDebug($"PARAMS: Bias={Bias}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, UseDemaAtrTrailing={UseDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEven={UseBreakEven}, BETriggerTicks={BreakEvenTriggerTicks}, BEPlusTicks={BreakEvenPlusTicks}");
+                    StrategyLogDebug($"PARAMS: Bias={Bias}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, UseDemaAtrTrailing={UseDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEven={UseBreakEven}, BETriggerTicks={BreakEvenTriggerTicks}, BEPlusTicks={BreakEvenPlusTicks}");
                 }
 
                 if (tradeStates == null)
@@ -179,6 +249,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 activeTradeId = null;
                 openTradeOrder.Clear();
+                multiEntrySyncGroups.Clear();
 
             }
             else if (State == State.DataLoaded)
@@ -207,13 +278,28 @@ namespace NinjaTrader.NinjaScript.Strategies
                     MultiStratManager.Instance.TradeSync.RegisterStrategy(this);
                 UpdateStatusLabel("Loading data... waiting for realtime", false);
             }
+            else if (State == State.Historical)
+            {
+                TryInitializeChartTraderButtons();
+            }
             else if (State == State.Realtime)
             {
+                ApplyExecutionAccountOverrideIfNeeded();
+                if (LogAccountDiagnostics)
+                    DumpAccounts("realtime_start");
+
+                // Daily PnL limits are "today-only" per Accounts tab; reset local latch on startup.
+                ResetDailyPnLLimitState("realtime_start");
+                manualHaltActive = false;
+                manualHaltStatusText = null;
+                manualHaltActivatedAt = DateTime.MinValue;
+
                 // Flush any historical bookkeeping so live executions start from a clean slate.
                 ResetTradeState();
                 StrategyLogInfo("[AUTO] Strategy entered realtime; automation enabled");
 
                 BootstrapExistingPositionState();
+                TryInitializeChartTraderButtons();
                 if (Position != null && Position.MarketPosition != MarketPosition.Flat && tradeStates != null && tradeStates.Count > 0)
                     UpdateStatusLabel(string.Format("Managing {0} {1} ({2})", Position.MarketPosition, Position.Quantity, activeTradeId ?? "<pending>"), true);
                 else
@@ -224,10 +310,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (MultiStratManager.Instance != null && MultiStratManager.Instance.TradeSync != null)
                     MultiStratManager.Instance.TradeSync.UnregisterStrategy(this);
 
+                try
+                {
+                    MultiStratManager.Instance?.ClearManualHaltOverride(Account != null ? Account.Name : string.Empty, "strategy_terminated");
+                }
+                catch { }
+
+                // Cancel any working entry orders so they cannot fill after disable.
+                CancelWorkingEntryOrders("strategy_terminated");
+
                 // Safety: flatten any open position when the strategy terminates to avoid naked risk.
                 TryFlattenActivePosition("strategy_terminated");
 
                 ResetTradeState();
+                RemoveChartTraderButtons();
                 UpdateStatusLabel("Stopped", false);
             }
         }
@@ -239,8 +335,269 @@ namespace NinjaTrader.NinjaScript.Strategies
         }
         #endregion
 
+        private void ApplyExecutionAccountOverrideIfNeeded()
+        {
+            if (accountOverrideApplied)
+                return;
+
+            string desired = (ExecutionAccountOverride ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(desired))
+            {
+                accountOverrideApplied = true;
+                return;
+            }
+
+            NinjaTrader.Cbi.Account resolved = null;
+            try
+            {
+                string desiredNorm = NormalizeAccountKey(desired);
+                lock (NinjaTrader.Cbi.Account.All)
+                {
+                    foreach (var account in NinjaTrader.Cbi.Account.All)
+                    {
+                        if (account == null)
+                            continue;
+
+                        if (string.Equals(account.Name, desired, StringComparison.OrdinalIgnoreCase) ||
+                            string.Equals(account.DisplayName, desired, StringComparison.OrdinalIgnoreCase))
+                        {
+                            resolved = account;
+                            break;
+                        }
+
+                        string nameNorm = NormalizeAccountKey(account.Name);
+                        string displayNorm = NormalizeAccountKey(account.DisplayName);
+                        if (!string.IsNullOrEmpty(desiredNorm) &&
+                            (!string.IsNullOrEmpty(nameNorm) || !string.IsNullOrEmpty(displayNorm)) &&
+                            (string.Equals(nameNorm, desiredNorm, StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(displayNorm, desiredNorm, StringComparison.OrdinalIgnoreCase)))
+                        {
+                            resolved = account;
+                            break;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            if (resolved == null)
+            {
+                if (!accountOverrideLoggedUnavailable)
+                {
+                    accountOverrideLoggedUnavailable = true;
+                    var available = GetAvailableAccountNames();
+                    var availableText = available.Count > 0 ? string.Join(", ", available) : "<none>";
+                    StrategyLogInfo($"[AUTO][ACCOUNT] ExecutionAccountOverride '{desired}' not found; available={availableText}; staying on {(Account != null ? Account.Name : "<null>")}");
+                    if (LogAccountDiagnostics)
+                        DumpAccounts("override_not_found");
+                }
+                return;
+            }
+
+            if (Account != null && string.Equals(Account.Name, resolved.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                accountOverrideApplied = true;
+                StrategyLogInfo($"[AUTO][ACCOUNT] ExecutionAccountOverride resolved to current account '{resolved.Name}'");
+                return;
+            }
+
+            string error;
+            if (!TrySetStrategyAccount(resolved, out error))
+            {
+                accountOverrideApplied = true;
+                StrategyLogInfo($"[AUTO][ACCOUNT] Failed to apply ExecutionAccountOverride '{resolved.Name}': {error}");
+                return;
+            }
+
+            accountOverrideApplied = true;
+            StrategyLogInfo($"[AUTO][ACCOUNT] Strategy account overridden to '{resolved.Name}' (from '{desired}')");
+            if (LogAccountDiagnostics)
+                DumpAccounts("override_applied");
+        }
+
+        private static string NormalizeAccountKey(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            var trimmed = value.Trim();
+            var builder = new StringBuilder(trimmed.Length);
+            for (int i = 0; i < trimmed.Length; i++)
+            {
+                char c = trimmed[i];
+                if (char.IsLetterOrDigit(c))
+                    builder.Append(char.ToUpperInvariant(c));
+            }
+            return builder.ToString();
+        }
+
+        private static List<string> GetAvailableAccountNames()
+        {
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                lock (NinjaTrader.Cbi.Account.All)
+                {
+                    foreach (var account in NinjaTrader.Cbi.Account.All)
+                    {
+                        if (account == null)
+                            continue;
+
+                        if (!string.IsNullOrWhiteSpace(account.Name))
+                            names.Add(account.Name.Trim());
+                        if (!string.IsNullOrWhiteSpace(account.DisplayName))
+                            names.Add(account.DisplayName.Trim());
+                    }
+                }
+            }
+            catch { }
+
+            return names.OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        private void DumpAccounts(string reason)
+        {
+            // throttle to avoid spamming if property grid calls converters repeatedly
+            if (lastAccountDiagnosticsAt != DateTime.MinValue && (DateTime.UtcNow - lastAccountDiagnosticsAt).TotalSeconds < 10)
+                return;
+            lastAccountDiagnosticsAt = DateTime.UtcNow;
+
+            try
+            {
+                List<NinjaTrader.Cbi.Account> accounts;
+                lock (NinjaTrader.Cbi.Account.All)
+                    accounts = NinjaTrader.Cbi.Account.All.Where(a => a != null).ToList();
+
+                StrategyLogInfo($"[AUTO][ACCOUNT_DUMP] reason={reason} current={(Account != null ? Account.Name : "<null>")} count={accounts.Count}");
+                foreach (var account in accounts)
+                {
+                    string connName = string.Empty;
+                    string connStatus = string.Empty;
+                    try
+                    {
+                        if (account.Connection != null)
+                        {
+                            var connection = account.Connection;
+                            connName = connection.Options != null ? connection.Options.Name : null;
+
+                            if (string.IsNullOrEmpty(connName))
+                            {
+                                var nameProp = connection.GetType().GetProperty("Name", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                                if (nameProp != null)
+                                    connName = Convert.ToString(nameProp.GetValue(connection, null));
+                            }
+
+                            connStatus = connection.Status.ToString();
+                        }
+                    }
+                    catch { }
+
+                    StrategyLogInfo($"[AUTO][ACCOUNT_DUMP] name='{account.Name}' display='{account.DisplayName}' conn='{connName}' status='{connStatus}'");
+
+                    // Probe a few common flags via reflection (varies across NT versions/providers)
+                    try
+                    {
+                        var flags = new[] { "IsSimulation", "IsSimulated", "IsPlayback", "IsEnabled", "CanSubmitOrders", "CanSubmit", "IsTradable" };
+                        var parts = new List<string>();
+                        foreach (var flag in flags)
+                        {
+                            var p = account.GetType().GetProperty(flag, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                            if (p != null && p.PropertyType == typeof(bool))
+                            {
+                                bool v = (bool)p.GetValue(account, null);
+                                parts.Add($"{flag}={v}");
+                            }
+                        }
+                        if (parts.Count > 0)
+                            StrategyLogInfo($"[AUTO][ACCOUNT_DUMP] flags name='{account.Name}' {string.Join(" ", parts)}");
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception ex)
+            {
+                StrategyLogInfo($"[AUTO][ACCOUNT_DUMP] failed reason={reason} err={ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
+        private bool TrySetStrategyAccount(NinjaTrader.Cbi.Account targetAccount, out string error)
+        {
+            error = null;
+            if (targetAccount == null)
+            {
+                error = "targetAccount null";
+                return false;
+            }
+
+            try
+            {
+                PropertyInfo prop = null;
+                for (Type t = GetType(); t != null && prop == null; t = t.BaseType)
+                {
+                    prop = t.GetProperty("Account", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                }
+                if (prop == null)
+                {
+                    error = "Account property not found via reflection";
+                    return false;
+                }
+
+                var setter = prop.GetSetMethod(true);
+                if (setter == null)
+                {
+                    error = "Account has no setter";
+                    return false;
+                }
+
+                setter.Invoke(this, new object[] { targetAccount });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                error = $"{ex.GetType().Name}: {ex.Message}";
+                return false;
+            }
+        }
+
         protected override void OnBarUpdate()
         {
+            if (State == State.Realtime)
+                ApplyExecutionAccountOverrideIfNeeded();
+
+            if (BarsInProgress == 0 || BarsInProgress == 1)
+            {
+                if (State == State.Realtime && EnableDailyPnLLimits)
+                {
+                    MaybeResetDailyPnLLimitForNewDay();
+
+                    if (!dailyPnLLimitHalted)
+                        MaybeHydrateDailyPnLLimitFromAddonOverride();
+
+                    MaybeClearDailyPnLLimitForSimReset();
+                    MaybeClearDailyPnLLimitFromManualReset();
+
+                    if (dailyPnLLimitHalted)
+                    {
+                        MaybeClearDailyPnLLimitIfRecovered();
+                        if (!dailyPnLLimitHalted)
+                            return;
+
+                        RefreshDailyPnLLimitStatusText();
+                        TryEnforceDailyPnLLimitFlat();
+                        if (!string.IsNullOrWhiteSpace(dailyPnLLimitStatusText))
+                            UpdateStatusLabel(dailyPnLLimitStatusText, false);
+                        return;
+                    }
+
+                    if (TryCheckDailyPnLLimit(out var statusText))
+                    {
+                        dailyPnLLimitStatusText = statusText;
+                        UpdateStatusLabel(dailyPnLLimitStatusText, false);
+                        return;
+                    }
+                }
+            }
+
             if (BarsInProgress == 1)
             {
                 if (Position != null && Position.MarketPosition != MarketPosition.Flat && tradeStates != null && tradeStates.Count > 0)
@@ -259,9 +616,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool isFlat = Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0;
             if (isFlat && tradeStates != null && tradeStates.Count > 0)
             {
+                bool hasWorkingEntry = HasWorkingEntryOrders();
                 bool pending = PublishPendingCloses();
-                if (!pending)
+                if (!pending && !hasWorkingEntry)
                     ResetTradeState();
+                if (hasWorkingEntry)
+                {
+                    UpdateStatusLabel("Active: pending entry (waiting for fill/cancel)", true);
+                    return;
+                }
                 UpdateStatusLabel("Active: scanning (position flat)", true);
                 // Do not return; allow new entries even if pending closes remain.
             }
@@ -368,6 +731,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
+            if (manualHaltActive)
+            {
+                string haltText = string.IsNullOrWhiteSpace(manualHaltStatusText) ? "HALTED: manual (awaiting resume)" : manualHaltStatusText;
+                if (!isFlatPosition && hasTrackedTrades)
+                {
+                    UpdateStatusLabel(haltText, false);
+                    UpdateStopsTargets(GetRealtimePrice());
+                }
+                else
+                {
+                    UpdateStatusLabel(haltText, false);
+                }
+                return;
+            }
+
             // Manage orders
             if (isFlatPosition)
             {
@@ -387,10 +765,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                     else
                     {
-                        string tradeId = CreateTradeId(MarketPosition.Long);
-                        PrepareTradeState(tradeId, MarketPosition.Long, Math.Max(1, DefaultQuantity));
-                        if (Debug) StrategyLogDebug($"{Time[0]} EnterLong({tradeId}) votes={longVotes} effMin={effMinLong}");
-                        EnterLong(tradeId);
+                        int entriesToSubmit = Math.Max(1, TradesPerEntry);
+                        MultiEntrySyncGroup syncGroup = StartMultiEntrySyncGroup(MarketPosition.Long, entriesToSubmit, Math.Max(1, DefaultQuantity));
+                        for (int i = 0; i < entriesToSubmit; i++)
+                        {
+                            string tradeId = CreateTradeId(MarketPosition.Long);
+                            var state = PrepareTradeState(tradeId, MarketPosition.Long, Math.Max(1, DefaultQuantity));
+                            AttachTradeStateToSyncGroup(state, syncGroup);
+                            if (Debug) StrategyLogDebug($"{Time[0]} EnterLong({tradeId}) votes={longVotes} effMin={effMinLong} entry={i + 1}/{entriesToSubmit}");
+                            EnterLong(tradeId);
+                        }
                     }
                 }
                 else if (canShort)
@@ -403,10 +787,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                     else
                     {
-                        string tradeId = CreateTradeId(MarketPosition.Short);
-                        PrepareTradeState(tradeId, MarketPosition.Short, Math.Max(1, DefaultQuantity));
-                        if (Debug) StrategyLogDebug($"{Time[0]} EnterShort({tradeId}) votes={shortVotes} effMin={effMinShort}");
-                        EnterShort(tradeId);
+                        int entriesToSubmit = Math.Max(1, TradesPerEntry);
+                        MultiEntrySyncGroup syncGroup = StartMultiEntrySyncGroup(MarketPosition.Short, entriesToSubmit, Math.Max(1, DefaultQuantity));
+                        for (int i = 0; i < entriesToSubmit; i++)
+                        {
+                            string tradeId = CreateTradeId(MarketPosition.Short);
+                            var state = PrepareTradeState(tradeId, MarketPosition.Short, Math.Max(1, DefaultQuantity));
+                            AttachTradeStateToSyncGroup(state, syncGroup);
+                            if (Debug) StrategyLogDebug($"{Time[0]} EnterShort({tradeId}) votes={shortVotes} effMin={effMinShort} entry={i + 1}/{entriesToSubmit}");
+                            EnterShort(tradeId);
+                        }
                     }
                 }
             }
@@ -424,6 +814,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void UpdateStopsTargets(double? priceOverride = null)
         {
             if (string.IsNullOrEmpty(activeTradeId))
+                return;
+
+            if (State == State.Realtime && dailyPnLLimitHalted)
                 return;
 
             if (!TryGetTradeState(activeTradeId, out var activeState))
@@ -482,7 +875,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (activeState.RunUpActive)
             {
-                ApplyRunUpTrailing(activeState, currentPrice);
+                MultiEntrySyncGroup group;
+                if (TryGetMultiEntrySyncGroupByTradeId(activeTradeId, out group))
+                {
+                    List<TradeRuntimeState> states = GetMultiEntrySyncStates(group.TradeId);
+                    foreach (TradeRuntimeState state in states)
+                        ApplyRunUpTrailing(state, currentPrice);
+                }
+                else
+                {
+                    ApplyRunUpTrailing(activeState, currentPrice);
+                }
                 return;
             }
 
@@ -761,16 +1164,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                         if (tick <= 0) tick = 1e-6;
                         if (refPrice <= 0) refPrice = GetRealtimePrice();
 
-                        if (Position.MarketPosition == MarketPosition.Long && value >= refPrice - tick)
+                        if (Position.MarketPosition == MarketPosition.Long && value > refPrice - tick)
                         {
                             state.PendingAutoStopUpdate = false;
-                            StrategyLogInfo(string.Format("[AUTO][STOP] Skip SetStopLoss for {0}: price {1:F2} not below market {2:F2}", tradeId, value, refPrice));
+                            StrategyLogInfo(string.Format("[AUTO][STOP] Skip SetStopLoss for {0}: price {1:F2} not at least 1 tick below market {2:F2}", tradeId, value, refPrice));
                             return false;
                         }
-                        if (Position.MarketPosition == MarketPosition.Short && value <= refPrice + tick)
+                        if (Position.MarketPosition == MarketPosition.Short && value < refPrice + tick)
                         {
                             state.PendingAutoStopUpdate = false;
-                            StrategyLogInfo(string.Format("[AUTO][STOP] Skip SetStopLoss for {0}: price {1:F2} not above market {2:F2}", tradeId, value, refPrice));
+                            StrategyLogInfo(string.Format("[AUTO][STOP] Skip SetStopLoss for {0}: price {1:F2} not at least 1 tick above market {2:F2}", tradeId, value, refPrice));
                             return false;
                         }
                     }
@@ -1072,7 +1475,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return false;
             }
 
-            bool isLong = Position.MarketPosition == MarketPosition.Long;
+            bool isLong = state.EntrySide == MarketPosition.Long;
             double? stopPrice = SharedDemaAtrTrailing.CalculateTrailingStop(quotes, DemaAtrPeriod, DemaAtrMultiplier, isLong, currentPrice);
             if (!stopPrice.HasValue)
                 return false;
@@ -1268,7 +1671,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (lastAccepted.HasValue && PricesClose(desiredStop, lastAccepted.Value))
                 return;
 
-            var clamped = ClampStopPrice(desiredStop, currentPrice, isLong, lastAccepted);
+            // Clamp against live bid/ask so we don't compute a stop that's too close to the market due to last-price lag.
+            double clampRef = currentPrice;
+            try
+            {
+                double bid = GetCurrentBid();
+                double ask = GetCurrentAsk();
+                if (isLong && bid > 0)
+                    clampRef = bid;
+                else if (!isLong && ask > 0)
+                    clampRef = ask;
+            }
+            catch { }
+
+            var clamped = ClampStopPrice(desiredStop, clampRef, isLong, lastAccepted);
             if (!clamped.HasValue)
             {
                 StrategyLogInfo(string.Format("[RUN_UP_TRACE] Clamp blocked stop update | base={0} side={1} price={2:F2} anchor={3:F2} desired={4:F2} dist={5:F4} inc={6:F4} steps={7:F2}",
@@ -1297,15 +1713,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            // Clear any working stop first to avoid run-up stalling on modify failures.
-            if (state.StopOrder != null && !IsTerminalState(state.StopOrder.OrderState))
-            {
-                try { CancelOrder(state.StopOrder); } catch { }
-                state.StopOrder = null;
-                state.LastStopPrice = 0;
-            }
-
-            if (IssueStopLoss(activeTradeId, CalculationMode.Price, clamped.Value, false))
+            if (IssueStopLoss(state.TradeId, CalculationMode.Price, clamped.Value, false))
             {
                 state.RunUpLastStopPrice = clamped.Value;
                 state.LastStopPrice = clamped.Value;
@@ -1347,6 +1755,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void EnsureProtectionForActiveTrade(TradeRuntimeState state, double currentPrice)
         {
+            if (State == State.Realtime && dailyPnLLimitHalted)
+                return;
+
             if (state == null || string.IsNullOrEmpty(activeTradeId) || Position == null || Position.MarketPosition == MarketPosition.Flat)
                 return;
 
@@ -1356,7 +1767,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
 
             // Reuse ATR/ticks logic to compute baseline protections.
-            double entryPrice = Position.AveragePrice;
+            double entryPrice = state.EntryPrice;
+            if (entryPrice <= 0 || double.IsNaN(entryPrice))
+                entryPrice = Position.AveragePrice;
             double atrValue = 0;
             try
             {
@@ -1758,6 +2171,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             var state = new TradeRuntimeState
             {
                 TradeId = tradeId,
+                SyncTradeId = null,
                 EntrySide = side,
                 OriginalQuantity = qty,
                 RemainingQuantity = qty,
@@ -1841,11 +2255,174 @@ namespace NinjaTrader.NinjaScript.Strategies
             ClearGlobalStopsTargets();
             openTradeOrder.Clear();
             activeTradeId = null;
+            multiEntrySyncGroups.Clear();
             stopSet = false;
             targetSet = false;
             ResetDemaTrailingState();
             lastStatusText = null;
             lastStatusHealthy = false;
+            lastStatusHasPnLLines = false;
+            lastStatusPnlNegative = false;
+        }
+
+        private bool IsMultiEntrySyncEnabled
+        {
+            get { return TreatMultiEntryAsSingleTrade && TradesPerEntry > 1; }
+        }
+
+        private MultiEntrySyncGroup StartMultiEntrySyncGroup(MarketPosition side, int entriesToSubmit, int quantityPerEntry)
+        {
+            if (!IsMultiEntrySyncEnabled || entriesToSubmit <= 1)
+                return null;
+
+            var group = new MultiEntrySyncGroup
+            {
+                TradeId = CreateTradeId(side),
+                TotalQuantity = Math.Max(1, entriesToSubmit) * Math.Max(1, quantityPerEntry),
+                LastPublishedRemaining = 0,
+                OpenPublished = false,
+                ClosedPublished = false
+            };
+
+            multiEntrySyncGroups[group.TradeId] = group;
+            return group;
+        }
+
+        private void AttachTradeStateToSyncGroup(TradeRuntimeState state, MultiEntrySyncGroup group)
+        {
+            if (state == null || group == null)
+                return;
+
+            state.SyncTradeId = group.TradeId;
+        }
+
+        private bool TryGetMultiEntrySyncGroupByTradeId(string tradeId, out MultiEntrySyncGroup group)
+        {
+            group = null;
+            if (string.IsNullOrEmpty(tradeId))
+                return false;
+
+            if (multiEntrySyncGroups.TryGetValue(tradeId, out group))
+                return true;
+
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out var state) &&
+                state != null &&
+                !string.IsNullOrEmpty(state.SyncTradeId))
+            {
+                return multiEntrySyncGroups.TryGetValue(state.SyncTradeId, out group);
+            }
+
+            return false;
+        }
+
+        private int GetMultiEntrySyncTotalQuantity(string syncTradeId, int fallbackQty)
+        {
+            if (string.IsNullOrEmpty(syncTradeId))
+                return Math.Max(1, fallbackQty);
+
+            int total = 0;
+            if (tradeStates != null)
+            {
+                foreach (var state in tradeStates.Values)
+                {
+                    if (state == null || string.IsNullOrEmpty(state.SyncTradeId))
+                        continue;
+                    if (!string.Equals(state.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    total += Math.Max(1, state.OriginalQuantity);
+                }
+            }
+
+            return total > 0 ? total : Math.Max(1, fallbackQty);
+        }
+
+        private int GetMultiEntrySyncRemainingQuantity(string syncTradeId)
+        {
+            if (string.IsNullOrEmpty(syncTradeId))
+                return 0;
+
+            int total = 0;
+            if (tradeStates != null)
+            {
+                foreach (var state in tradeStates.Values)
+                {
+                    if (state == null || string.IsNullOrEmpty(state.SyncTradeId))
+                        continue;
+                    if (!string.Equals(state.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    total += Math.Max(0, state.RemainingQuantity);
+                }
+            }
+
+            return Math.Max(0, total);
+        }
+
+        private List<TradeRuntimeState> GetMultiEntrySyncStates(string syncTradeId)
+        {
+            var states = new List<TradeRuntimeState>();
+            if (string.IsNullOrEmpty(syncTradeId) || tradeStates == null || tradeStates.Count == 0)
+                return states;
+
+            if (openTradeOrder != null && openTradeOrder.Count > 0)
+            {
+                foreach (var tradeId in openTradeOrder)
+                {
+                    if (tradeStates.TryGetValue(tradeId, out var state) &&
+                        state != null &&
+                        string.Equals(state.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        states.Add(state);
+                    }
+                }
+            }
+            else
+            {
+                foreach (var state in tradeStates.Values)
+                {
+                    if (state != null && string.Equals(state.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+                        states.Add(state);
+                }
+            }
+
+            return states;
+        }
+
+        private TradeRuntimeState ResolvePrimarySyncState(string syncTradeId)
+        {
+            if (string.IsNullOrEmpty(syncTradeId) || tradeStates == null || tradeStates.Count == 0)
+                return null;
+
+            if (!string.IsNullOrEmpty(activeTradeId) &&
+                tradeStates.TryGetValue(activeTradeId, out var active) &&
+                active != null &&
+                string.Equals(active.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+            {
+                return active;
+            }
+
+            var states = GetMultiEntrySyncStates(syncTradeId);
+            return states.Count > 0 ? states[states.Count - 1] : null;
+        }
+
+        private void CleanupMultiEntrySyncGroup(string syncTradeId)
+        {
+            if (string.IsNullOrEmpty(syncTradeId))
+                return;
+
+            if (tradeStates != null)
+            {
+                foreach (var state in tradeStates.Values)
+                {
+                    if (state != null &&
+                        string.Equals(state.SyncTradeId, syncTradeId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        return;
+                    }
+                }
+            }
+
+            multiEntrySyncGroups.Remove(syncTradeId);
         }
 
         private bool PublishPendingCloses()
@@ -1867,6 +2444,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (PublishClosedEvent(state.TradeId))
                     {
                         tradeStates.Remove(state.TradeId);
+                        CleanupMultiEntrySyncGroup(state.SyncTradeId);
                     }
                     else
                     {
@@ -1891,6 +2469,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             var state = new TradeRuntimeState
             {
                 TradeId = tradeId,
+                SyncTradeId = null,
                 EntrySide = side,
                 OriginalQuantity = Math.Max(1, quantityHint),
                 RemainingQuantity = Math.Max(1, quantityHint),
@@ -1914,6 +2493,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 SyntheticLogEmitted = false,
                 Bootstrapped = false,
                 AllowOpenPublish = false,
+                EntryOrder = null,
                 StopOrder = null,
                 TargetOrder = null
             };
@@ -1997,10 +2577,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            MarketPosition inferredSide = (action == OrderAction.SellShort || action == OrderAction.Sell)
-                ? MarketPosition.Short
-                : MarketPosition.Long;
-            bool isSyncEntryFill = isEntryAction && missingEntrySignal && syncBehavior;
+             MarketPosition inferredSide = (action == OrderAction.SellShort || action == OrderAction.Sell)
+                 ? MarketPosition.Short
+                 : MarketPosition.Long;
+
+            // When StartBehavior=SynchronizeAccount, entry executions also have an empty FromEntrySignal.
+            // Only treat the fill as a sync-start "bootstrapped" entry if we do NOT already have a
+            // pre-created runtime state for the order name (normal strategy entries call PrepareTradeState first).
+            bool hasPreparedStateForEntry = false;
+            if (isEntryAction && missingEntrySignal && syncBehavior && tradeStates != null)
+            {
+                string orderSignal = execution.Order?.Name;
+                if (!string.IsNullOrEmpty(orderSignal) &&
+                    tradeStates.TryGetValue(orderSignal, out var prepared) &&
+                    prepared != null &&
+                    !prepared.Bootstrapped)
+                {
+                    hasPreparedStateForEntry = true;
+                }
+            }
+
+            bool isSyncEntryFill = isEntryAction && missingEntrySignal && syncBehavior && !hasPreparedStateForEntry;
 
             string tradeId = !string.IsNullOrEmpty(execution.Order.FromEntrySignal)
                 ? execution.Order.FromEntrySignal
@@ -2327,6 +2924,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnsureProtectionForActiveTrade(state, execution != null ? execution.Price : GetRealtimePrice());
                 UpdateStatusLabel($"Managing {state.EntrySide} {state.RemainingQuantity} ({state.TradeId})", true);
             }
+            else if (IsLiveExecutionContext(execution))
+            {
+                EnsureProtectionForActiveTrade(state, execution != null ? execution.Price : GetRealtimePrice());
+            }
         }
 
         private void HandleExitExecution(Execution execution, TradeRuntimeState state)
@@ -2390,8 +2991,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                         state.ManualTargetOverride ? false : (bool?)null);
                 state.RunUpActive = false;
                 state.RunUpLastStopPrice = null;
+                string syncTradeId = state.SyncTradeId;
                 tradeStates.Remove(state.TradeId);
                 openTradeOrder.Remove(state.TradeId);
+                CleanupMultiEntrySyncGroup(syncTradeId);
 
                 if (!string.IsNullOrEmpty(activeTradeId) && string.Equals(activeTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
                     activeTradeId = null;
@@ -2450,6 +3053,35 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State != State.Realtime)
                 return false;
 
+            if (!string.IsNullOrEmpty(state.SyncTradeId) && TryGetMultiEntrySyncGroupByTradeId(state.TradeId, out var group))
+            {
+                if (group.OpenPublished)
+                    return true;
+
+                int totalQty = group.TotalQuantity > 0
+                    ? group.TotalQuantity
+                    : GetMultiEntrySyncTotalQuantity(group.TradeId, state.OriginalQuantity);
+                group.TotalQuantity = totalQty;
+                group.LastPublishedRemaining = totalQty;
+
+                try
+                {
+                    manager.TradeSync.PublishOpen(this, group.TradeId, state.InstrumentName, state.EntrySide, totalQty, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, true);
+                    if (Debug)
+                        StrategyLogDebug(string.Format("[AUTO][SYNC] Published OPEN for {0} qty={1} side={2} price={3:F2} (grouped)", group.TradeId, totalQty, state.EntrySide, state.EntryPrice));
+                    tradeSyncWarned = false;
+                    group.OpenPublished = true;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (!tradeSyncWarned)
+                        StrategyLogError(string.Format("[AUTO][SYNC] Failed to publish open for {0}: {1}", group.TradeId ?? "<unknown>", ex.Message));
+                    WarnTradeSyncOffline();
+                    return false;
+                }
+            }
+
             try
             {
                 manager.TradeSync.PublishOpen(this, state.TradeId, state.InstrumentName, state.EntrySide, state.OriginalQuantity, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice);
@@ -2478,6 +3110,30 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+            {
+                if (group.ClosedPublished)
+                    return;
+
+                int remaining = GetMultiEntrySyncRemainingQuantity(group.TradeId);
+                if (remaining <= 0 || remaining == group.LastPublishedRemaining)
+                    return;
+
+                try
+                {
+                    manager.TradeSync.PublishPartial(this, group.TradeId, remaining);
+                    group.LastPublishedRemaining = remaining;
+                    tradeSyncWarned = false;
+                }
+                catch (Exception ex)
+                {
+                    if (!tradeSyncWarned)
+                        StrategyLogError(string.Format("[AUTO][SYNC] Failed to publish partial for {0}: {1}", group.TradeId ?? "<unknown>", ex.Message));
+                    WarnTradeSyncOffline();
+                }
+                return;
+            }
+
             try
             {
                 manager.TradeSync.PublishPartial(this, tradeId, remainingQuantity);
@@ -2496,6 +3152,35 @@ namespace NinjaTrader.NinjaScript.Strategies
             MultiStratManager manager = MultiStratManager.Instance;
             if (manager == null || manager.TradeSync == null)
                 return false;
+
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+            {
+                int remaining = GetMultiEntrySyncRemainingQuantity(group.TradeId);
+                if (remaining > 0)
+                {
+                    PublishPartialEvent(tradeId, remaining);
+                    return true;
+                }
+
+                if (group.ClosedPublished)
+                    return true;
+
+                try
+                {
+                    manager.TradeSync.PublishClosed(this, group.TradeId);
+                    group.ClosedPublished = true;
+                    group.LastPublishedRemaining = 0;
+                    tradeSyncWarned = false;
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    if (!tradeSyncWarned)
+                        StrategyLogError(string.Format("[AUTO][SYNC] Failed to publish closed for {0}: {1}", group.TradeId ?? "<unknown>", ex.Message));
+                    WarnTradeSyncOffline();
+                    return false;
+                }
+            }
 
             try
             {
@@ -2557,6 +3242,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             string resolvedTradeId = ResolveTradeIdFromOrder(order);
+            if (string.IsNullOrEmpty(order.FromEntrySignal))
+            {
+                string entryKey = order.Name;
+                if (!string.IsNullOrEmpty(entryKey) &&
+                    tradeStates != null &&
+                    tradeStates.TryGetValue(entryKey, out var entryState))
+                {
+                    bool isEntryAction = order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.SellShort;
+                    if (isEntryAction)
+                    {
+                        entryState.EntryOrder = order;
+                        if (IsTerminalState(orderState))
+                            entryState.EntryOrder = null;
+                    }
+                }
+            }
             if (!string.IsNullOrEmpty(resolvedTradeId) && TryGetTradeState(resolvedTradeId, out var state))
             {
                 // Only treat clearly-tagged protective orders as stops/targets.
@@ -2808,6 +3509,51 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private void CancelWorkingEntryOrders(string reason)
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return;
+
+            foreach (var state in tradeStates.Values.ToList())
+            {
+                if (state == null)
+                    continue;
+
+                var order = state.EntryOrder;
+                if (order == null || IsTerminalState(order.OrderState))
+                    continue;
+
+                try
+                {
+                    CancelOrder(order);
+                    StrategyLogInfo($"[SAFETY] Cancelled entry {order.Name ?? state.TradeId ?? "<entry>"} due to {reason}");
+                }
+                catch (Exception ex)
+                {
+                    StrategyLogError($"[SAFETY] Failed to cancel entry {order.Name ?? state.TradeId ?? "<entry>"} due to {reason}: {ex.Message}");
+                }
+            }
+        }
+
+        private bool HasWorkingEntryOrders()
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return false;
+
+            foreach (var state in tradeStates.Values)
+            {
+                if (state == null)
+                    continue;
+                var order = state.EntryOrder;
+                if (order == null)
+                    continue;
+                if (!IsTerminalState(order.OrderState))
+                    return true;
+            }
+
+            return false;
+        }
+
         private void HandleStopUpdateErrors(Order order, double stopPrice, OrderState orderState, ErrorCode error, string nativeError)
         {
             if (order == null)
@@ -2893,7 +3639,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            manager.TradeSync.PublishManualOverride(this, tradeId, stopLocked, targetLocked);
+            string syncTradeId = ResolveSyncTradeId(tradeId);
+            manager.TradeSync.PublishManualOverride(this, syncTradeId, stopLocked, targetLocked);
+        }
+
+        private string ResolveSyncTradeId(string tradeId)
+        {
+            if (string.IsNullOrEmpty(tradeId))
+                return tradeId;
+
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+                return group.TradeId;
+
+            return tradeId;
         }
 
         private void AlignManagedStopWithManual(string tradeId, double price)
@@ -3046,24 +3804,894 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateStatusLabel(string message, bool healthy)
         {
-            string normalized = $"AUTO: {message}";
-            if (string.Equals(normalized, lastStatusText, StringComparison.Ordinal) && healthy == lastStatusHealthy)
-                return;
+            if (State == State.Realtime && dailyPnLLimitHalted && !string.IsNullOrWhiteSpace(dailyPnLLimitStatusText))
+            {
+                message = dailyPnLLimitStatusText;
+                healthy = false;
+            }
+            else if (State == State.Realtime && manualHaltActive)
+            {
+                message = string.IsNullOrWhiteSpace(manualHaltStatusText) ? "HALTED: manual (awaiting resume)" : manualHaltStatusText;
+                healthy = false;
+            }
 
-            lastStatusText = normalized;
+            string line1 = $"AUTO: {message}";
+            string pnlLine;
+            string limitsLine;
+            bool pnlNegative;
+            bool hasPnLLines = TryBuildDailyPnLLimitLines(out pnlLine, out pnlNegative, out limitsLine);
+            string composite = hasPnLLines ? line1 + "\n" + pnlLine + "\n" + limitsLine : line1;
+
+            if (string.Equals(composite, lastStatusText, StringComparison.Ordinal) &&
+                healthy == lastStatusHealthy &&
+                hasPnLLines == lastStatusHasPnLLines &&
+                pnlNegative == lastStatusPnlNegative)
+            {
+                return;
+            }
+
+            lastStatusText = composite;
             lastStatusHealthy = healthy;
+            lastStatusHasPnLLines = hasPnLLines;
+            lastStatusPnlNegative = pnlNegative;
 
             var font = new SimpleFont("Arial", 13) { Bold = true };
             var color = healthy ? Brushes.LimeGreen : Brushes.OrangeRed;
-            var bg = Brushes.Black;
             try
             {
-                Draw.TextFixed(this, "BaseOptAutoStatus", normalized, TextPosition.BottomLeft, color, font, Brushes.Black, bg, 140);
+                string line1Text = hasPnLLines ? line1 + "\n\n" : line1;
+                Draw.TextFixed(this, "BaseOptAutoStatus", line1Text, TextPosition.BottomLeft, color, font, Brushes.Black, Brushes.Transparent, 0);
+
+                if (hasPnLLines)
+                {
+                    var pnlColor = pnlNegative ? Brushes.Red : Brushes.LimeGreen;
+                    var limitsColor = Brushes.LimeGreen;
+                    var transparent = Brushes.Transparent;
+                    Draw.TextFixed(this, "BaseOptAutoPnl", pnlLine + "\n", TextPosition.BottomLeft, pnlColor, font, transparent, transparent, 0);
+                    Draw.TextFixed(this, "BaseOptAutoLimits", limitsLine, TextPosition.BottomLeft, limitsColor, font, transparent, transparent, 0);
+                }
+                else
+                {
+                    RemoveDrawObject("BaseOptAutoPnl");
+                    RemoveDrawObject("BaseOptAutoLimits");
+                }
             }
             catch (Exception ex)
             {
                 if (Debug)
                     StrategyLogDebug(string.Format("[AUTO][STATUS] Failed to draw status label: {0}", ex.Message));
+            }
+        }
+
+        private void TryInitializeChartTraderButtons()
+        {
+            if (chartTraderButtonsAdded || ChartControl == null)
+                return;
+
+            try
+            {
+                ChartControl.Dispatcher.InvokeAsync(() =>
+                {
+                    if (chartTraderButtonsAdded || ChartControl == null)
+                        return;
+
+                    chartWindow = Window.GetWindow(ChartControl) as Chart;
+                    if (chartWindow == null)
+                        return;
+
+                    chartTrader = FindFirstChild<ChartTrader>(chartWindow);
+                    if (chartTrader == null)
+                        return;
+
+                    chartTraderGrid = chartTrader.Content as Grid;
+                    if (chartTraderGrid == null)
+                        chartTraderGrid = FindFirstChild<Grid>(chartTrader);
+                    if (chartTraderGrid == null)
+                        return;
+
+                    chartTraderButtonsRow = new RowDefinition { Height = GridLength.Auto };
+                    chartTraderGrid.RowDefinitions.Add(chartTraderButtonsRow);
+
+                    chartTraderButtonPanel = new StackPanel
+                    {
+                        Orientation = Orientation.Horizontal,
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        Margin = new Thickness(2, 4, 2, 2)
+                    };
+
+                    manualFlattenButton = new Button
+                    {
+                        Content = "Flatten + Halt",
+                        Margin = new Thickness(2),
+                        Padding = new Thickness(6, 2, 6, 2)
+                    };
+                    manualFlattenButton.Click += ManualFlattenButton_Click;
+
+                    manualResumeButton = new Button
+                    {
+                        Content = "Resume",
+                        Margin = new Thickness(2),
+                        Padding = new Thickness(6, 2, 6, 2)
+                    };
+                    manualResumeButton.Click += ManualResumeButton_Click;
+
+                    chartTraderButtonPanel.Children.Add(manualFlattenButton);
+                    chartTraderButtonPanel.Children.Add(manualResumeButton);
+
+                    Grid.SetRow(chartTraderButtonPanel, chartTraderGrid.RowDefinitions.Count - 1);
+                    Grid.SetColumnSpan(chartTraderButtonPanel, Math.Max(1, chartTraderGrid.ColumnDefinitions.Count));
+                    chartTraderGrid.Children.Add(chartTraderButtonPanel);
+
+                    chartTraderButtonsAdded = true;
+                });
+            }
+            catch (Exception ex)
+            {
+                if (Debug)
+                    StrategyLogDebug($"[UI] Failed to init ChartTrader buttons: {ex.Message}");
+            }
+        }
+
+        private void RemoveChartTraderButtons()
+        {
+            if (!chartTraderButtonsAdded || ChartControl == null)
+                return;
+
+            try
+            {
+                ChartControl.Dispatcher.InvokeAsync(() =>
+                {
+                    if (chartTraderButtonPanel != null && chartTraderGrid != null)
+                        chartTraderGrid.Children.Remove(chartTraderButtonPanel);
+
+                    if (chartTraderButtonsRow != null && chartTraderGrid != null)
+                        chartTraderGrid.RowDefinitions.Remove(chartTraderButtonsRow);
+
+                    if (manualFlattenButton != null)
+                        manualFlattenButton.Click -= ManualFlattenButton_Click;
+                    if (manualResumeButton != null)
+                        manualResumeButton.Click -= ManualResumeButton_Click;
+
+                    chartTraderButtonPanel = null;
+                    manualFlattenButton = null;
+                    manualResumeButton = null;
+                    chartTraderButtonsRow = null;
+                    chartTraderGrid = null;
+                    chartTrader = null;
+                    chartWindow = null;
+                    chartTraderButtonsAdded = false;
+                });
+            }
+            catch (Exception ex)
+            {
+                if (Debug)
+                    StrategyLogDebug($"[UI] Failed to remove ChartTrader buttons: {ex.Message}");
+            }
+        }
+
+        private void ManualFlattenButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(o => HandleManualHaltRequest(), null);
+        }
+
+        private void ManualResumeButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(o => HandleManualResumeRequest(), null);
+        }
+
+        private void HandleManualHaltRequest()
+        {
+            if (State != State.Realtime)
+            {
+                StrategyLogInfo("[MANUAL_HALT] Flatten ignored (strategy not realtime).");
+                return;
+            }
+
+            manualHaltActive = true;
+            manualHaltActivatedAt = DateTime.UtcNow;
+            manualHaltStatusText = "HALTED: manual flatten (awaiting resume)";
+
+            try
+            {
+                MultiStratManager.Instance?.ActivateManualHaltOverride(Account != null ? Account.Name : string.Empty, Name);
+            }
+            catch { }
+
+            CancelWorkingEntryOrders("manual_halt");
+            int submitted = SubmitManualHaltExits("MHLT");
+            if (submitted == 0)
+                TryFlattenAccountEverything("manual_halt", activeTradeId ?? string.Empty);
+            StrategyLogInfo($"[MANUAL_HALT] Flatten requested (submittedExits={submitted}).");
+            UpdateStatusLabel(manualHaltStatusText, false);
+        }
+
+        private void HandleManualResumeRequest()
+        {
+            if (State != State.Realtime)
+            {
+                StrategyLogInfo("[MANUAL_HALT] Resume ignored (strategy not realtime).");
+                return;
+            }
+
+            if (!manualHaltActive)
+            {
+                UpdateStatusLabel("Active: already running", true);
+                return;
+            }
+
+            manualHaltActive = false;
+            manualHaltStatusText = null;
+            manualHaltActivatedAt = DateTime.MinValue;
+            try
+            {
+                MultiStratManager.Instance?.ClearManualHaltOverride(Account != null ? Account.Name : string.Empty, "manual_resume");
+            }
+            catch { }
+            StrategyLogInfo("[MANUAL_HALT] Strategy resumed by user.");
+            UpdateStatusLabel("Active: resumed (manual)", true);
+        }
+
+        private int SubmitManualHaltExits(string reasonSuffix)
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return 0;
+
+            int submitted = 0;
+            foreach (var state in tradeStates.Values.ToList())
+            {
+                if (state == null)
+                    continue;
+
+                int qty = Math.Max(0, state.RemainingQuantity);
+                if (qty <= 0)
+                    continue;
+
+                string exitSignal = BuildExitSignalName(state.TradeId, reasonSuffix);
+                if (state.EntrySide == MarketPosition.Long)
+                    ExitLong(qty, exitSignal, state.TradeId);
+                else
+                    ExitShort(qty, exitSignal, state.TradeId);
+                submitted++;
+            }
+
+            return submitted;
+        }
+
+        private static T FindFirstChild<T>(DependencyObject parent) where T : DependencyObject
+        {
+            if (parent == null)
+                return null;
+
+            int count = VisualTreeHelper.GetChildrenCount(parent);
+            for (int i = 0; i < count; i++)
+            {
+                DependencyObject child = VisualTreeHelper.GetChild(parent, i);
+                if (child is T typedChild)
+                    return typedChild;
+
+                T descendant = FindFirstChild<T>(child);
+                if (descendant != null)
+                    return descendant;
+            }
+
+            return null;
+        }
+
+        private bool TryBuildDailyPnLLimitLines(out string pnlLine, out bool pnlNegative, out string limitsLine)
+        {
+            pnlLine = null;
+            limitsLine = null;
+            pnlNegative = false;
+
+            if (Account == null)
+                return false;
+
+            double totalPnL;
+            if (!TryGetAccountTotalPnL(out totalPnL))
+                return false;
+
+            double absPnL = Math.Abs(totalPnL);
+            pnlNegative = totalPnL < -0.005;
+            string pnlValue = pnlNegative ? "-" + absPnL.ToString("C2") : absPnL.ToString("C2");
+            pnlLine = $"TotalPnL: {pnlValue}";
+
+            double lossLimit = DailyLossLimit;
+            if (lossLimit > 0)
+                lossLimit = -Math.Abs(lossLimit);
+
+            double profitLimit = DailyProfitLimit;
+            if (profitLimit < 0)
+                profitLimit = Math.Abs(profitLimit);
+
+            string dllText = Math.Abs(lossLimit) > 1e-9 ? lossLimit.ToString("C2") : "off";
+            string dplText = Math.Abs(profitLimit) > 1e-9 ? profitLimit.ToString("C2") : "off";
+            limitsLine = $"DLL: {dllText} | DPL: {dplText}";
+            return true;
+        }
+
+        private bool TryCheckDailyPnLLimit(out string statusText)
+        {
+            statusText = null;
+
+            if (Account == null)
+                return false;
+
+            double totalPnL;
+            if (!TryGetAccountTotalPnL(out totalPnL))
+                return false;
+
+            double lossLimit = DailyLossLimit;
+            if (lossLimit > 0)
+                lossLimit = -Math.Abs(lossLimit);
+
+            double profitLimit = DailyProfitLimit;
+            if (profitLimit < 0)
+                profitLimit = Math.Abs(profitLimit);
+
+            bool hasLoss = Math.Abs(lossLimit) > 1e-9;
+            bool hasProfit = Math.Abs(profitLimit) > 1e-9;
+            if (!hasLoss && !hasProfit)
+                return false;
+
+            if (hasLoss && totalPnL <= lossLimit + 1e-9)
+            {
+                dailyPnLLimitProfitCandidateAt = DateTime.MinValue;
+                dailyPnLLimitProfitCandidatePnL = 0.0;
+                TriggerDailyPnLLimit("DLL", totalPnL);
+                statusText = BuildDailyPnLLimitStatusText(totalPnL);
+                return true;
+            }
+
+            if (hasProfit && totalPnL >= profitLimit - 1e-9)
+            {
+                if (dailyPnLLimitProfitCandidateAt == DateTime.MinValue)
+                {
+                    dailyPnLLimitProfitCandidateAt = DateTime.UtcNow;
+                    dailyPnLLimitProfitCandidatePnL = totalPnL;
+                    return false;
+                }
+
+                if (totalPnL > dailyPnLLimitProfitCandidatePnL)
+                    dailyPnLLimitProfitCandidatePnL = totalPnL;
+
+                var elapsed = DateTime.UtcNow - dailyPnLLimitProfitCandidateAt;
+                if (elapsed.TotalSeconds < DailyPnLLimitProfitConfirmSeconds)
+                    return false;
+
+                TriggerDailyPnLLimit("DPL", totalPnL);
+                statusText = BuildDailyPnLLimitStatusText(totalPnL);
+                return true;
+            }
+
+            dailyPnLLimitProfitCandidateAt = DateTime.MinValue;
+            dailyPnLLimitProfitCandidatePnL = 0.0;
+            return false;
+        }
+
+        private static bool IsSimulatedAccountName(string accountName)
+        {
+            if (string.IsNullOrWhiteSpace(accountName))
+                return false;
+
+            string trimmed = accountName.Trim();
+            if (trimmed.StartsWith("Sim", StringComparison.OrdinalIgnoreCase))
+                return true;
+            if (trimmed.StartsWith("Playback", StringComparison.OrdinalIgnoreCase))
+                return true;
+            return false;
+        }
+
+        private void MaybeClearDailyPnLLimitForSimReset()
+        {
+            try
+            {
+                if (!dailyPnLLimitHalted || Account == null)
+                    return;
+
+                if (!IsSimulatedAccountName(Account.Name))
+                    return;
+
+                // If the AddOn override is still active, do not clear local halt yet.
+                try
+                {
+                    var manager = MultiStratManager.Instance;
+                    if (manager != null && manager.TryGetDailyLimitOverride(Account.Name, out _, out _, out _))
+                        return;
+                }
+                catch { }
+
+                double totalPnL;
+                if (!TryGetAccountTotalPnL(out totalPnL))
+                    return;
+
+                // Sim reset snaps TotalPnL back to ~0.
+                if (Math.Abs(totalPnL) > 0.01)
+                    return;
+
+                int openPositions;
+                int workingOrders;
+                if (!TryGetAccountRiskCounts(out openPositions, out workingOrders))
+                    return;
+
+                if (openPositions != 0 || workingOrders != 0)
+                    return;
+
+                ResetDailyPnLLimitState("sim_account_reset");
+            }
+            catch { }
+        }
+
+        private void MaybeClearDailyPnLLimitFromManualReset()
+        {
+            try
+            {
+                if (!dailyPnLLimitHalted || Account == null)
+                    return;
+
+                var manager = MultiStratManager.Instance;
+                if (manager == null)
+                    return;
+
+                if (!manager.TryGetManualDailyLimitReset(Account.Name, out var resetAtUtc))
+                    return;
+
+                if (resetAtUtc == DateTime.MinValue)
+                    return;
+
+                if (resetAtUtc <= dailyPnLLimitTriggeredAt || resetAtUtc <= dailyPnLLimitLastManualResetAt)
+                    return;
+
+                dailyPnLLimitLastManualResetAt = resetAtUtc;
+                ResetDailyPnLLimitState("manual_reset");
+            }
+            catch { }
+        }
+
+        private void MaybeClearDailyPnLLimitIfRecovered()
+        {
+            try
+            {
+                if (!dailyPnLLimitHalted || Account == null)
+                    return;
+
+                // For live accounts we keep the latch semantics; sim accounts can auto-clear for continuous testing.
+                if (!IsSimulatedAccountName(Account.Name))
+                    return;
+
+                // Avoid immediately clearing right after a trigger; give enforcement time to run.
+                if (dailyPnLLimitTriggeredAt != DateTime.MinValue &&
+                    (DateTime.UtcNow - dailyPnLLimitTriggeredAt) < TimeSpan.FromSeconds(10))
+                {
+                    return;
+                }
+
+                double totalPnL;
+                if (!TryGetAccountTotalPnL(out totalPnL))
+                    return;
+
+                double lossLimit = DailyLossLimit;
+                if (lossLimit > 0)
+                    lossLimit = -Math.Abs(lossLimit);
+
+                double profitLimit = DailyProfitLimit;
+                if (profitLimit < 0)
+                    profitLimit = Math.Abs(profitLimit);
+
+                bool recovered;
+                string type = (dailyPnLLimitType ?? string.Empty).Trim().ToUpperInvariant();
+                if (type == "DLL")
+                    recovered = totalPnL > lossLimit + 1e-9;
+                else if (type == "DPL")
+                    recovered = totalPnL < profitLimit - 1e-9;
+                else
+                    recovered = totalPnL > lossLimit + 1e-9 && totalPnL < profitLimit - 1e-9;
+
+                if (!recovered)
+                    return;
+
+                int openPositions;
+                int workingOrders;
+                if (!TryGetAccountRiskCounts(out openPositions, out workingOrders))
+                    return;
+
+                // Only clear once the account is truly clean to avoid re-entry during an in-progress flatten.
+                if (openPositions != 0 || workingOrders != 0)
+                    return;
+
+                ResetDailyPnLLimitState("pnl_recovered");
+                try
+                {
+                    MultiStratManager.Instance?.ClearDailyLimitOverrideForAccount(Account.Name, "pnl_recovered");
+                }
+                catch { }
+            }
+            catch { }
+        }
+
+        private void MaybeHydrateDailyPnLLimitFromAddonOverride()
+        {
+            try
+            {
+                if (Account == null)
+                    return;
+
+                var manager = MultiStratManager.Instance;
+                if (manager == null)
+                    return;
+
+                string overrideType;
+                double overridePnL;
+                DateTime overrideActivatedAt;
+                if (!manager.TryGetDailyLimitOverride(Account.Name, out overrideType, out overridePnL, out overrideActivatedAt))
+                    return;
+
+                dailyPnLLimitHalted = true;
+                dailyPnLLimitType = overrideType ?? string.Empty;
+                dailyPnLLimitTriggeredPnL = overridePnL;
+                dailyPnLLimitTriggeredAt = overrideActivatedAt != DateTime.MinValue ? overrideActivatedAt : DateTime.UtcNow;
+
+                double currentPnL;
+                if (!TryGetAccountTotalPnL(out currentPnL))
+                    currentPnL = overridePnL;
+
+                dailyPnLLimitStatusText = BuildDailyPnLLimitStatusText(currentPnL);
+                StrategyLogInfo($"[DAILY_LIMIT] Hydrated halt state from AddOn override (type={dailyPnLLimitType}, triggeredPnL={overridePnL:F2}).");
+            }
+            catch { }
+        }
+
+        private bool TryGetAccountTotalPnL(out double totalPnL)
+        {
+            totalPnL = 0;
+
+            try
+            {
+                var resolved = ResolveCanonicalAccount(Account);
+                if (resolved == null)
+                    return false;
+
+                // Prefer the AddOn-monitored TotalPnL for this account (matches Accounts tab / gRPC stream).
+                try
+                {
+                    var manager = MultiStratManager.Instance;
+                    var monitored = TryGetMonitoredAccount(manager);
+                    if (manager != null && monitored != null &&
+                        string.Equals(monitored.Name, resolved.Name, StringComparison.OrdinalIgnoreCase))
+                    {
+                        double addonDaily = manager.DailyPnL;
+                        if (!double.IsNaN(addonDaily) && !double.IsInfinity(addonDaily))
+                        {
+                            totalPnL = addonDaily;
+                            return true;
+                        }
+
+                        double addonTotal = manager.TotalPnL;
+                        if (!double.IsNaN(addonTotal) && !double.IsInfinity(addonTotal))
+                        {
+                            totalPnL = addonTotal;
+                            return true;
+                        }
+                    }
+                }
+                catch { }
+
+                double realized = resolved.GetAccountItem(AccountItem.RealizedProfitLoss, Currency.UsDollar)?.Value ?? 0.0;
+                double unrealized = resolved.GetAccountItem(AccountItem.UnrealizedProfitLoss, Currency.UsDollar)?.Value ?? 0.0;
+                totalPnL = realized + unrealized;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (Debug)
+                    StrategyLogDebug($"[DAILY_LIMIT] Failed to read Account TotalPnL: {ex.Message}");
+                return false;
+            }
+        }
+
+        private static NinjaTrader.Cbi.Account ResolveCanonicalAccount(NinjaTrader.Cbi.Account account)
+        {
+            if (account == null)
+                return null;
+
+            try
+            {
+                string name = account.Name ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(name))
+                {
+                    lock (NinjaTrader.Cbi.Account.All)
+                    {
+                        foreach (var a in NinjaTrader.Cbi.Account.All)
+                        {
+                            if (a == null)
+                                continue;
+                            if (string.Equals(a.Name, name, StringComparison.OrdinalIgnoreCase))
+                                return a;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            return account;
+        }
+
+        private static NinjaTrader.Cbi.Account TryGetMonitoredAccount(MultiStratManager manager)
+        {
+            if (manager == null)
+                return null;
+
+            try
+            {
+                var field = manager.GetType().GetField("monitoredAccount", BindingFlags.Instance | BindingFlags.NonPublic);
+                return field?.GetValue(manager) as NinjaTrader.Cbi.Account;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private void ResetDailyPnLLimitState(string reason)
+        {
+            bool wasHalted = dailyPnLLimitHalted;
+            dailyPnLLimitHalted = false;
+            dailyPnLLimitStatusText = null;
+            dailyPnLLimitType = string.Empty;
+            dailyPnLLimitTriggeredPnL = 0.0;
+            dailyPnLLimitTriggeredAt = DateTime.MinValue;
+            dailyPnLLimitLastEnforceAttemptAt = DateTime.MinValue;
+            dailyPnLLimitLastEnforceLogAt = DateTime.MinValue;
+            dailyPnLLimitProfitCandidateAt = DateTime.MinValue;
+            dailyPnLLimitProfitCandidatePnL = 0.0;
+
+            if (wasHalted)
+                StrategyLogInfo($"[DAILY_LIMIT] Cleared halt state ({reason}).");
+        }
+
+        private void MaybeResetDailyPnLLimitForNewDay()
+        {
+            if (!dailyPnLLimitHalted)
+                return;
+
+            // Daily PnL in Accounts tab is "today-only"; clear the latch when the UTC day rolls.
+            if (dailyPnLLimitTriggeredAt != DateTime.MinValue &&
+                DateTime.UtcNow.Date != dailyPnLLimitTriggeredAt.Date)
+            {
+                ResetDailyPnLLimitState("new_utc_day");
+            }
+        }
+
+        private string BuildDailyPnLLimitStatusText(double currentPnL)
+        {
+            string type = (dailyPnLLimitType ?? string.Empty).Trim().ToUpperInvariant();
+
+            double lossLimit = DailyLossLimit;
+            if (lossLimit > 0)
+                lossLimit = -Math.Abs(lossLimit);
+
+            double profitLimit = DailyProfitLimit;
+            if (profitLimit < 0)
+                profitLimit = Math.Abs(profitLimit);
+
+            if (type == "DLL")
+                return $"HALTED: DLL reached (triggered {dailyPnLLimitTriggeredPnL:C2} <= {lossLimit:C2}; current {currentPnL:C2})";
+            if (type == "DPL")
+                return $"HALTED: DPL reached (triggered {dailyPnLLimitTriggeredPnL:C2} >= {profitLimit:C2}; current {currentPnL:C2})";
+
+            return $"HALTED: Daily limit reached (triggered {dailyPnLLimitTriggeredPnL:C2}; current {currentPnL:C2})";
+        }
+
+        private void RefreshDailyPnLLimitStatusText()
+        {
+            if (!dailyPnLLimitHalted)
+                return;
+
+            if (TryGetAccountTotalPnL(out var currentPnL))
+                dailyPnLLimitStatusText = BuildDailyPnLLimitStatusText(currentPnL);
+        }
+
+        private void TryEnforceDailyPnLLimitFlat()
+        {
+            if (!dailyPnLLimitHalted || Account == null)
+                return;
+
+            var now = DateTime.UtcNow;
+            if (dailyPnLLimitLastEnforceAttemptAt != DateTime.MinValue &&
+                (now - dailyPnLLimitLastEnforceAttemptAt) < TimeSpan.FromSeconds(2))
+            {
+                return;
+            }
+            dailyPnLLimitLastEnforceAttemptAt = now;
+
+            int openPositions;
+            int workingOrders;
+            if (!TryGetAccountRiskCounts(out openPositions, out workingOrders))
+                return;
+
+            if (openPositions == 0 && workingOrders == 0)
+                return;
+
+            if (dailyPnLLimitLastEnforceLogAt == DateTime.MinValue || (now - dailyPnLLimitLastEnforceLogAt) > TimeSpan.FromSeconds(20))
+            {
+                dailyPnLLimitLastEnforceLogAt = now;
+                StrategyLogInfo($"[DAILY_LIMIT] Enforcing flat (positions={openPositions}, workingOrders={workingOrders})");
+            }
+
+            TryFlattenAccountEverything($"daily_{dailyPnLLimitType}_enforce", activeTradeId ?? string.Empty);
+        }
+
+        private bool TryGetAccountRiskCounts(out int openPositions, out int workingOrders)
+        {
+            openPositions = 0;
+            workingOrders = 0;
+
+            try
+            {
+                if (Account == null)
+                    return false;
+
+                if (Account.Positions != null)
+                {
+                    foreach (var p in Account.Positions)
+                    {
+                        if (p == null || p.Quantity == 0 || p.MarketPosition == MarketPosition.Flat)
+                            continue;
+                        openPositions++;
+                    }
+                }
+
+                if (Account.Orders != null)
+                {
+                    foreach (var o in Account.Orders)
+                    {
+                        if (o == null)
+                            continue;
+                        if (IsOrderWorking(o))
+                            workingOrders++;
+                    }
+                }
+            }
+            catch
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool IsOrderWorking(Order order)
+        {
+            if (order == null)
+                return false;
+
+            switch (order.OrderState)
+            {
+                case OrderState.Accepted:
+                case OrderState.Submitted:
+                case OrderState.Working:
+                case OrderState.PartFilled:
+                case OrderState.ChangePending:
+                case OrderState.ChangeSubmitted:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private void TriggerDailyPnLLimit(string limitType, double totalPnL)
+        {
+            if (dailyPnLLimitHalted)
+                return;
+
+            dailyPnLLimitHalted = true;
+            dailyPnLLimitType = limitType ?? string.Empty;
+            dailyPnLLimitTriggeredPnL = totalPnL;
+            dailyPnLLimitTriggeredAt = DateTime.UtcNow;
+
+            string tradeRef = activeTradeId ?? string.Empty;
+            StrategyLogInfo($"[DAILY_LIMIT] {dailyPnLLimitType} triggered at {totalPnL:F2}; flattening account and halting entries.");
+
+            try
+            {
+                MultiStratManager.Instance?.ActivateDailyLimitOverride(
+                    Account != null ? Account.Name : string.Empty,
+                    dailyPnLLimitType,
+                    totalPnL,
+                    Name);
+            }
+            catch (Exception ex)
+            {
+                if (Debug)
+                    StrategyLogDebug($"[DAILY_LIMIT] Failed to activate daily limit override in AddOn: {ex.Message}");
+            }
+
+            TryFlattenAccountEverything($"daily_{dailyPnLLimitType}", tradeRef);
+        }
+
+        private void TryFlattenAccountEverything(string reason, string tradeRef = "")
+        {
+            if (Account == null)
+                return;
+
+            try
+            {
+                int cancelled = 0;
+                try
+                {
+                    // Cancel any working orders so stops/targets can't re-open a position while halted.
+                    var orders = Account.Orders != null ? new List<Order>(Account.Orders) : new List<Order>();
+                    foreach (var o in orders)
+                    {
+                        if (o == null)
+                            continue;
+                        if (!IsOrderWorking(o))
+                            continue;
+
+                        try
+                        {
+                            Account.Cancel(new[] { o });
+                            cancelled++;
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+
+                // Fallback: submit market orders per open position.
+                var positions = Account.Positions != null
+                    ? new List<NinjaTrader.Cbi.Position>(Account.Positions)
+                    : new List<NinjaTrader.Cbi.Position>();
+
+                int submitted = 0;
+                foreach (var position in positions)
+                {
+                    if (position == null || position.Quantity == 0 || position.MarketPosition == MarketPosition.Flat)
+                        continue;
+
+                    int qty = Math.Abs(position.Quantity);
+                    if (qty <= 0)
+                        continue;
+
+                    OrderAction actionToFlatten = position.MarketPosition == MarketPosition.Long ? OrderAction.Sell : OrderAction.BuyToCover;
+                    string orderName = "PnLLimitFlatten";
+                    try
+                    {
+                        if (!string.IsNullOrWhiteSpace(tradeRef) &&
+                            Instrument != null &&
+                            position.Instrument != null &&
+                            string.Equals(position.Instrument.FullName, Instrument.FullName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            orderName = tradeRef.Trim();
+                        }
+                    }
+                    catch { }
+
+                    var order = Account.CreateOrder(
+                        position.Instrument,
+                        actionToFlatten,
+                        OrderType.Market,
+                        OrderEntry.Manual,
+                        TimeInForce.Day,
+                        qty,
+                        0,
+                        0,
+                        string.Empty,
+                        orderName,
+                        default(DateTime),
+                        null);
+
+                    Account.Submit(new[] { order });
+                    submitted++;
+                }
+
+                StrategyLogInfo($"[DAILY_LIMIT] Flatten requested due to {reason} (cancelledOrders={cancelled}, submittedFlattens={submitted})");
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[DAILY_LIMIT] Failed to flatten account due to {reason}: {ex.Message}");
+                var manager = MultiStratManager.Instance;
+                if (manager != null)
+                    manager.LogError("DAILY_LIMIT", $"Flatten failed: {ex.Message}", 0, tradeRef, tradeRef);
             }
         }
 
@@ -3076,10 +4704,45 @@ namespace NinjaTrader.NinjaScript.Strategies
             UpdateStatusLabel("Active: addon offline (no sync)", true);
         }
 
+        private void ExitMultiEntrySyncTrades(string syncTradeId, int quantityToExit, string exitSuffix)
+        {
+            if (string.IsNullOrEmpty(syncTradeId) || quantityToExit <= 0)
+                return;
+
+            var states = GetMultiEntrySyncStates(syncTradeId);
+            int remaining = quantityToExit;
+
+            foreach (var state in states)
+            {
+                if (state == null || state.RemainingQuantity <= 0)
+                    continue;
+
+                int qty = Math.Min(remaining, Math.Max(0, state.RemainingQuantity));
+                if (qty <= 0)
+                    continue;
+
+                string exitSignal = BuildExitSignalName(state.TradeId, exitSuffix);
+                if (state.EntrySide == MarketPosition.Long)
+                    ExitLong(qty, exitSignal, state.TradeId);
+                else
+                    ExitShort(qty, exitSignal, state.TradeId);
+
+                remaining -= qty;
+                if (remaining <= 0)
+                    break;
+            }
+        }
+
         void ITradeSyncParticipant.HandleTradeSyncPartial(string tradeId, int quantityToExit)
         {
             if (string.IsNullOrWhiteSpace(tradeId) || quantityToExit <= 0)
                 return;
+
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+            {
+                ExitMultiEntrySyncTrades(group.TradeId, quantityToExit, "EXT");
+                return;
+            }
 
             if (tradeStates == null)
                 return;
@@ -3104,6 +4767,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (string.IsNullOrWhiteSpace(tradeId))
                 return;
 
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+            {
+                int totalRemaining = GetMultiEntrySyncRemainingQuantity(group.TradeId);
+                if (totalRemaining <= 0)
+                    return;
+                ExitMultiEntrySyncTrades(group.TradeId, totalRemaining, "CLS");
+                return;
+            }
+
             if (tradeStates == null)
                 return;
 
@@ -3126,7 +4798,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (string.IsNullOrWhiteSpace(tradeId) || config == null || !config.Enabled)
                 return;
-            if (!TryGetTradeState(tradeId, out var state))
+
+            List<TradeRuntimeState> targetStates = null;
+            if (TryGetMultiEntrySyncGroupByTradeId(tradeId, out var group))
+            {
+                targetStates = GetMultiEntrySyncStates(group.TradeId);
+            }
+            else if (TryGetTradeState(tradeId, out var singleState))
+            {
+                targetStates = new List<TradeRuntimeState> { singleState };
+            }
+
+            if (targetStates == null || targetStates.Count == 0)
                 return;
 
             double distance = ConvertRunUpValueToPrice(config.DistanceUnits, config.DistanceValue);
@@ -3137,32 +4820,38 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            state.RunUpActive = true;
-            state.RunUpAnchorPrice = anchorPrice;
-            state.RunUpInitialDistance = distance;
-            state.RunUpIncrement = increment;
-            state.RunUpLastStopPrice = null;
-            state.RunUpHighWater = anchorPrice;
-            state.RunUpLowWater = anchorPrice;
-            state.AllowOpenPublish = state.AllowOpenPublish || State == State.Realtime;
-            state.PendingClosePublish = false;
-            state.StopOrder = null;
-            state.TargetOrder = null;
-
-            if (string.IsNullOrEmpty(activeTradeId))
-                activeTradeId = tradeId;
-
-            bool isLong = Position != null && Position.MarketPosition == MarketPosition.Long;
-            double desiredStop = isLong ? anchorPrice - distance : anchorPrice + distance;
-            double? lastAccepted = state.RunUpLastStopPrice ?? state.LastStopPrice;
-            var clamped = ClampStopPrice(desiredStop, anchorPrice, isLong, lastAccepted);
-            if (clamped.HasValue)
+            foreach (var state in targetStates)
             {
-                if (IssueStopLoss(tradeId, CalculationMode.Price, clamped.Value, false))
+                if (state == null)
+                    continue;
+
+                state.RunUpActive = true;
+                state.RunUpAnchorPrice = anchorPrice;
+                state.RunUpInitialDistance = distance;
+                state.RunUpIncrement = increment;
+                state.RunUpLastStopPrice = null;
+                state.RunUpHighWater = anchorPrice;
+                state.RunUpLowWater = anchorPrice;
+                state.AllowOpenPublish = state.AllowOpenPublish || State == State.Realtime;
+                state.PendingClosePublish = false;
+                state.StopOrder = null;
+                state.TargetOrder = null;
+
+                if (string.IsNullOrEmpty(activeTradeId))
+                    activeTradeId = state.TradeId;
+
+                bool isLong = state.EntrySide == MarketPosition.Long;
+                double desiredStop = isLong ? anchorPrice - distance : anchorPrice + distance;
+                double? lastAccepted = state.RunUpLastStopPrice ?? state.LastStopPrice;
+                var clamped = ClampStopPrice(desiredStop, anchorPrice, isLong, lastAccepted);
+                if (!clamped.HasValue)
+                    continue;
+
+                if (IssueStopLoss(state.TradeId, CalculationMode.Price, clamped.Value, false))
                 {
                     state.RunUpLastStopPrice = clamped.Value;
                     stopSet = true;
-                    StrategyLogInfo(string.Format("[RUN_UP] Activated for {0}: anchor={1:F2}, stop={2:F2}, dist={3:F4}, inc={4:F4}", tradeId, anchorPrice, clamped.Value, distance, increment));
+                    StrategyLogInfo(string.Format("[RUN_UP] Activated for {0}: anchor={1:F2}, stop={2:F2}, dist={3:F4}, inc={4:F4}", state.TradeId, anchorPrice, clamped.Value, distance, increment));
                 }
             }
         }
@@ -3183,6 +4872,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty, Range(1, 10), Display(Name = "MinSignalsToEnterShort", GroupName = "01 - Bias & Voting", Order = 2)]
         public int MinSignalsToEnterShort { get; set; }
+
+        [NinjaScriptProperty, Range(1, 10), Display(Name = "TradesPerEntry", GroupName = "01 - Bias & Voting", Order = 3)]
+        public int TradesPerEntry { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Treat Multi-Entry as 1 Trade?", GroupName = "01 - Bias & Voting", Order = 4)]
+        public bool TreatMultiEntryAsSingleTrade { get; set; }
 
         [NinjaScriptProperty, Display(Name = "UseSMA", GroupName = "02 - Indicator Toggles", Order = 0)]
         public bool UseSMA { get; set; }
@@ -3282,6 +4977,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty, Display(Name = "Debug", GroupName = "07 - Misc", Order = 0)]
         public bool Debug { get; set; }
+
+        [NinjaScriptProperty, TypeConverter(typeof(ConnectedAccountNameConverter)), Display(Name = "Execution Account Override (optional)", GroupName = "07 - Misc", Order = 1)]
+        public string ExecutionAccountOverride { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Log Account Diagnostics", GroupName = "07 - Misc", Order = 2)]
+        public bool LogAccountDiagnostics { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits (DLL/DPL)", GroupName = "08 - Daily Limits", Order = 0)]
+        public bool EnableDailyPnLLimits { get; set; }
+
+        [NinjaScriptProperty, Range(-1000000.0, 0.0), Display(Name = "Daily Loss Limit (DLL)", GroupName = "08 - Daily Limits", Order = 1)]
+        public double DailyLossLimit { get; set; }
+
+        [NinjaScriptProperty, Range(0.0, 1000000.0), Display(Name = "Daily Profit Limit (DPL)", GroupName = "08 - Daily Limits", Order = 2)]
+        public double DailyProfitLimit { get; set; }
 
         #endregion
     }

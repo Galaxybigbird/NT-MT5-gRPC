@@ -1610,6 +1610,16 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 	// Extract BaseID from request
 	baseID := getBaseIDFromRequest(request)
 
+	// Map closure_reason into nt_trade_result so MT5 can deterministically decide whether to run-up or in-sync close.
+	// NOTE: CLOSE_HEDGE trades do not currently carry closure_reason to MT5 (proto Trade lacks that field).
+	closureReason := strings.ToLower(strings.TrimSpace(getClosureReasonFromRequest(request)))
+	ntTradeResult := "closed"
+	if strings.HasPrefix(closureReason, "nt_partial") {
+		ntTradeResult = "partial"
+	} else if strings.Contains(closureReason, "loss") {
+		ntTradeResult = "loss"
+	}
+
 	// If NT provided a specific MT5 ticket, prioritize closing that ticket directly.
 	if provided := getMT5TicketFromRequest(request); provided != 0 {
 		log.Printf("gRPC: NT close request has explicit MT5 ticket %d; enqueueing targeted CLOSE_HEDGE.", provided)
@@ -1629,7 +1639,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			AccountName:     getAccountFromRequest(request),
 			NTBalance:       0.0,
 			NTDailyPnL:      0.0,
-			NTTradeResult:   "closed",
+			NTTradeResult:   ntTradeResult,
 			NTSessionTrades: 0,
 			MT5Ticket:       provided,
 		}
@@ -1704,7 +1714,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			AccountName:     getAccountFromRequest(request),
 			NTBalance:       0.0,
 			NTDailyPnL:      0.0,
-			NTTradeResult:   "closed",
+			NTTradeResult:   ntTradeResult,
 			NTSessionTrades: 0,
 			MT5Ticket:       ticket,
 		}

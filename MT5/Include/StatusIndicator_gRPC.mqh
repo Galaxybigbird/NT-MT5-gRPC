@@ -95,9 +95,7 @@ void ToggleStatusIndicator()
 //+------------------------------------------------------------------+
 void RemoveStatusIndicator()
 {
-    if(ObjectFind(0, StatusLabelName) >= 0)
-    {
-        ObjectDelete(0, StatusLabelName);
-        ChartRedraw();
-    }
+    // ObjectFind can miss hidden objects; delete by name directly.
+    ObjectDelete(0, StatusLabelName);
+    ChartRedraw();
 }

@@ -1258,6 +1258,7 @@ void ProcessTradeFromJson(const string& trade_json)
     // 3) quick action/orderType to allow non-open messages to bypass dedup
     string quickAction = GetJSONStringValue(trade_json, "\"action\"");
     string quickOrderType = GetJSONStringValue(trade_json, "\"order_type\"");
+    bool quickIsAggregateEntry = (quickOrderType == "ENTRY_AGG");
 
     // Ignore init_stream messages
     if(tradeId == "init_stream") {
@@ -1274,7 +1275,7 @@ void ProcessTradeFromJson(const string& trade_json)
     if(!isCloseOrTPSL)
     {
         bool hasBase = (StringLen(baseIdForKey) > 0);
-        bool multiFillIntent = (totalQtyForKey > 1);
+        bool multiFillIntent = (totalQtyForKey > 1 && !quickIsAggregateEntry);
         bool cnProvided = (contractNumForKey >= 0);
 
         if(hasBase)
@@ -1907,8 +1908,10 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
     string comment = commentPrefix + baseId;
     int contractNumMsg = GetJSONIntValue(trade_json, "contract_num", -1);
     int totalQuantityMsg = GetJSONIntValue(trade_json, "total_quantity", -1);
-    // MULTI_HEDGE_FIX_V2: Per-contract messages create 1 hedge, aggregate messages create quantity hedges
-    int totalContracts = (contractNumMsg >= 0 ? 1 : (int)MathRound(quantity));
+    string orderTypeMsg = GetJSONStringValue(trade_json, "\"order_type\"");
+    bool isAggregateEntry = (orderTypeMsg == "ENTRY_AGG");
+    // MULTI_HEDGE_FIX_V2: Per-contract messages create 1 hedge; ENTRY_AGG forces a single hedge.
+    int totalContracts = (contractNumMsg >= 0 || isAggregateEntry ? 1 : (int)MathRound(quantity));
     int successfulTrades = 0;
 
     if(contractNumMsg >= 0)

@@ -1,5 +1,5 @@
 #property link      ""
-#property version   "1.21"
+#property version   "1.23"
 #property strict
 #property description "gRPC Hedge Receiver with self-managed elastic closures"
 
@@ -22,7 +22,7 @@ input double DefaultLot = 1.0;       // Default lot size if not specified
 input int    Slippage = 200;         // Slippage
 input int    MagicNumber = 12345;    // MagicNumber for trades
 
-input bool   SelfElastic_Enabled              = true;    // Enable planner-based closures
+input bool   SelfElastic_Enabled              = false;    // Enable planner-based closures
 input double SimpleStopLoss_Points            = 4000;       // Static SL distance (points) when planner-based closures are disabled (0 = off)
 
 input group "===== Inverse PnL Settings =====";
@@ -38,6 +38,14 @@ input double Tier2_RunUp_PointDist = 250.0;   // Run-up distance override for Ti
 input double Tier2_RunUp_PointStep = 25.0;    // Run-up step override for Tier 2 (points)
 input double Tier3_RunUp_PointDist = 100.0;   // Run-up distance override for Tier 3 (points)
 input double Tier3_RunUp_PointStep = 10.0;    // Run-up step override for Tier 3 (points)
+
+input group "===== Tier 2/3 Fixed Trailing (Points) =====";
+input double Tier2_FixedTrail_ActivationPts    = 0.0; // Tier 2 trailing activation trigger (points in profit, 0 = off)
+input double Tier2_FixedTrail_StepPts          = 0.0; // Tier 2 trailing step (points, 0 = off)
+input double Tier2_FixedTrail_ModificationPts  = 0.0; // Tier 2 trailing stop modification (points, 0 = off)
+input double Tier3_FixedTrail_ActivationPts    = 0.0; // Tier 3 trailing activation trigger (points in profit, 0 = off)
+input double Tier3_FixedTrail_StepPts          = 0.0; // Tier 3 trailing step (points, 0 = off)
+input double Tier3_FixedTrail_ModificationPts  = 0.0; // Tier 3 trailing stop modification (points, 0 = off)
 
 input group "===== Planner Inputs =====";
 input double Planner_EntryLots            = 0.16;   // Starting lot size to analyze
@@ -91,8 +99,6 @@ input group "--- General Settings ---";
 #define SELF_ELASTIC_MODE Self_Elastic_Closures
 
 input group "=====On-Chart Element Positions=====";
-input int TrailingButtonXPos_EA = 120; // X distance for trailing button position
-input int TrailingButtonYPos_EA = 20;  // Y distance for trailing button position
 input int StatusLabelXPos_EA    = 200; // X distance for status label position
 input int StatusLabelYPos_EA    = 50;  // Y distance for status label position
 
@@ -135,6 +141,20 @@ struct HedgeRunUpState
 
 HedgeRunUpState g_runUpStates[];
 
+struct TierFixedTrailState
+{
+    ulong   ticket;
+    int     tier;
+    double  anchorPrice;
+    double  activationTriggerPts;
+    double  stepPts;
+    double  modificationPts;
+    double  lastStopPrice;
+    datetime lastUpdate;
+};
+
+TierFixedTrailState g_tierFixedTrailStates[];
+
 // Error code constant for hedging-related errors
 #define ERR_TRADE_NOT_ALLOWED           4756  // Trading is prohibited
 
@@ -155,6 +175,13 @@ bool StartHedgeRunUpForBaseId(const string &baseId, const string &closureReason,
 bool UpdateRunUpTrailingForTicket(ulong ticket, ENUM_POSITION_TYPE posType, double currentPrice);
 double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr, double pointIncrementPts);
 double ComputeRunUpDemaAtrPrice(int period, double &outDemaAtr);
+int  FindTierFixedTrailStateIndex(ulong ticket);
+bool IsTierFixedTrailingActive(ulong ticket);
+void RemoveTierFixedTrailState(ulong ticket);
+void CleanupTierFixedTrailStates();
+int  ResolveInverseTierForTicket(ulong ticket);
+bool GetTierFixedTrailingSettings(int tier, double &activationPts, double &stepPts, double &modificationPts);
+bool HandleTierFixedTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posType, double entryPrice, double currentPrice);
 
 // Map trade mode integer to readable string (MQL5 requires top-level, cannot nest functions)
 string TradeModeName(const long mode)
@@ -434,6 +461,7 @@ bool g_isMT5Closed[];         // Flag if all MT5 hedges for this group are close
 CHashMap<long, string> *g_map_position_id_to_base_id = NULL; // Map PositionID (long) to original base_id as plain string
 CHashMap<long, int>    *g_simple_sl_tickets = NULL;         // Tickets where a simple SL (non-planner) was applied
 CHashMap<long, double> *g_inverse_sl_locks = NULL;          // Locked SL price per ticket for inverse PnL hedges (prevents tier drift)
+CHashMap<long, int>    *g_inverse_tier_locks = NULL;        // Locked inverse PnL tier at entry per ticket
 
 // New parallel arrays for MT5 position details
 long g_open_mt5_pos_ids[];       // Stores MT5 Position IDs
@@ -488,6 +516,7 @@ ElasticHedgePosition g_elasticPositions[];  // Array of elastic hedge positions
 double SelfElasticPointValuePerLot();
 double GetStopLossDistance();
 double GetAtrDistance();
+double ExtractStopPriceFromDealComment(const string &dealComment);
 const string PLANNER_PROJECTED_LOSS_PLACEHOLDER = "<PLANNER_PROJECTED_LOSS>";
 bool BuildSelfElasticPlan(double entryLots,
                           double stopPoints,
@@ -627,8 +656,16 @@ bool QueryBrokerSpecs()
 //──────────────────────────────────────────────────────────────────────────────
 bool ParseJSONDouble(string json_str, string key, double &value)
 {
+    // GetJSONDouble() returns 0.0 when the key is missing, so use key presence as the indicator.
+    // This avoids false "missing" when the real value is 0 (e.g., sim account reset -> nt_daily_pnl=0).
+    if(StringFind(json_str, "\"" + key + "\"") < 0)
+    {
+        value = 0.0;
+        return false;
+    }
+
     value = GetJSONDouble(json_str, key);
-    return (value != 0.0 || StringFind(json_str, "\"" + key + "\":0") >= 0);
+    return true;
 }
 
 bool ParseJSONString(string json_str, string key, string &value)
@@ -692,6 +729,8 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
     // If run-up is active, do not interfere with its trailing.
     if(inverseMode && IsRunUpActiveForTicket(positionTicket))
         return;
+    if(inverseMode && IsTierFixedTrailingActive(positionTicket))
+        return;
 
     double brokerMinPts = GetBrokerMinimumStopPoints();
     double distPts = 0.0;
@@ -735,14 +774,41 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
 
     double existingSL = PositionGetDouble(POSITION_SL);
 
-    // In inverse-PnL mode, once an SL exists we never adjust it here (run-up may still trail separately).
+    // In inverse-PnL mode, keep the SL locked at the entry-time tier distance unless run-up/manual/fixed trailing is active.
     if(inverseMode && existingSL > 0.0)
     {
+        // If the user explicitly enabled manual trailing, do not fight it.
+        if(ManualTrailingActivated)
+            return;
+
         if(g_inverse_sl_locks != NULL)
         {
             double _tmp = 0.0;
             if(!g_inverse_sl_locks.TryGetValue((long)positionTicket, _tmp))
                 g_inverse_sl_locks.Add((long)positionTicket, existingSL);
+        }
+
+        // If another subsystem tightened/moved the stop, restore it back to the locked simple SL.
+        // Use a small tolerance to avoid thrashing due to broker rounding/normalization.
+        if(slPrice > 0.0 && MathAbs(existingSL - slPrice) > _Point * 5.0)
+        {
+            trade.SetExpertMagicNumber(MagicNumber);
+            trade.SetDeviationInPoints(Slippage);
+            bool modified = trade.PositionModify(positionTicket, slPrice, 0.0);
+            { string __log=""; StringConcatenate(__log,
+                "SIMPLE_SL_RESTORE: ticket=", (long)positionTicket,
+                " from=", DoubleToString(existingSL, _Digits),
+                " to=", DoubleToString(slPrice, _Digits),
+                " ok=", (int)modified,
+                " retcode=", trade.ResultRetcode(),
+                " comment=", trade.ResultComment());
+              Print(__log); ULogInfoPrint(__log); }
+
+            if(modified && g_simple_sl_tickets != NULL)
+            {
+                g_simple_sl_tickets.Remove((long)positionTicket);
+                g_simple_sl_tickets.Add((long)positionTicket, 1);
+            }
         }
         return;
     }
@@ -1343,6 +1409,14 @@ int OnInit()
         }
         { string __log="Inverse SL lock map initialized"; Print(__log); ULogInfoPrint(__log); }
     }
+    if(g_inverse_tier_locks == NULL) {
+        g_inverse_tier_locks = new CHashMap<long, int>();
+        if(CheckPointer(g_inverse_tier_locks) == POINTER_INVALID) {
+            { string __log="FATAL ERROR: Failed to initialize inverse tier lock map!"; Print(__log); ULogErrorPrint(__log); }
+            return(INIT_FAILED);
+        }
+        { string __log="Inverse tier lock map initialized"; Print(__log); ULogInfoPrint(__log); }
+    }
 
     // Initialize arrays
     ArrayResize(g_ntInstrumentSymbols, 0);
@@ -1492,6 +1566,7 @@ void ProcessTradeFromJson(const string& trade_json)
     // 3) quick action/orderType to allow non-open messages to bypass dedup
     string quickAction = GetJSONStringValue(trade_json, "\"action\"");
     string quickOrderType = GetJSONStringValue(trade_json, "\"order_type\"");
+    bool quickIsAggregateEntry = (quickOrderType == "ENTRY_AGG");
 
     // Ignore init_stream messages
     if(tradeId == "init_stream") {
@@ -1508,7 +1583,7 @@ void ProcessTradeFromJson(const string& trade_json)
     if(!isCloseOrTPSL)
     {
         bool hasBase = (StringLen(baseIdForKey) > 0);
-        bool multiFillIntent = (totalQtyForKey > 1);
+        bool multiFillIntent = (totalQtyForKey > 1 && !quickIsAggregateEntry);
         bool cnProvided = (contractNumForKey >= 0);
 
         if(hasBase)
@@ -1606,13 +1681,18 @@ void ProcessTradeFromJson(const string& trade_json)
     bool __hasBal=false, __hasPnL=false, __hasRes=false, __hasTrades=false;
     // Peek at action to decide if zero PnL in EVENT should be ignored (proto defaults)
     string __incomingAction = GetJSONStringValue(trade_json, "\"action\"");
+    string __incomingEventType = GetJSONStringValue(trade_json, "\"event_type\"");
     ParseNTPerformanceData(trade_json, nt_balance, nt_daily_pnl, nt_trade_result, nt_session_trades, __hasBal, __hasPnL, __hasRes, __hasTrades);
     // Heuristic: For any non-entry action (not Buy/Sell), treat nt_daily_pnl=0.0 as "not present"
     // to avoid resetting tier due to proto-default zeros emitted via proto -> C++ JSON bridge.
     string __actLower = __incomingAction; StringToLower(__actLower);
+    string __evtLower = __incomingEventType; StringToLower(__evtLower);
     if(__actLower != "buy" && __actLower != "sell" && nt_daily_pnl == 0.0) {
-        __hasPnL = false;
-        { string __log="NT_PARSE_GUARD: Ignoring zero nt_daily_pnl on non-entry action to preserve tier state"; Print(__log); ULogInfoPrint(__log); }
+        // Allow explicit PnL update events to reset to 0 (e.g., after NT sim account reset).
+        if(__evtLower != "nt_pnl_update") {
+            __hasPnL = false;
+            { string __log="NT_PARSE_GUARD: Ignoring zero nt_daily_pnl on non-entry action to preserve tier state"; Print(__log); ULogInfoPrint(__log); }
+        }
     }
     // Additional guard: entry messages sometimes send nt_daily_pnl=0.0 even when session is in drawdown.
     // If we already have a non-zero cached PnL, keep it instead of overwriting with zero.
@@ -1738,7 +1818,8 @@ void ProcessTradeFromJson(const string& trade_json)
         {
             string resLower = nt_trade_result;
             StringToLower(resLower);
-            if(resLower != "" && (StringFind(resLower, "loss") >= 0 || StringFind(resLower, "lose") >= 0 || StringFind(resLower, "sl") >= 0 || StringFind(resLower, "stop") >= 0))
+            // IMPORTANT: Do not treat "closed" as a loss (it contains the substring "lose").
+            if(resLower != "" && (StringFind(resLower, "loss") >= 0 || StringFind(resLower, "sl") >= 0 || StringFind(resLower, "stop") >= 0))
                 isLossClose = true;
         }
         if(isLossClose)
@@ -2183,8 +2264,10 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
     string comment = commentPrefix + baseId;
     int contractNumMsg = GetJSONIntValue(trade_json, "contract_num", -1);
     int totalQuantityMsg = GetJSONIntValue(trade_json, "total_quantity", -1);
-    // MULTI_HEDGE_FIX_V2: Per-contract messages create 1 hedge, aggregate messages create quantity hedges
-    int totalContracts = (contractNumMsg >= 0 ? 1 : (int)MathRound(quantity));
+    string orderTypeMsg = GetJSONStringValue(trade_json, "\"order_type\"");
+    bool isAggregateEntry = (orderTypeMsg == "ENTRY_AGG");
+    // MULTI_HEDGE_FIX_V2: Per-contract messages create 1 hedge; ENTRY_AGG forces a single hedge.
+    int totalContracts = (contractNumMsg >= 0 || isAggregateEntry ? 1 : (int)MathRound(quantity));
     int successfulTrades = 0;
 
     if(contractNumMsg >= 0)
@@ -2335,6 +2418,15 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
             // Add to position tracking
             if(g_map_position_id_to_base_id != NULL && positionTicket > 0) {
                 g_map_position_id_to_base_id.Add((long)positionTicket, baseId);
+            }
+            if(LotSizingMode == LOTS_INVERSE_PNL && g_inverse_tier_locks != NULL && positionTicket > 0) {
+                int tier = g_inversePnlTier;
+                if(tier <= 0)
+                    tier = ResolveInversePnlTier();
+                int existing = 0;
+                if(g_inverse_tier_locks.TryGetValue((long)positionTicket, existing))
+                    g_inverse_tier_locks.Remove((long)positionTicket);
+                g_inverse_tier_locks.Add((long)positionTicket, tier);
             }
 
             // Submit success result for each trade
@@ -2756,7 +2848,6 @@ void OnDeinit(const int reason)
     }
 
     // Step 5: Clean up UI elements (always safe)
-    ObjectDelete(0, ButtonName);
     RemoveStatusIndicator();
     RemoveStatusOverlay();
     RemoveAllElasticPositions();
@@ -2872,6 +2963,7 @@ void OnTick()
                     else
                     {
                         HandleATRTrailingForPosition(ticket, entryPrice, currentPrice, positionType == POSITION_TYPE_BUY ? "BUY" : "SELL", volume);
+                        HandleTierFixedTrailingForPosition(ticket, positionType, entryPrice, currentPrice);
 
                         // Self elastic scaling and negative trailing
                         ServiceSelfElasticPosition(ticket,
@@ -2890,6 +2982,7 @@ void OnTick()
     }
 
     CleanupRunUpStates();
+    CleanupTierFixedTrailStates();
 
     CleanupStaleNegativeTrails();
 
@@ -3058,38 +3151,65 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
 
     { string __log; StringConcatenate(__log, "CLOSURE_DETECTION: Extracted BaseID: ", baseId, " from closed position"); Print(__log); ULogInfoPrint(__log); }
 
-    // Clean up any run-up state now that the position is closed
-    RemoveRunUpState((ulong)position_ticket);
-    // Clean up locked inverse SL tracking for this ticket
-    if(g_inverse_sl_locks != NULL)
-        g_inverse_sl_locks.Remove((long)position_ticket);
-
-    // Determine closure reason based on context
-    string closure_reason = "MT5_position_closed";
-
-    // Override with simple SL marker if we previously set a non-planner SL on this ticket
+    // Determine closure reason based on context.
+    // IMPORTANT: Only emit "mt5_simple_sl" when the close truly matches the originally-set simple SL.
+    // Otherwise (e.g., ATR trailing moved the SL), report as MT5_stop_loss so NT run-up does not trigger spuriously.
+    bool hadSimpleSLFlag = false;
     if(g_simple_sl_tickets != NULL)
     {
         int _dummy = 0;
-        if(g_simple_sl_tickets.TryGetValue((long)position_ticket, _dummy))
-        {
-            closure_reason = "mt5_simple_sl";
-            g_simple_sl_tickets.Remove((long)position_ticket);
-        }
+        hadSimpleSLFlag = g_simple_sl_tickets.TryGetValue((long)position_ticket, _dummy);
     }
 
-    // Check if it was a stop loss
-    if(StringFind(deal_comment, "[sl]") >= 0 || StringFind(deal_comment, "stop loss") >= 0) {
-        if(!SelfElastic_Enabled && SimpleStopLoss_Points > 0.0)
-            closure_reason = "mt5_simple_sl";
-        else
-            closure_reason = "MT5_stop_loss";
+    double lockedSimpleSL = 0.0;
+    bool hasLockedSimpleSL = false;
+    if(g_inverse_sl_locks != NULL)
+        hasLockedSimpleSL = g_inverse_sl_locks.TryGetValue((long)position_ticket, lockedSimpleSL);
+
+    string closure_reason = "MT5_position_closed";
+    string commentLower = deal_comment;
+    StringToLower(commentLower);
+
+    bool isStopLoss = (StringFind(commentLower, "[sl") >= 0 || StringFind(commentLower, "stop loss") >= 0);
+    bool isTakeProfit = (StringFind(commentLower, "[tp") >= 0 || StringFind(commentLower, "take profit") >= 0);
+
+    if(isStopLoss)
+    {
+        double stopPrice = ExtractStopPriceFromDealComment(deal_comment);
+        bool isSimpleStop = false;
+        if(hadSimpleSLFlag && hasLockedSimpleSL && stopPrice > 0.0 && lockedSimpleSL > 0.0)
+        {
+            double tol = _Point * 5.0;
+            if(MathAbs(stopPrice - lockedSimpleSL) <= tol)
+                isSimpleStop = true;
+        }
+
+        closure_reason = isSimpleStop ? "mt5_simple_sl" : "MT5_stop_loss";
+
+        { string __log=""; StringConcatenate(__log,
+              "CLOSURE_REASON_DEBUG: ticket=", (long)position_ticket,
+              " stopPx=", DoubleToString(stopPrice, _Digits),
+              " lockedSimpleSL=", DoubleToString(lockedSimpleSL, _Digits),
+              " hadSimpleFlag=", (int)hadSimpleSLFlag,
+              " -> reason=", closure_reason);
+          Print(__log); ULogInfoPrint(__log); }
     }
-    // Check if it was a take profit
-    else if(StringFind(deal_comment, "[tp]") >= 0 || StringFind(deal_comment, "take profit") >= 0) {
+    else if(isTakeProfit)
+    {
         closure_reason = "MT5_take_profit";
     }
-    // All other closures are just MT5 closures - no need to distinguish manual vs automatic
+
+    // Clean up any run-up state now that the position is closed
+    RemoveRunUpState((ulong)position_ticket);
+    RemoveTierFixedTrailState((ulong)position_ticket);
+    // Clean up locked inverse SL tracking for this ticket
+    if(g_inverse_sl_locks != NULL)
+        g_inverse_sl_locks.Remove((long)position_ticket);
+    if(g_inverse_tier_locks != NULL)
+        g_inverse_tier_locks.Remove((long)position_ticket);
+    // Clean up simple SL tracking for this ticket
+    if(g_simple_sl_tickets != NULL)
+        g_simple_sl_tickets.Remove((long)position_ticket);
 
     // Send closure notification to Bridge Server
     // Dedup: if a specific hedge_close was already sent or is pending for this baseId/ticket, skip generic notification
@@ -3154,32 +3274,55 @@ void NotifyMT5PositionClosure(string baseId, ulong mt5Ticket, double volume, str
     RemoveOpenPositionTracking(mt5Ticket);
 }
 
-//+------------------------------------------------------------------+
-//| ChartEvent function - Handle button clicks                      |
-//+------------------------------------------------------------------+
-void OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam)
+double ExtractStopPriceFromDealComment(const string &dealComment)
 {
-    // Check if this is a button click event
-    if(id == CHARTEVENT_OBJECT_CLICK)
+    if(dealComment == "")
+        return 0.0;
+
+    string lower = dealComment;
+    StringToLower(lower);
+
+    int slPos = StringFind(lower, "[sl");
+    if(slPos < 0)
+        return 0.0;
+
+    int endPos = StringFind(lower, "]", slPos);
+    if(endPos < 0)
+        endPos = StringLen(lower);
+
+    int i = slPos + 3; // after "[sl"
+    while(i < endPos)
     {
-        // Check if our trailing button was clicked
-        if(sparam == ButtonName)
+        ushort c = (ushort)StringGetCharacter(lower, i);
+        if(c == ' ' || c == '\t' || c == ':')
         {
-            // Toggle manual trailing activation
-            ManualTrailingActivated = !ManualTrailingActivated;
-
-            // Update button color and text based on state
-            ObjectSetInteger(0, ButtonName, OBJPROP_COLOR,
-                            ManualTrailingActivated ? ButtonColorActive : ButtonColorInactive);
-            ObjectSetString(0, ButtonName, OBJPROP_TEXT,
-                           ManualTrailingActivated ? "Trailing Active" : "Start Trailing?");
-
-            // Print status message
-            Print(ManualTrailingActivated ? "Manual trailing activation enabled" : "Manual trailing activation disabled");
-
-            ChartRedraw();
+            i++;
+            continue;
         }
+        break;
     }
+
+    if(i >= endPos)
+        return 0.0;
+
+    string num = "";
+    for(int j = i; j < endPos; j++)
+    {
+        ushort c = (ushort)StringGetCharacter(lower, j);
+        if((c >= '0' && c <= '9') || c == '.' || c == '-')
+        {
+            num += StringSubstr(lower, j, 1);
+            continue;
+        }
+        // Stop at first non-numeric after we have started capturing
+        if(num != "")
+            break;
+    }
+
+    if(num == "")
+        return 0.0;
+
+    return StringToDouble(num);
 }
 
 //+------------------------------------------------------------------+
@@ -6694,6 +6837,272 @@ bool UpdateRunUpTrailingForTicket(ulong ticket, ENUM_POSITION_TYPE posType, doub
     return false;
 }
 
+//+------------------------------------------------------------------+
+//| Tier 2/3 Fixed Trailing helpers                                  |
+//+------------------------------------------------------------------+
+int FindTierFixedTrailStateIndex(ulong ticket)
+{
+    int total = ArraySize(g_tierFixedTrailStates);
+    for(int i = 0; i < total; i++)
+    {
+        if(g_tierFixedTrailStates[i].ticket == ticket)
+            return i;
+    }
+    return -1;
+}
+
+bool IsTierFixedTrailingActive(ulong ticket)
+{
+    return FindTierFixedTrailStateIndex(ticket) >= 0;
+}
+
+void RemoveTierFixedTrailState(ulong ticket)
+{
+    int idx = FindTierFixedTrailStateIndex(ticket);
+    if(idx < 0)
+        return;
+
+    int last = ArraySize(g_tierFixedTrailStates) - 1;
+    if(idx != last)
+        g_tierFixedTrailStates[idx] = g_tierFixedTrailStates[last];
+    ArrayResize(g_tierFixedTrailStates, last);
+}
+
+void CleanupTierFixedTrailStates()
+{
+    for(int i = ArraySize(g_tierFixedTrailStates) - 1; i >= 0; i--)
+    {
+        ulong ticket = g_tierFixedTrailStates[i].ticket;
+        if(ticket == 0 || !PositionSelectByTicket(ticket))
+        {
+            if(g_inverse_tier_locks != NULL)
+                g_inverse_tier_locks.Remove((long)ticket);
+            RemoveTierFixedTrailState(ticket);
+        }
+    }
+}
+
+int ResolveInverseTierForTicket(ulong ticket)
+{
+    if(LotSizingMode != LOTS_INVERSE_PNL)
+        return 1;
+
+    if(g_inverse_tier_locks != NULL)
+    {
+        int storedTier = 0;
+        if(g_inverse_tier_locks.TryGetValue((long)ticket, storedTier) && storedTier > 0)
+            return storedTier;
+    }
+
+    int tier = ResolveInversePnlTier();
+    if(g_inverse_tier_locks != NULL && tier > 0)
+        g_inverse_tier_locks.Add((long)ticket, tier);
+    return tier;
+}
+
+bool GetTierFixedTrailingSettings(int tier, double &activationPts, double &stepPts, double &modificationPts)
+{
+    activationPts = 0.0;
+    stepPts = 0.0;
+    modificationPts = 0.0;
+
+    if(tier == 2)
+    {
+        activationPts = Tier2_FixedTrail_ActivationPts;
+        stepPts = Tier2_FixedTrail_StepPts;
+        modificationPts = Tier2_FixedTrail_ModificationPts;
+    }
+    else if(tier == 3)
+    {
+        activationPts = Tier3_FixedTrail_ActivationPts;
+        stepPts = Tier3_FixedTrail_StepPts;
+        modificationPts = Tier3_FixedTrail_ModificationPts;
+    }
+    else
+    {
+        return false;
+    }
+
+    if(activationPts <= 0.0 || stepPts <= 0.0 || modificationPts <= 0.0)
+        return false;
+
+    return true;
+}
+
+bool HandleTierFixedTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posType, double entryPrice, double currentPrice)
+{
+    if(LotSizingMode != LOTS_INVERSE_PNL)
+        return false;
+    if(ticket == 0 || entryPrice <= 0.0 || currentPrice <= 0.0)
+        return false;
+    if(ManualTrailingActivated)
+        return false;
+
+    int tier = ResolveInverseTierForTicket(ticket);
+    double activationPts = 0.0;
+    double stepPts = 0.0;
+    double modificationPts = 0.0;
+    if(!GetTierFixedTrailingSettings(tier, activationPts, stepPts, modificationPts))
+        return false;
+
+    bool isLong = (posType == POSITION_TYPE_BUY);
+    double profitPts = isLong ? (currentPrice - entryPrice) / _Point
+                              : (entryPrice - currentPrice) / _Point;
+    if(profitPts < activationPts)
+        return false;
+
+    double minStopDist = MathMax(GetBrokerMinimumStopPoints(), 1.0) * _Point;
+    int idx = FindTierFixedTrailStateIndex(ticket);
+    if(idx < 0)
+    {
+        TierFixedTrailState state;
+        state.ticket = ticket;
+        state.tier = tier;
+        state.anchorPrice = currentPrice;
+        state.activationTriggerPts = activationPts;
+        state.stepPts = stepPts;
+        state.modificationPts = modificationPts;
+        double currentSL = PositionGetDouble(POSITION_SL);
+        state.lastStopPrice = currentSL;
+        state.lastUpdate = TimeCurrent();
+
+        double initialStop = isLong
+            ? currentPrice - modificationPts * _Point
+            : currentPrice + modificationPts * _Point;
+
+        if(isLong)
+            initialStop = MathMin(initialStop, currentPrice - minStopDist);
+        else
+            initialStop = MathMax(initialStop, currentPrice + minStopDist);
+
+        bool shouldModify = (currentSL <= 0.0) ||
+                            (isLong && initialStop > currentSL + (_Point * 0.1)) ||
+                            (!isLong && initialStop < currentSL - (_Point * 0.1));
+
+        bool modified = false;
+        if(shouldModify)
+        {
+            trade.SetExpertMagicNumber(MagicNumber);
+            trade.SetDeviationInPoints(Slippage);
+            modified = trade.PositionModify(ticket, initialStop, PositionGetDouble(POSITION_TP));
+            if(modified)
+            {
+                state.lastStopPrice = initialStop;
+                state.lastUpdate = TimeCurrent();
+                { string __log=""; StringConcatenate(__log,
+                    "FIXTRAIL_START: ticket=", (long)ticket,
+                    " tier=", tier,
+                    " anchor=", DoubleToString(state.anchorPrice, _Digits),
+                    " stop=", DoubleToString(initialStop, _Digits),
+                    " actPts=", DoubleToString(activationPts, 1),
+                    " stepPts=", DoubleToString(stepPts, 1),
+                    " modPts=", DoubleToString(modificationPts, 1));
+                  Print(__log); ULogInfoPrint(__log); }
+            }
+            else
+            {
+                { string __log=""; StringConcatenate(__log,
+                    "FIXTRAIL_WARN: Failed to set initial stop for ticket ", (long)ticket,
+                    " desiredStop=", DoubleToString(initialStop, _Digits),
+                    " retcode=", trade.ResultRetcode(),
+                    " comment=", trade.ResultComment());
+                  Print(__log); ULogWarnPrint(__log); }
+            }
+        }
+
+        if(currentSL > 0.0 || modified)
+        {
+            int newSize = ArraySize(g_tierFixedTrailStates) + 1;
+            ArrayResize(g_tierFixedTrailStates, newSize);
+            g_tierFixedTrailStates[newSize - 1] = state;
+        }
+        return modified;
+    }
+
+    g_tierFixedTrailStates[idx].activationTriggerPts = activationPts;
+    g_tierFixedTrailStates[idx].stepPts = stepPts;
+    g_tierFixedTrailStates[idx].modificationPts = modificationPts;
+
+    double anchor = g_tierFixedTrailStates[idx].anchorPrice;
+    if(anchor <= 0.0)
+    {
+        anchor = currentPrice;
+        g_tierFixedTrailStates[idx].anchorPrice = anchor;
+    }
+
+    double progress = isLong ? (currentPrice - anchor) : (anchor - currentPrice);
+    if(progress < 0.0)
+        progress = 0.0;
+
+    double stepSizePrice = stepPts * _Point;
+    double steps = (stepSizePrice > 0.0) ? MathFloor(progress / stepSizePrice) : 0.0;
+    double desiredStop = isLong
+        ? anchor - modificationPts * _Point + steps * stepPts * _Point
+        : anchor + modificationPts * _Point - steps * stepPts * _Point;
+
+    if(isLong)
+        desiredStop = MathMin(desiredStop, currentPrice - minStopDist);
+    else
+        desiredStop = MathMax(desiredStop, currentPrice + minStopDist);
+
+    double currentSL = PositionGetDouble(POSITION_SL);
+    double lastStop = g_tierFixedTrailStates[idx].lastStopPrice;
+    if(currentSL > 0.0)
+    {
+        if(isLong)
+        {
+            if(lastStop <= 0.0 || currentSL > lastStop)
+                lastStop = currentSL;
+        }
+        else
+        {
+            if(lastStop <= 0.0 || currentSL < lastStop)
+                lastStop = currentSL;
+        }
+    }
+    if(lastStop > 0.0)
+        g_tierFixedTrailStates[idx].lastStopPrice = lastStop;
+
+    if(desiredStop <= 0.0)
+        return false;
+
+    if(lastStop > 0.0)
+    {
+        if(isLong && desiredStop <= lastStop + (_Point * 0.1))
+            return false;
+        if(!isLong && desiredStop >= lastStop - (_Point * 0.1))
+            return false;
+    }
+
+    trade.SetExpertMagicNumber(MagicNumber);
+    trade.SetDeviationInPoints(Slippage);
+    bool modified = trade.PositionModify(ticket, desiredStop, PositionGetDouble(POSITION_TP));
+    if(modified)
+    {
+        g_tierFixedTrailStates[idx].lastStopPrice = desiredStop;
+        g_tierFixedTrailStates[idx].lastUpdate = TimeCurrent();
+        { string __log=""; StringConcatenate(__log,
+            "FIXTRAIL_UPDATE: ticket=", (long)ticket,
+            " tier=", g_tierFixedTrailStates[idx].tier,
+            " anchor=", DoubleToString(anchor, _Digits),
+            " steps=", DoubleToString(steps, 1),
+            " desiredStop=", DoubleToString(desiredStop, _Digits));
+          Print(__log); ULogInfoPrint(__log); }
+        return true;
+    }
+    else
+    {
+        { string __log=""; StringConcatenate(__log,
+            "FIXTRAIL_WARN: PositionModify failed for ticket ", (long)ticket,
+            " desiredStop=", DoubleToString(desiredStop, _Digits),
+            " retcode=", trade.ResultRetcode(),
+            " comment=", trade.ResultComment());
+          Print(__log); ULogWarnPrint(__log); }
+    }
+
+    return false;
+}
+
 bool AtrUpdateIntervalElapsed(int idx, double minIntervalSeconds)
 {
     if(idx < 0)
@@ -6725,6 +7134,11 @@ void HandleATRTrailingForPosition(ulong ticket, double entryPrice, double curren
         return;
 
     if(!UseATRTrailing && !ManualTrailingActivated)
+        return;
+
+    // In "simple SL" mode (planner disabled), the intent is a static stop distance.
+    // Do not let DEMA-ATR trailing tighten the hedge unless the user explicitly enables manual trailing.
+    if(!SelfElastic_Enabled && !ManualTrailingActivated)
         return;
 
     int idx = FindAtrTrailingStateIndex(ticket);
@@ -6765,4 +7179,3 @@ bool __IsIndexCFD(string sym)
     if(StringFind(up, "UK100") >= 0 || StringFind(up, "FTSE")  >= 0) return true;
     return false;
 }
-

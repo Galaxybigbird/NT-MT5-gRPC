@@ -86,8 +86,8 @@ void CreateOrUpdateLabel(string name, string text, int yOffset, color textColor 
 void DeleteOverlayLabel(string name)
 {
     string fullName = g_overlayPrefix + name;
-    if(ObjectFind(0, fullName) >= 0)
-        ObjectDelete(0, fullName);
+    // ObjectFind can miss hidden objects; delete by name directly.
+    ObjectDelete(0, fullName);
 }
 
 void OverlayClearPlannerStatistics()
