@@ -155,7 +155,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool lastBbVisualToggleState;
         private bool lastVwapVisualToggleState;
         private bool lastVwapGateToggleState;
-        private bool lastReverseSignalToggleState;
         private bool lastSmaVisualActive;
         private bool lastEmaVisualActive;
         private bool lastRsiVisualActive;
@@ -198,11 +197,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private MarketPosition scaleInSide = MarketPosition.Flat;
         private const int ScaleInHoldSeconds = 10;
         private DateTime scaleInHoldUntil = DateTime.MinValue;
-        private bool globalTrailActivated;
-        private double globalTrailActivationPrice;
-        private double globalTrailLockPrice;
-        private double globalTrailLastStopPrice;
-        private MarketPosition globalTrailSide = MarketPosition.Flat;
 
         private const string OrbHighTag = "orb_high";
         private const string OrbLowTag = "orb_low";
@@ -304,7 +298,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Button vwapGateToggleButton;
         private Button addOnTradeButton;
         private Button pnlTagsToggleButton;
-        private Button reverseSignalToggleButton;
         private Button visualsToggleButton;
         private Button smaVisualToggleButton;
         private Button emaVisualToggleButton;
@@ -435,9 +428,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool EntryVrocReady;
             public bool EntryVrocOk;
             public double EntryVrocPct;
-            public bool EntryRegimeSwitchingEnabled;
-            public bool EntryRegimeIsChop;
-            public bool EntryReverseSignalTrading;
             public DateTime EntrySignalTime;
             public string EntryContext;
             public double MaxFavorablePrice;
@@ -491,9 +481,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             public int ShortVotes;
             public int MinLong;
             public int MinShort;
-            public bool RegimeSwitchingEnabled;
-            public bool RegimeIsChop;
-            public bool ReverseSignalTrading;
             public bool OrbLong;
             public bool OrbShort;
             public bool ChopLong;
@@ -608,11 +595,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             Unknown
         }
 
-        public override string DisplayName
-        {
-            get { return Name; }
-        }
-
 
         #region Defaults
         protected override void OnStateChange()
@@ -668,10 +650,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EntryCooldownBars = 0;
                 ReverseSignalTrading = false;
                 EnableVoteEntrySignals = true;
-                EnableRegimeSwitching = true;
-                EnableCandleConviction = true;
-                RsiChopLongThreshold = 30;
-                RsiChopShortThreshold = 70;
                 EnableOrbFilter = true;
                 OrbMinutes = 15;
                 OrbUseFixedStartTime = true;
@@ -738,11 +716,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ScaleInTradesToAdd = 1;
                 ScaleInMaxTrades = 5;
                 ScaleInTrailActivationMode = BreakEvenTriggerModeOption.Dollars;
-                ScaleInTrailActivationValue = 500;
+                ScaleInTrailActivationTicks = 0;
+                ScaleInTrailActivationDollars = 500;
                 ScaleInProfitLockMode = BreakEvenTriggerModeOption.Dollars;
-                ScaleInProfitLockValue = 300;
+                ScaleInProfitLockTicks = 0;
+                ScaleInProfitLockDollars = 300;
                 ScaleInTrailIncrementMode = BreakEvenTriggerModeOption.Ticks;
-                ScaleInTrailIncrementValue = 1;
+                ScaleInTrailTicks = 1;
+                ScaleInTrailIncrementDollars = 0;
 
                 // Indicator params
                 SmaPeriod = 50;
@@ -765,13 +746,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 AtrTargetMult = 3.0;
                 TargetTicks = 60;
                 ManualEntryOffsetTicks = 100;
-                EnableGlobalTrailing = false;
-                GlobalTrailActivationMode = BreakEvenTriggerModeOption.Dollars;
-                GlobalTrailActivationValue = 150;
-                GlobalProfitLockMode = BreakEvenTriggerModeOption.Dollars;
-                GlobalProfitLockValue = 35;
-                GlobalTrailIncrementMode = BreakEvenTriggerModeOption.Dollars;
-                GlobalTrailIncrementValue = 5;
 
                 // Legacy ATR trailing inputs retained for reference only; strategy now always
                 // uses shared DEMA-ATR trailing logic that mirrors the AddOn configuration.
@@ -843,7 +817,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // optional: log parameters once per iteration for diagnostics
                 if (Debug)
                 {
-                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, EnableRegimeSwitching={EnableRegimeSwitching}, EnableCandleConviction={EnableCandleConviction}, RsiChopLong={RsiChopLongThreshold}, RsiChopShort={RsiChopShortThreshold}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ScaleInTradesToAdd={ScaleInTradesToAdd}, ScaleInMaxTrades={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationValue={ScaleInTrailActivationValue}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockValue={ScaleInProfitLockValue}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementValue={ScaleInTrailIncrementValue}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, EnableGlobalTrailing={EnableGlobalTrailing}, GlobalTrailActivationMode={GlobalTrailActivationMode}, GlobalTrailActivationValue={GlobalTrailActivationValue}, GlobalProfitLockMode={GlobalProfitLockMode}, GlobalProfitLockValue={GlobalProfitLockValue}, GlobalTrailIncrementMode={GlobalTrailIncrementMode}, GlobalTrailIncrementValue={GlobalTrailIncrementValue}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
+                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ScaleInTradesToAdd={ScaleInTradesToAdd}, ScaleInMaxTrades={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationTicks={ScaleInTrailActivationTicks}, ScaleInTrailActivationDollars={ScaleInTrailActivationDollars}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockTicks={ScaleInProfitLockTicks}, ScaleInProfitLockDollars={ScaleInProfitLockDollars}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementTicks={ScaleInTrailTicks}, ScaleInTrailIncrementDollars={ScaleInTrailIncrementDollars}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
                 }
 
                 if (tradeStates == null)
@@ -1208,7 +1182,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             UpdateIndicatorVisuals();
             UpdateIndicatorVisualButtons();
             UpdatePnlTagToggleButton();
-            UpdateReverseSignalToggleButton();
             UpdateBiasToggleButtons();
             UpdateVwapGateToggleButton();
             UpdateTradesPerEntryInput();
@@ -1259,26 +1232,45 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool rsiShortCond = false;
             bool macdLongCond = false;
             bool macdShortCond = false;
-            bool rsiBbLong = false;
-            bool rsiBbShort = false;
-            int trendVotesLong = 0, trendVotesShort = 0;
-            int momVotesLong = 0, momVotesShort = 0;
+            int longVotes = 0, shortVotes = 0;
 
             if (UseSMA)
             {
                 smaLongCond = Close[0] > sma[0] && sma[0] > sma[1];
                 smaShortCond = Close[0] < sma[0] && sma[0] < sma[1];
-                if (smaLongCond) trendVotesLong++;
-                if (smaShortCond) trendVotesShort++;
+                if (smaLongCond) longVotes++;
+                if (smaShortCond) shortVotes++;
             }
 
             if (UseEMA)
             {
                 emaLongCond = emaFast[0] > emaSlow[0];
                 emaShortCond = emaFast[0] < emaSlow[0];
-                if (emaLongCond) trendVotesLong++;
-                if (emaShortCond) trendVotesShort++;
+                if (emaLongCond) longVotes++;
+                if (emaShortCond) shortVotes++;
             }
+
+            if (UseRSI)
+            {
+                rsiLongCond = CrossAbove(rsi.Avg, RsiLongThreshold, 1);
+                rsiShortCond = CrossBelow(rsi.Avg, RsiShortThreshold, 1);
+                if (rsiLongCond) longVotes++;
+                if (rsiShortCond) shortVotes++;
+            }
+
+            if (UseMACD)
+            {
+                double hist = macd.Default[0] - macd.Avg[0];
+                macdLongCond = hist > 0;
+                macdShortCond = hist < 0;
+                if (macdLongCond) longVotes++;
+                if (macdShortCond) shortVotes++;
+            }
+
+            int effMinLong = Math.Max(1, Math.Min(MinSignalsToEnterLong, maxSignalSlots));
+            int effMinShort = Math.Max(1, Math.Min(MinSignalsToEnterShort, maxSignalSlots));
+            bool orbAllowsLong = IsOrbEntryAllowed(MarketPosition.Long);
+            bool orbAllowsShort = IsOrbEntryAllowed(MarketPosition.Short);
 
             double chopAdx = adxChop != null ? adxChop[0] : 0.0;
             double chopBbWidth = GetChopBbWidthPct();
@@ -1314,66 +1306,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 lastChopRangeReady = false;
             }
 
-            bool useMeanReversion = EnableRegimeSwitching && chopActive;
-
-            if (UseRSI)
-            {
-                if (useMeanReversion)
-                {
-                    bool bbTouchLong = false;
-                    bool bbTouchShort = false;
-                    if (bbChop != null)
-                    {
-                        double lower = bbChop.Lower[0];
-                        double upper = bbChop.Upper[0];
-                        if (!double.IsNaN(lower) && !double.IsNaN(upper))
-                        {
-                            bbTouchLong = Low[0] <= lower || Close[0] <= lower;
-                            bbTouchShort = High[0] >= upper || Close[0] >= upper;
-                        }
-                    }
-
-                    rsiBbLong = bbTouchLong;
-                    rsiBbShort = bbTouchShort;
-                    rsiLongCond = rsi.Avg[0] < RsiChopLongThreshold && bbTouchLong;
-                    rsiShortCond = rsi.Avg[0] > RsiChopShortThreshold && bbTouchShort;
-                }
-                else
-                {
-                    rsiLongCond = CrossAbove(rsi.Avg, RsiLongThreshold, 1);
-                    rsiShortCond = CrossBelow(rsi.Avg, RsiShortThreshold, 1);
-                }
-                if (rsiLongCond) momVotesLong++;
-                if (rsiShortCond) momVotesShort++;
-            }
-
-            if (UseMACD)
-            {
-                if (!useMeanReversion)
-                {
-                    double hist = macd.Default[0] - macd.Avg[0];
-                    macdLongCond = hist > 0;
-                    macdShortCond = hist < 0;
-                    if (macdLongCond) momVotesLong++;
-                    if (macdShortCond) momVotesShort++;
-                }
-            }
-
-            if (!useMeanReversion)
-            {
-                bool isInsideBar = High[0] < High[1] && Low[0] > Low[1];
-                if (isInsideBar)
-                {
-                    if (Close[0] > Open[0]) momVotesLong++;
-                    if (Close[0] < Open[0]) momVotesShort++;
-                }
-            }
-
-            int effMinLong = Math.Max(1, Math.Min(MinSignalsToEnterLong, maxSignalSlots));
-            int effMinShort = Math.Max(1, Math.Min(MinSignalsToEnterShort, maxSignalSlots));
-            bool orbAllowsLong = IsOrbEntryAllowed(MarketPosition.Long);
-            bool orbAllowsShort = IsOrbEntryAllowed(MarketPosition.Short);
-
             bool rvolEnabled = EnableRvolGate;
             bool rvolReady;
             bool vrocReady;
@@ -1404,14 +1336,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             bool volExpOk = volExpEnabled && (volExpBbOk || volExpAtrOk);
-            if (!useMeanReversion && volExpOk)
+            if (volExpOk)
             {
-                momVotesLong++;
-                momVotesShort++;
+                longVotes++;
+                shortVotes++;
             }
-
-            int longVotes = useMeanReversion ? momVotesLong : (trendVotesLong + momVotesLong);
-            int shortVotes = useMeanReversion ? momVotesShort : (trendVotesShort + momVotesShort);
 
             bool chopAllowsLong = IsChopEntryAllowed(MarketPosition.Long, rvolGateReady, rvolOk, vrocOk, volExpOk);
             bool chopAllowsShort = IsChopEntryAllowed(MarketPosition.Short, rvolGateReady, rvolOk, vrocOk, volExpOk);
@@ -1435,41 +1364,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             // When VWAP gate is enabled, let VWAP decide direction and ignore manual bias.
             bool effectiveBiasAllowsLong = vwapGateEnabled ? true : biasAllowsLong;
             bool effectiveBiasAllowsShort = vwapGateEnabled ? true : biasAllowsShort;
-
-            bool qualityLong = false;
-            bool qualityShort = false;
-            if (useMeanReversion)
-            {
-                if (momVotesLong > 0)
-                {
-                    qualityLong = true;
-                    chopAllowsLong = true;
-                }
-                if (momVotesShort > 0)
-                {
-                    qualityShort = true;
-                    chopAllowsShort = true;
-                }
-            }
-            else
-            {
-                bool splitLong = (trendVotesLong > 0 && momVotesLong > 0) || effMinLong == 1;
-                bool splitShort = (trendVotesShort > 0 && momVotesShort > 0) || effMinShort == 1;
-                bool convictionLong = true;
-                bool convictionShort = true;
-                if (EnableCandleConviction && (High[0] - Low[0] > TickSize * 4))
-                {
-                    double range = High[0] - Low[0];
-                    if (Close[0] < Low[0] + (range * 0.5)) convictionLong = false;
-                    if (Close[0] > High[0] - (range * 0.5)) convictionShort = false;
-                }
-
-                qualityLong = splitLong && convictionLong && (longVotes >= effMinLong);
-                qualityShort = splitShort && convictionShort && (shortVotes >= effMinShort);
-            }
-
-            bool canLong = effectiveBiasAllowsLong && qualityLong;
-            bool canShort = effectiveBiasAllowsShort && qualityShort;
+            bool canLong = effectiveBiasAllowsLong && longVotes >= effMinLong;
+            bool canShort = effectiveBiasAllowsShort && shortVotes >= effMinShort;
 
             bool longGated = (!orbAllowsLong || !chopAllowsLong) || (EnableHtfSwingGate && htfLongGate.Blocked);
             bool shortGated = (!orbAllowsShort || !chopAllowsShort) || (EnableHtfSwingGate && htfShortGate.Blocked);
@@ -1538,19 +1434,16 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             lastBreakoutSignalActive = canLong || canShort;
 
-            lastEntrySnapshot = new EntrySignalSnapshot
-            {
-                LongVotes = longVotes,
-                ShortVotes = shortVotes,
-                MinLong = effMinLong,
+                lastEntrySnapshot = new EntrySignalSnapshot
+                {
+                    LongVotes = longVotes,
+                    ShortVotes = shortVotes,
+                    MinLong = effMinLong,
                 MinShort = effMinShort,
-                RegimeSwitchingEnabled = EnableRegimeSwitching,
-                RegimeIsChop = useMeanReversion,
-                ReverseSignalTrading = ReverseSignalTrading,
                 OrbLong = orbAllowsLong,
                 OrbShort = orbAllowsShort,
-                ChopLong = chopAllowsLong,
-                ChopShort = chopAllowsShort,
+                    ChopLong = chopAllowsLong,
+                    ChopShort = chopAllowsShort,
                     ChopAdx = chopAdx,
                     ChopBbWidthPct = chopBbWidth,
                     ChopDecayActive = chopDecayActive,
@@ -1602,16 +1495,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 string chopDecayText = EnableChopDecayGate
                     ? string.Format(" DECAY {0} dADX {1:F2} dBB {2:F2}%", chopDecayActive ? "ON" : "OFF", chopDecayAdxDelta, chopDecayBbDelta)
                     : string.Empty;
-                string regimeText = EnableRegimeSwitching ? (useMeanReversion ? "CHOP" : "TREND") : "TREND(off)";
-                string reverseText = ReverseSignalTrading ? "ON" : "OFF";
-                string rsiBbText = useMeanReversion
-                    ? string.Format("RSI_BB L {0} S {1}", rsiBbLong, rsiBbShort)
-                    : "RSI_BB L n/a S n/a";
-                StrategyLogInfo(string.Format("[SIGNAL] votes L {0}/{1} S {2}/{3} ORB L {4} S {5} CHOP L {6} S {7} REGIME {8} REV {9} {10} (ADX {11:F1} BB {12:F2}%{13}) HTF L {14} S {15} VOL {16} (bbDelta {17:F2}% atrx {18:F2}) RVOL {19} (rvol {20:F2} vroc {21:F1}%)",
+                StrategyLogInfo(string.Format("[SIGNAL] votes L {0}/{1} S {2}/{3} ORB L {4} S {5} CHOP L {6} S {7} (ADX {8:F1} BB {9:F2}%{10}) HTF L {11} S {12} VOL {13} (bbDelta {14:F2}% atrx {15:F2}) RVOL {16} (rvol {17:F2} vroc {18:F1}%)",
                     longVotes, effMinLong, shortVotes, effMinShort,
                     orbAllowsLong, orbAllowsShort,
                     chopAllowsLong, chopAllowsShort,
-                    regimeText, reverseText, rsiBbText,
                     chopAdx, chopBbWidth,
                     chopDecayText,
                     htfLongSummary, htfShortSummary,
@@ -1694,7 +1581,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 stopSet = targetSet = false;
                 activeTradeId = null;
                 ResetDemaTrailingState();
-                ResetGlobalTrailingState();
                 bool cooldownActive = IsEntryCooldownActive();
                 bool cooldownBypassForChop = cooldownActive && IsChopRangeTradingEnabled() && chopRangeActive;
                 if (cooldownActive && !cooldownBypassForChop)
@@ -1940,8 +1826,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (string.IsNullOrEmpty(activeTradeId))
                 return;
-            if (shutdownInProgress)
-                return;
 
             if (State == State.Realtime && dailyPnLLimitHalted)
                 return;
@@ -1977,8 +1861,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool manualTargetLocked = targetHold || activeState.ManualTargetOverride;
 
             UpdateScaleInDrawdownVisuals(currentPrice);
-            if (!EnableGlobalTrailing)
-                ResetGlobalTrailingState();
 
             // If this is a bootstrapped position and we still have no stops/targets, force protection first.
             if (activeState.Bootstrapped && (!stopSet || !targetSet) && Position != null && Position.MarketPosition != MarketPosition.Flat)
@@ -2083,15 +1965,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            bool useGlobalTrailing = EnableGlobalTrailing && !activeState.IsChopEntry;
-
             if (activeState.IsVwapEntry)
             {
                 bool vwapHandled = ApplyVwapProtection(activeState, currentPrice, manualStopLocked, manualTargetLocked);
                 TryTriggerScaleIn(currentPrice);
-                if (!useGlobalTrailing)
-                    ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
-                if (vwapHandled && !useGlobalTrailing)
+                ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
+                if (vwapHandled)
                     return;
             }
 
@@ -2128,36 +2007,26 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (scaleInHoldUntil != DateTime.MinValue || scaleInTrailActivated)
             {
-                if (!useGlobalTrailing)
-                {
-                    ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
-                    if (scaleInHoldActive || scaleInTrailActivated)
-                        return;
-                }
+                ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
+                if (scaleInHoldActive || scaleInTrailActivated)
+                    return;
             }
 
             bool demaApplied = false;
-            bool globalTrailingApplied = false;
-            if (useGlobalTrailing)
-                globalTrailingApplied = ApplyGlobalTrailing(activeState, currentPrice, manualStopLocked);
+            bool breakEvenForcesDema = ShouldForceDemaFromBreakEven(currentPrice);
+            string effectiveDemaContext = demaContext;
+            if (breakEvenForcesDema)
+                effectiveDemaContext = string.IsNullOrWhiteSpace(effectiveDemaContext) ? "BREAKEVEN_CLAMP" : effectiveDemaContext + "|BREAKEVEN_CLAMP";
 
-            if (!useGlobalTrailing)
-            {
-                bool breakEvenForcesDema = ShouldForceDemaFromBreakEven(currentPrice);
-                string effectiveDemaContext = demaContext;
-                if (breakEvenForcesDema)
-                    effectiveDemaContext = string.IsNullOrWhiteSpace(effectiveDemaContext) ? "BREAKEVEN_CLAMP" : effectiveDemaContext + "|BREAKEVEN_CLAMP";
+            bool forceDema = forceDemaTrailing || breakEvenForcesDema;
+            if (UseDemaAtrTrailing || forceDema)
+                demaApplied = TryApplyDemaAtrTrailingStop(currentPrice, forceDema, effectiveDemaContext);
 
-                bool forceDema = forceDemaTrailing || breakEvenForcesDema;
-                if (UseDemaAtrTrailing || forceDema)
-                    demaApplied = TryApplyDemaAtrTrailingStop(currentPrice, forceDema, effectiveDemaContext);
+            bool forceBreakEvenClamp = HasContext(effectiveDemaContext, "CHOP_PROFIT");
+            if (!demaApplied && UseBreakEvenClamp)
+                TryApplyBreakEvenStop(activeTradeId, currentPrice, forceBreakEvenClamp);
 
-                bool forceBreakEvenClamp = HasContext(effectiveDemaContext, "CHOP_PROFIT");
-                if (!demaApplied && UseBreakEvenClamp)
-                    TryApplyBreakEvenStop(activeTradeId, currentPrice, forceBreakEvenClamp);
-            }
-
-            if (!demaApplied && !globalTrailingApplied && !stopSet && !stopHold)
+            if (!demaApplied && !stopSet && !stopHold)
             {
                 // Stop
                 if (StopType == StopKind.ATR)
@@ -2201,8 +2070,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
-            if (!useGlobalTrailing)
-                ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
+            ApplyScaleInTrailing(currentPrice, manualStopLocked, manualTargetLocked);
         }
 
         private bool TryApplyStraddleProtection(TradeRuntimeState activeState, double currentPrice, DateTime now)
@@ -2516,13 +2384,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     stopSet = true;
                     return true;
-                }
-
-                if (state.StopOrder.OrderState == OrderState.ChangePending || state.StopOrder.OrderState == OrderState.ChangeSubmitted)
-                {
-                    if (Debug)
-                        StrategyLogDebug($"[AUTO][STOP] Skip stop update for {tradeId} (change pending).");
-                    return false;
                 }
             }
 
@@ -3777,294 +3638,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 scaleInInitialEntryPrice = ResolveScaleInInitialEntryPrice(currentPrice);
         }
 
-        private double ComputeGlobalTrailLockPrice(double currentPrice)
-        {
-            if (Position == null || Position.MarketPosition == MarketPosition.Flat)
-                return 0;
-
-            double entry = Position.AveragePrice > 0 ? Position.AveragePrice : currentPrice;
-            if (entry <= 0 || double.IsNaN(entry))
-                return 0;
-
-            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
-            if (tickSize <= 0)
-                tickSize = 1e-6;
-
-            double offset = 0;
-            if (GlobalProfitLockMode == BreakEvenTriggerModeOption.Ticks)
-            {
-                int ticks = (int)Math.Max(0, Math.Round(GlobalProfitLockValue));
-                offset = ticks * tickSize;
-            }
-            else
-            {
-                offset = ConvertDollarsToPrice(Math.Max(0.0, GlobalProfitLockValue));
-            }
-
-            if (offset <= 0)
-                return 0;
-
-            double desired = Position.MarketPosition == MarketPosition.Short
-                ? entry - offset
-                : entry + offset;
-
-            return Instrument?.MasterInstrument?.RoundToTickSize(desired) ?? Math.Round(desired / tickSize) * tickSize;
-        }
-
-        private double ComputeGlobalTrailActivationPrice(double currentPrice)
-        {
-            if (Position == null || Position.MarketPosition == MarketPosition.Flat)
-                return 0;
-
-            double entry = Position.AveragePrice > 0 ? Position.AveragePrice : currentPrice;
-            if (entry <= 0 || double.IsNaN(entry))
-                return 0;
-
-            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
-            if (tickSize <= 0)
-                tickSize = 1e-6;
-
-            double offset = 0;
-            if (GlobalTrailActivationMode == BreakEvenTriggerModeOption.Ticks)
-            {
-                int ticks = (int)Math.Max(0, Math.Round(GlobalTrailActivationValue));
-                if (ticks <= 0)
-                    return entry;
-                offset = ticks * tickSize;
-            }
-            else
-            {
-                double dollars = Math.Max(0.0, GlobalTrailActivationValue);
-                if (dollars <= 0)
-                    return entry;
-                offset = ConvertDollarsToPrice(dollars);
-                if (offset <= 0)
-                    return 0;
-            }
-
-            if (offset <= 0)
-                return entry;
-
-            double desired = Position.MarketPosition == MarketPosition.Short
-                ? entry - offset
-                : entry + offset;
-
-            return Instrument?.MasterInstrument?.RoundToTickSize(desired) ?? Math.Round(desired / tickSize) * tickSize;
-        }
-
-        private bool ApplyGlobalTrailing(TradeRuntimeState activeState, double currentPrice, bool manualStopLocked)
-        {
-            if (!EnableGlobalTrailing)
-            {
-                ResetGlobalTrailingState();
-                return false;
-            }
-
-            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
-            {
-                ResetGlobalTrailingState();
-                return false;
-            }
-
-            if (globalTrailSide != Position.MarketPosition)
-            {
-                ResetGlobalTrailingState();
-                globalTrailSide = Position.MarketPosition;
-            }
-            else if (globalTrailSide == MarketPosition.Flat)
-            {
-                globalTrailSide = Position.MarketPosition;
-            }
-
-            bool isLong = Position.MarketPosition == MarketPosition.Long;
-            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
-            if (tickSize <= 0)
-                tickSize = 1e-6;
-
-            List<TradeRuntimeState> states = null;
-            MultiEntrySyncGroup group;
-            if (IsMultiEntrySyncEnabled && TryGetMultiEntrySyncGroupByTradeId(activeTradeId, out group) && group != null)
-            {
-                states = GetMultiEntrySyncStates(group.TradeId);
-            }
-            else if (openTradeOrder != null && openTradeOrder.Count > 0)
-            {
-                states = new List<TradeRuntimeState>();
-                foreach (string tradeId in openTradeOrder)
-                {
-                    TradeRuntimeState state;
-                    if (TryGetTradeState(tradeId, out state) && state != null && state.RemainingQuantity > 0)
-                        states.Add(state);
-                }
-            }
-            else if (activeState != null)
-            {
-                states = new List<TradeRuntimeState> { activeState };
-            }
-
-            if (states == null || states.Count == 0)
-                return false;
-
-            states = states.Where(s => s != null && s.RemainingQuantity > 0 && !s.IsSynthetic).ToList();
-            if (states.Count == 0)
-                return false;
-
-            bool hasManualOverride = states.Any(s => s.ManualStopOverride);
-            bool activationReached = false;
-            if (manualStopLocked && !globalTrailActivated)
-            {
-                if (!hasManualOverride)
-                    return false;
-
-                double activationPrice = ComputeGlobalTrailActivationPrice(currentPrice);
-                if (activationPrice > 0)
-                    activationReached = isLong ? currentPrice >= activationPrice : currentPrice <= activationPrice;
-                if (!activationReached)
-                    return false;
-            }
-
-            if (manualStopLocked && (globalTrailActivated || activationReached))
-            {
-                foreach (var state in states)
-                {
-                    if (state == null)
-                        continue;
-                    state.ManualStopOverride = false;
-                    ClearManualProtectionPending(state, true);
-                }
-                manualStopLocked = false;
-            }
-
-            double? lastAccepted = globalTrailLastStopPrice > 0 ? (double?)globalTrailLastStopPrice : null;
-            foreach (var state in states)
-            {
-                double? stopPrice = null;
-                if (state.StopOrder != null && !IsTerminalState(state.StopOrder.OrderState) && state.StopOrder.StopPrice > 0)
-                    stopPrice = state.StopOrder.StopPrice;
-                else if (state.LastStopPrice > 0)
-                    stopPrice = state.LastStopPrice;
-
-                if (stopPrice.HasValue && stopPrice.Value > 0)
-                {
-                    if (!lastAccepted.HasValue)
-                        lastAccepted = stopPrice.Value;
-                    else
-                        lastAccepted = isLong ? Math.Max(lastAccepted.Value, stopPrice.Value) : Math.Min(lastAccepted.Value, stopPrice.Value);
-                }
-            }
-
-            if (!globalTrailActivated)
-            {
-                double activationPrice = ComputeGlobalTrailActivationPrice(currentPrice);
-                if (activationPrice > 0)
-                {
-                    bool activationReachedNow = isLong ? currentPrice >= activationPrice : currentPrice <= activationPrice;
-                    if (activationReachedNow)
-                    {
-                        double lockPrice = ComputeGlobalTrailLockPrice(currentPrice);
-                        if (lockPrice > 0)
-                        {
-                            globalTrailActivated = true;
-                            globalTrailActivationPrice = activationPrice;
-                            globalTrailLockPrice = lockPrice;
-                        }
-                    }
-                }
-            }
-
-            if (!globalTrailActivated)
-                return false;
-
-            if (globalTrailActivationPrice <= 0)
-                globalTrailActivationPrice = ComputeGlobalTrailActivationPrice(currentPrice);
-            if (globalTrailLockPrice <= 0)
-                globalTrailLockPrice = ComputeGlobalTrailLockPrice(currentPrice);
-
-            if (globalTrailLockPrice <= 0)
-                return false;
-
-            double desiredStop = globalTrailLockPrice;
-
-            if (GlobalTrailIncrementMode == BreakEvenTriggerModeOption.Ticks)
-            {
-                int trailTicks = (int)Math.Max(0, Math.Round(GlobalTrailIncrementValue));
-                if (trailTicks > 0 && globalTrailActivationPrice > 0)
-                {
-                    double favorableTicks = isLong
-                        ? (currentPrice - globalTrailActivationPrice) / tickSize
-                        : (globalTrailActivationPrice - currentPrice) / tickSize;
-                    if (favorableTicks > 0)
-                    {
-                        int steps = (int)Math.Floor(favorableTicks / trailTicks);
-                        if (steps > 0)
-                        {
-                            double offset = steps * trailTicks * tickSize;
-                            desiredStop = isLong ? desiredStop + offset : desiredStop - offset;
-                        }
-                    }
-                }
-            }
-            else
-            {
-                double trailDollars = Math.Max(0.0, GlobalTrailIncrementValue);
-                if (trailDollars > 0 && globalTrailActivationPrice > 0)
-                {
-                    double pointValue = Instrument?.MasterInstrument?.PointValue ?? 0.0;
-                    int qty = Position != null ? Math.Max(1, Math.Abs(Position.Quantity)) : 1;
-                    if (pointValue > 0 && qty > 0)
-                    {
-                        double favorableMove = isLong
-                            ? currentPrice - globalTrailActivationPrice
-                            : globalTrailActivationPrice - currentPrice;
-                        if (favorableMove > 0)
-                        {
-                            double favorableDollars = favorableMove * pointValue * qty;
-                            int steps = (int)Math.Floor(favorableDollars / trailDollars);
-                            if (steps > 0)
-                            {
-                                double offset = steps * trailDollars / (pointValue * qty);
-                                desiredStop = isLong ? desiredStop + offset : desiredStop - offset;
-                            }
-                        }
-                    }
-                }
-            }
-
-            if (globalTrailLastStopPrice > 0)
-                desiredStop = isLong ? Math.Max(desiredStop, globalTrailLastStopPrice) : Math.Min(desiredStop, globalTrailLastStopPrice);
-            if (globalTrailLockPrice > 0)
-                desiredStop = isLong ? Math.Max(desiredStop, globalTrailLockPrice) : Math.Min(desiredStop, globalTrailLockPrice);
-
-            double rounded = Instrument?.MasterInstrument?.RoundToTickSize(desiredStop) ?? Math.Round(desiredStop / tickSize) * tickSize;
-            double clampRef = GetStopClampReference(isLong, currentPrice);
-            double? clamped = ClampStopPrice(rounded, clampRef, isLong, lastAccepted);
-            if (!clamped.HasValue)
-                return false;
-
-            bool updated = false;
-            foreach (var state in states)
-            {
-                if (state == null || state.RemainingQuantity <= 0 || state.IsSynthetic)
-                    continue;
-                if (IsManualProtectionHoldActive(state, true))
-                    continue;
-
-                if (IssueStopLoss(state.TradeId, CalculationMode.Price, clamped.Value, false))
-                {
-                    state.LastStopPrice = clamped.Value;
-                    updated = true;
-                }
-            }
-
-            if (updated)
-            {
-                globalTrailLastStopPrice = clamped.Value;
-                stopSet = true;
-            }
-
-            return updated;
-        }
-
         private double ComputeScaleInLockPrice(double currentPrice)
         {
             if (Position == null || Position.MarketPosition == MarketPosition.Flat)
@@ -4081,12 +3654,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             double offset = 0;
             if (ScaleInProfitLockMode == BreakEvenTriggerModeOption.Ticks)
             {
-                int ticks = (int)Math.Max(0, Math.Round(ScaleInProfitLockValue));
+                int ticks = Math.Max(0, ScaleInProfitLockTicks);
                 offset = ticks * tickSize;
             }
             else
             {
-                offset = ConvertDollarsToPrice(Math.Max(0.0, ScaleInProfitLockValue));
+                offset = ConvertScaleInDollarsToPrice(Math.Max(0.0, ScaleInProfitLockDollars));
             }
 
             if (offset <= 0)
@@ -4115,17 +3688,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             double offset = 0;
             if (ScaleInTrailActivationMode == BreakEvenTriggerModeOption.Ticks)
             {
-                int ticks = (int)Math.Max(0, Math.Round(ScaleInTrailActivationValue));
+                int ticks = Math.Max(0, ScaleInTrailActivationTicks);
                 if (ticks <= 0)
                     return entry;
                 offset = ticks * tickSize;
             }
             else
             {
-                double dollars = Math.Max(0.0, ScaleInTrailActivationValue);
+                double dollars = Math.Max(0.0, ScaleInTrailActivationDollars);
                 if (dollars <= 0)
                     return entry;
-                offset = ConvertDollarsToPrice(dollars);
+                offset = ConvertScaleInDollarsToPrice(dollars);
                 if (offset <= 0)
                     return 0;
             }
@@ -4140,7 +3713,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             return Instrument?.MasterInstrument?.RoundToTickSize(desired) ?? Math.Round(desired / tickSize) * tickSize;
         }
 
-        private double ConvertDollarsToPrice(double dollars)
+        private double ConvertScaleInDollarsToPrice(double dollars)
         {
             if (dollars <= 0)
                 return 0;
@@ -4299,7 +3872,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     if (ScaleInTrailIncrementMode == BreakEvenTriggerModeOption.Ticks)
                     {
-                        int trailTicks = (int)Math.Max(0, Math.Round(ScaleInTrailIncrementValue));
+                        int trailTicks = Math.Max(0, ScaleInTrailTicks);
                         if (trailTicks > 0 && scaleInActivationPrice > 0)
                         {
                             double favorableTicks = isLong
@@ -4318,7 +3891,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     }
                     else
                     {
-                        double trailDollars = Math.Max(0.0, ScaleInTrailIncrementValue);
+                        double trailDollars = Math.Max(0.0, ScaleInTrailIncrementDollars);
                         if (trailDollars > 0 && scaleInActivationPrice > 0)
                         {
                             double pointValue = Instrument?.MasterInstrument?.PointValue ?? 0.0;
@@ -6991,31 +6564,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ChartControl.Dispatcher.InvokeAsync(apply);
         }
 
-        private void UpdateReverseSignalToggleButton(bool force = false)
-        {
-            if (reverseSignalToggleButton == null || ChartControl == null)
-                return;
-
-            bool desiredState = ReverseSignalTrading;
-            if (!force && lastReverseSignalToggleState == desiredState)
-                return;
-
-            lastReverseSignalToggleState = desiredState;
-
-            Action apply = () =>
-            {
-                if (reverseSignalToggleButton == null)
-                    return;
-
-                ApplyIndicatorVisualButtonStyle(reverseSignalToggleButton, "Reverse", desiredState);
-            };
-
-            if (ChartControl.Dispatcher.CheckAccess())
-                apply();
-            else
-                ChartControl.Dispatcher.InvokeAsync(apply);
-        }
-
         private void UpdateBiasToggleButtons(bool force = false)
         {
             if (biasBothToggleButton == null || ChartControl == null)
@@ -9174,15 +8722,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             demaLowWater = 0;
         }
 
-        private void ResetGlobalTrailingState()
-        {
-            globalTrailActivated = false;
-            globalTrailActivationPrice = 0;
-            globalTrailLockPrice = 0;
-            globalTrailLastStopPrice = 0;
-            globalTrailSide = MarketPosition.Flat;
-        }
-
         private void ResetScaleInState()
         {
             scaleInActive = false;
@@ -9614,7 +9153,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             stopSet = false;
             targetSet = false;
             ResetDemaTrailingState();
-            ResetGlobalTrailingState();
             ResetScaleInState();
             lastStatusText = null;
             lastStatusHealthy = false;
@@ -10134,9 +9672,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             state.EntryVotes = side == MarketPosition.Long ? snap.LongVotes : snap.ShortVotes;
             state.EntryMinVotes = side == MarketPosition.Long ? snap.MinLong : snap.MinShort;
-            state.EntryRegimeSwitchingEnabled = snap.RegimeSwitchingEnabled;
-            state.EntryRegimeIsChop = snap.RegimeIsChop;
-            state.EntryReverseSignalTrading = snap.ReverseSignalTrading;
             state.EntryOrbAllowed = side == MarketPosition.Long ? snap.OrbLong : snap.OrbShort;
             state.EntryChopAllowed = side == MarketPosition.Long ? snap.ChopLong : snap.ChopShort;
             state.EntryChopAdx = snap.ChopAdx;
@@ -10645,7 +10180,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!state.IsScaleInEntry)
             {
                 ResetDemaTrailingState();
-                ResetGlobalTrailingState();
                 activeTradeId = state.TradeId;
             }
             else if (string.IsNullOrEmpty(activeTradeId))
@@ -10870,7 +10404,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 stopSet = false;
                 targetSet = false;
                 ResetDemaTrailingState();
-                ResetGlobalTrailingState();
 
                 if (State == State.Realtime && !state.IsSynthetic)
                 {
@@ -10988,10 +10521,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             string volExpText = FormatVolExpEntrySummary(state);
             string rvolText = FormatRvolEntrySummary(state);
             string entryContext = string.IsNullOrEmpty(state.EntryContext) ? "AUTO" : state.EntryContext;
-            string regimeText = state.EntryRegimeSwitchingEnabled
-                ? (state.EntryRegimeIsChop ? "CHOP" : "TREND")
-                : "TREND(off)";
-            string reverseText = state.EntryReverseSignalTrading ? "ON" : "OFF";
 
             DateTime entryTime = state.EntrySignalTime != DateTime.MinValue ? state.EntrySignalTime : (Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow);
             DateTime exitTime = execution.Time != DateTime.MinValue ? execution.Time : (Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow);
@@ -11029,7 +10558,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 maeText = $"{maeCash:C0} ({maePoints:F2}pt)";
             }
 
-            StrategyLogInfo(string.Format("[TRADE_STORY] {0} {1} qty={2} entry={3:F2} exit={4:F2} pnl={5:C0} {6} reason={7} ctx={8} votes={9} ORB={10} CHOP={11} REGIME={12} REV={13} ADX={14:F1} BB={15:F2}% {16} dADX={17:F2} dBB={18:F2}% HTF={19} VOL={20} RVOL={21} MFE={22} MAE={23} entryTime={24:yyyy-MM-dd HH:mm:ss} exitTime={25:yyyy-MM-dd HH:mm:ss}",
+            StrategyLogInfo(string.Format("[TRADE_STORY] {0} {1} qty={2} entry={3:F2} exit={4:F2} pnl={5:C0} {6} reason={7} ctx={8} votes={9} ORB={10} CHOP={11} ADX={12:F1} BB={13:F2}% {14} dADX={15:F2} dBB={16:F2}% HTF={17} VOL={18} RVOL={19} MFE={20} MAE={21} entryTime={22:yyyy-MM-dd HH:mm:ss} exitTime={23:yyyy-MM-dd HH:mm:ss}",
                 tradeId,
                 state.EntrySide,
                 Math.Max(1, qty),
@@ -11042,8 +10571,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 votesText,
                 orbText,
                 chopText,
-                regimeText,
-                reverseText,
                 state.EntryChopAdx,
                 state.EntryChopBbWidthPct,
                 chopDecayText,
@@ -12029,43 +11556,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return;
                 }
 
-                bool allowGlobalTrailing = EnableGlobalTrailing && !state.IsChopEntry && !state.RunUpActive && !state.IsStraddleEntry;
-                if (allowGlobalTrailing && !PricesClose(state.LastStopPrice, effectivePrice))
-                {
-                    state.LastStopPrice = effectivePrice;
-                    state.PendingAutoStopUpdate = false;
-                    state.PendingAutoStopPrice = 0;
-                    ClearManualProtectionPending(state, true);
-                    stopSet = true;
-
-                    if (globalTrailSide == MarketPosition.Flat)
-                        globalTrailSide = state.EntrySide;
-                    if (globalTrailLastStopPrice <= 0)
-                        globalTrailLastStopPrice = effectivePrice;
-                    else
-                        globalTrailLastStopPrice = state.EntrySide == MarketPosition.Long
-                            ? Math.Max(globalTrailLastStopPrice, effectivePrice)
-                            : Math.Min(globalTrailLastStopPrice, effectivePrice);
-
-                    if (globalTrailActivated)
-                    {
-                        state.ManualStopOverride = false;
-                        StrategyLogInfo(string.Format("[AUTO][STOP] Manual stop move for {0} -> {1:F2}; global trailing remains active.", tradeId, effectivePrice));
-                        return;
-                    }
-
-                    bool wasLocked = state.ManualStopOverride;
-                    state.ManualStopOverride = true;
-                    StrategyLogInfo(string.Format("[AUTO][STOP] Manual stop move for {0} -> {1:F2}; holding manual until global trail activates.", tradeId, effectivePrice));
-                    if (!ApplyManualStopToGroup(tradeId, effectivePrice, wasLocked))
-                    {
-                        if (!wasLocked)
-                            NotifyAddonManualOverride(tradeId, true, null);
-                        AlignManagedStopWithManual(tradeId, effectivePrice);
-                    }
-                    return;
-                }
-
                 if (!PricesClose(state.LastStopPrice, effectivePrice))
                 {
                     state.LastStopPrice = effectivePrice;
@@ -12258,72 +11748,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 int qty = Math.Min(strategyQty, Math.Abs(accountQty));
                 if (qty <= 0)
                     return;
-                var activeStates = new List<TradeRuntimeState>();
-                if (openTradeOrder != null && openTradeOrder.Count > 0 && tradeStates != null)
-                {
-                    foreach (var tradeId in openTradeOrder)
-                    {
-                        if (string.IsNullOrEmpty(tradeId))
-                            continue;
-                        TradeRuntimeState st;
-                        if (tradeStates.TryGetValue(tradeId, out st) && st != null && st.RemainingQuantity > 0 && !st.IsSynthetic)
-                            activeStates.Add(st);
-                    }
-                }
-                if (activeStates.Count == 0 && tradeStates != null)
-                {
-                    foreach (var st in tradeStates.Values)
-                    {
-                        if (st != null && st.RemainingQuantity > 0 && !st.IsSynthetic)
-                            activeStates.Add(st);
-                    }
-                }
-
-                if (IsMultiEntrySyncEnabled)
-                {
-                    MultiEntrySyncGroup group;
-                    string seedId = !string.IsNullOrEmpty(activeTradeId)
-                        ? activeTradeId
-                        : (activeStates.Count > 0 ? activeStates[0].TradeId : null);
-                    if (!string.IsNullOrEmpty(seedId) && TryGetMultiEntrySyncGroupByTradeId(seedId, out group))
-                    {
-                        int remaining = Math.Min(qty, GetMultiEntrySyncRemainingQuantity(group.TradeId));
-                        if (remaining > 0)
-                        {
-                            StrategyLogInfo($"[SAFETY] Flattening {Position.MarketPosition.ToString().ToLowerInvariant()} {remaining} across sync group due to {reason}");
-                            ExitMultiEntrySyncTrades(group.TradeId, remaining, "TERM");
-                            return;
-                        }
-                    }
-                }
-
-                if (activeStates.Count > 1)
-                {
-                    int remaining = qty;
-                    foreach (var st in activeStates)
-                    {
-                        if (st == null || st.RemainingQuantity <= 0)
-                            continue;
-                        int stateQty = Math.Max(1, st.RemainingQuantity);
-                        int exitQty = Math.Min(remaining, stateQty);
-                        if (exitQty <= 0)
-                            continue;
-
-                        string exitSignal = BuildExitSignalName(st.TradeId, "TERM");
-                        string fromEntry = st.Bootstrapped ? null : st.TradeId;
-                        if (Position.MarketPosition == MarketPosition.Long)
-                            ExitLong(exitQty, exitSignal, fromEntry);
-                        else if (Position.MarketPosition == MarketPosition.Short)
-                            ExitShort(exitQty, exitSignal, fromEntry);
-
-                        remaining -= exitQty;
-                        if (remaining <= 0)
-                            break;
-                    }
-                    if (remaining <= 0)
-                        return;
-                }
-
                 string flattenTradeId = activeTradeId;
                 if (string.IsNullOrEmpty(flattenTradeId) && openTradeOrder != null && openTradeOrder.Count > 0)
                     flattenTradeId = openTradeOrder[openTradeOrder.Count - 1];
@@ -12455,7 +11879,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             try
             {
                 var orders = Account.Orders != null ? new List<Order>(Account.Orders) : new List<Order>();
-                bool skipProtective = Position != null && Position.MarketPosition != MarketPosition.Flat;
                 foreach (var order in orders)
                 {
                     if (order == null || !IsOrderWorking(order))
@@ -12481,21 +11904,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     if (!match)
                         continue;
-
-                    if (skipProtective)
-                    {
-                        bool isProtective = order.OrderType == OrderType.StopMarket || order.OrderType == OrderType.StopLimit;
-                        if (!isProtective && order.OrderType == OrderType.Limit)
-                        {
-                            isProtective = name.IndexOf("target", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                                           name.IndexOf("profit", StringComparison.OrdinalIgnoreCase) >= 0;
-                        }
-                        if (!isProtective && name.IndexOf("stop", StringComparison.OrdinalIgnoreCase) >= 0)
-                            isProtective = true;
-
-                        if (isProtective)
-                            continue;
-                    }
 
                     try
                     {
@@ -13536,14 +12944,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             AppendChecklistLine(lines, states, $"CHECK: {readiness}", readyLong || readyShort);
 
-            bool useMeanReversion = EnableRegimeSwitching && chopActive;
-            string regimeLabel = EnableRegimeSwitching
-                ? (useMeanReversion ? "CHOP (MR)" : "TREND")
-                : "TREND (switch off)";
-            AppendChecklistLine(lines, states, $"Regime {regimeLabel}", null);
-            AppendChecklistLine(lines, states, $"Entry Mode {(useMeanReversion ? "CHOP-RSI+BB" : "TREND-SPLIT")}", null);
-            AppendChecklistLine(lines, states, $"Reverse Trading {(ReverseSignalTrading ? "ON" : "OFF")}", null);
-
             if (EnableVoteEntrySignals)
             {
                 AppendChecklistLine(lines, states, $"Votes L {longVotes}/{effMinLong}", longVotes >= effMinLong);
@@ -13692,9 +13092,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             try
             {
                 RemoveDrawObject("BaseOptAutoChecklist");
-                Draw.TextFixed(this, "BaseOptAutoChecklistGreen", green.ToString(), TextPosition.BottomLeft, Brushes.LimeGreen, font, Brushes.Transparent, Brushes.Transparent, 0);
-                Draw.TextFixed(this, "BaseOptAutoChecklistRed", red.ToString(), TextPosition.BottomLeft, Brushes.OrangeRed, font, Brushes.Transparent, Brushes.Transparent, 0);
-                Draw.TextFixed(this, "BaseOptAutoChecklistNeutral", neutral.ToString(), TextPosition.BottomLeft, Brushes.LightGray, font, Brushes.Transparent, Brushes.Transparent, 0);
+                Draw.TextFixed(this, "BaseOptAutoChecklistGreen", green.ToString(), TextPosition.BottomLeft, Brushes.LimeGreen, font, Brushes.Black, Brushes.Transparent, 0);
+                Draw.TextFixed(this, "BaseOptAutoChecklistRed", red.ToString(), TextPosition.BottomLeft, Brushes.OrangeRed, font, Brushes.Black, Brushes.Transparent, 0);
+                Draw.TextFixed(this, "BaseOptAutoChecklistNeutral", neutral.ToString(), TextPosition.BottomLeft, Brushes.LightGray, font, Brushes.Black, Brushes.Transparent, 0);
             }
             catch (Exception ex)
             {
@@ -13931,15 +13331,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     };
                     pnlTagsToggleButton.Click += PnlTagsToggleButton_Click;
 
-                    reverseSignalToggleButton = new Button
-                    {
-                        Content = "Reverse: OFF",
-                        Margin = new Thickness(2),
-                        Padding = new Thickness(6, 2, 6, 2),
-                        ToolTip = "Toggle reverse-signal trading (take the opposite side)."
-                    };
-                    reverseSignalToggleButton.Click += ReverseSignalToggleButton_Click;
-
                     manualLimitButton = new Button
                     {
                         Content = "LMT",
@@ -14077,7 +13468,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     biasButtonsPanel.Children.Add(vwapGateToggleButton);
                     biasTogglePanel.Children.Add(biasButtonsPanel);
                     toggleButtonsPanel.Children.Add(pnlTagsToggleButton);
-                    toggleButtonsPanel.Children.Add(reverseSignalToggleButton);
                     manualOffsetPanel.Children.Add(manualLimitButton);
                     manualOffsetPanel.Children.Add(manualStopButton);
                     visualsToggleButton = new Button
@@ -14121,7 +13511,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     chartTraderButtonsAdded = true;
                     UpdateManualTradeButtons(true);
                     UpdatePnlTagToggleButton(true);
-                    UpdateReverseSignalToggleButton(true);
                     UpdateIndicatorVisualButtons(true);
                     UpdateVisualsPanelVisibility(true);
                     PrimeIndicatorVisuals();
@@ -14178,8 +13567,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                         addOnTradeButton.Click -= AddOnTradeButton_Click;
                     if (pnlTagsToggleButton != null)
                         pnlTagsToggleButton.Click -= PnlTagsToggleButton_Click;
-                    if (reverseSignalToggleButton != null)
-                        reverseSignalToggleButton.Click -= ReverseSignalToggleButton_Click;
                     if (visualsToggleButton != null)
                         visualsToggleButton.Click -= VisualsToggleButton_Click;
                     if (smaVisualToggleButton != null)
@@ -14222,7 +13609,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     vwapGateToggleButton = null;
                     addOnTradeButton = null;
                     pnlTagsToggleButton = null;
-                    reverseSignalToggleButton = null;
                     visualsToggleButton = null;
                     smaVisualToggleButton = null;
                     emaVisualToggleButton = null;
@@ -14242,7 +13628,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     lastAddOnButtonEnabled = false;
                     lastBiasToggleValue = TradeBias.Both;
                     lastVwapGateToggleState = false;
-                    lastReverseSignalToggleState = false;
                     lastSmaVisualToggleState = false;
                     lastEmaVisualToggleState = false;
                     lastRsiVisualToggleState = false;
@@ -14302,11 +13687,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void PnlTagsToggleButton_Click(object sender, RoutedEventArgs e)
         {
             TriggerCustomEvent(o => HandlePnlTagsToggleRequest(), null);
-        }
-
-        private void ReverseSignalToggleButton_Click(object sender, RoutedEventArgs e)
-        {
-            TriggerCustomEvent(o => HandleReverseSignalToggleRequest(), null);
         }
 
         private void VisualsToggleButton_Click(object sender, RoutedEventArgs e)
@@ -15335,13 +14715,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             UpdatePnlTagToggleButton(true);
             StrategyLogInfo($"[UI] Trade PnL tags toggled {(ShowTradePnlTags ? "ON" : "OFF")}");
-        }
-
-        private void HandleReverseSignalToggleRequest()
-        {
-            ReverseSignalTrading = !ReverseSignalTrading;
-            UpdateReverseSignalToggleButton(true);
-            StrategyLogInfo($"[UI] Reverse-signal trading toggled {(ReverseSignalTrading ? "ON" : "OFF")}");
         }
 
         private void HandleIndicatorVisualToggleRequest(IndicatorVisualType target)
@@ -16491,18 +15864,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Use VWAP Direction Gate", GroupName = "01 - Bias & Voting", Order = 8)]
         public bool UseVwapDirectionGate { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Regime Switching", GroupName = "01 - Bias & Voting", Order = 9)]
-        public bool EnableRegimeSwitching { get; set; }
-
-        [NinjaScriptProperty, Display(Name = "Enable Candle Conviction", GroupName = "01 - Bias & Voting", Order = 10)]
-        public bool EnableCandleConviction { get; set; }
-
-        [NinjaScriptProperty, Range(0, 100), Display(Name = "RSI Chop Long Threshold", GroupName = "01 - Bias & Voting", Order = 11)]
-        public int RsiChopLongThreshold { get; set; }
-
-        [NinjaScriptProperty, Range(0, 100), Display(Name = "RSI Chop Short Threshold", GroupName = "01 - Bias & Voting", Order = 12)]
-        public int RsiChopShortThreshold { get; set; }
-
         [NinjaScriptProperty, Display(Name = "Enable ORB Filter", GroupName = "02 - Filters", Order = 0)]
         public bool EnableOrbFilter { get; set; }
 
@@ -16779,58 +16140,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(1, 50), Display(Name = "MacdSmooth", GroupName = "03 - Indicator Periods", Order = 9)]
         public int MacdSmooth { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 0)]
+        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "04 - Stops & Targets", Order = 0)]
         public int AtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "04 - Stops & Targets", Order = 1)]
         public StopKind StopType { get; set; }
 
-        [NinjaScriptProperty, Range(1, 200), Display(Name = "StopTicks", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 2)]
+        [NinjaScriptProperty, Range(1, 200), Display(Name = "StopTicks", GroupName = "04 - Stops & Targets", Order = 2)]
         public int StopTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrStopMult", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 3)]
+        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrStopMult", GroupName = "04 - Stops & Targets", Order = 3)]
         public double AtrStopMult { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 4)]
+        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "04 - Stops & Targets", Order = 4)]
         public TargetKind TargetType { get; set; }
 
-        [NinjaScriptProperty, Range(1, 400), Display(Name = "TargetTicks", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 5)]
+        [NinjaScriptProperty, Range(1, 400), Display(Name = "TargetTicks", GroupName = "04 - Stops & Targets", Order = 5)]
         public int TargetTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 20.0), Display(Name = "AtrTargetMult", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 6)]
+        [NinjaScriptProperty, Range(0.5, 20.0), Display(Name = "AtrTargetMult", GroupName = "04 - Stops & Targets", Order = 6)]
         public double AtrTargetMult { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10000), Display(Name = "Manual Entry Offset (ticks)", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 7)]
+        [NinjaScriptProperty, Range(1, 10000), Display(Name = "Manual Entry Offset (ticks)", GroupName = "04 - Stops & Targets", Order = 7)]
         public int ManualEntryOffsetTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Global Trailing", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 8)]
-        public bool EnableGlobalTrailing { get; set; }
-
-        [NinjaScriptProperty, Display(Name = "Global Trail Activation Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 9)]
-        public BreakEvenTriggerModeOption GlobalTrailActivationMode { get; set; }
-
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Activation Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 10)]
-        public double GlobalTrailActivationValue { get; set; }
-
-        [NinjaScriptProperty, Display(Name = "Global Profit Lock Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 11)]
-        public BreakEvenTriggerModeOption GlobalProfitLockMode { get; set; }
-
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Profit Lock Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 12)]
-        public double GlobalProfitLockValue { get; set; }
-
-        [NinjaScriptProperty, Display(Name = "Global Trail Increment Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 13)]
-        public BreakEvenTriggerModeOption GlobalTrailIncrementMode { get; set; }
-
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Increment Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 14)]
-        public double GlobalTrailIncrementValue { get; set; }
-
-        // [NinjaScriptProperty, Display(Name = "TrailType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 6)]
+        // [NinjaScriptProperty, Display(Name = "TrailType", GroupName = "04 - Stops & Targets", Order = 6)]
         // public TrailKind TrailType { get; set; }
 
-        // [NinjaScriptProperty, Range(1, 200), Display(Name = "TrailTicks", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 7)]
+        // [NinjaScriptProperty, Range(1, 200), Display(Name = "TrailTicks", GroupName = "04 - Stops & Targets", Order = 7)]
         // public int TrailTicks { get; set; }
 
-        // [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrTrailMult", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 8)]
+        // [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrTrailMult", GroupName = "04 - Stops & Targets", Order = 8)]
         // public double AtrTrailMult { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Use DEMA ATR Trailing", GroupName = "05 - DEMA ATR Trailing", Order = 0)]
@@ -16941,23 +16281,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "10 - Scale-In", Order = 5)]
         public BreakEvenTriggerModeOption ScaleInTrailActivationMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Value", GroupName = "10 - Scale-In", Order = 6)]
-        public double ScaleInTrailActivationValue { get; set; }
+        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Trail Activation Ticks", GroupName = "10 - Scale-In", Order = 6)]
+        public int ScaleInTrailActivationTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "10 - Scale-In", Order = 7)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Dollars", GroupName = "10 - Scale-In", Order = 7)]
+        public double ScaleInTrailActivationDollars { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "10 - Scale-In", Order = 8)]
         public BreakEvenTriggerModeOption ScaleInProfitLockMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Value", GroupName = "10 - Scale-In", Order = 8)]
-        public double ScaleInProfitLockValue { get; set; }
+        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Profit Lock Ticks", GroupName = "10 - Scale-In", Order = 9)]
+        public int ScaleInProfitLockTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "10 - Scale-In", Order = 9)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Dollars", GroupName = "10 - Scale-In", Order = 10)]
+        public double ScaleInProfitLockDollars { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "10 - Scale-In", Order = 11)]
         public BreakEvenTriggerModeOption ScaleInTrailIncrementMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "10 - Scale-In", Order = 10)]
-        public double ScaleInTrailIncrementValue { get; set; }
+        [NinjaScriptProperty, Range(0, 200), Display(Name = "Scale-In Trail Increment Ticks", GroupName = "10 - Scale-In", Order = 12)]
+        public int ScaleInTrailTicks { get; set; }
+
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Dollars", GroupName = "10 - Scale-In", Order = 13)]
+        public double ScaleInTrailIncrementDollars { get; set; }
 
         #endregion
     }
 }
-
 

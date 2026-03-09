@@ -45,7 +45,7 @@ void InitStatusOverlay()
     ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, g_overlayX);
     ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, g_overlayY);
     ObjectSetInteger(0, bgName, OBJPROP_XSIZE, 300);
-    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, 260);
+    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, 290);
     ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, g_overlayBackColor);
     ObjectSetInteger(0, bgName, OBJPROP_BORDER_TYPE, BORDER_FLAT);
     ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
@@ -200,7 +200,9 @@ void UpdateStatusOverlay()
         CreateOrUpdateLabel("NTDailyPnL", StringFormat("NT Daily PnL:   $%.2f", g_NT_Daily_PnL), 55);
         CreateOrUpdateLabel("InverseTier", StringFormat("Current Tier:   %s", tierText), 70);
         CreateOrUpdateLabel("NextLot", StringFormat("Next Lot (est): %.2f", nextLotEst), 85);
-        CreateOrUpdateLabel("OpenHedges", StringFormat("Open Hedges:    %d", openHedgeCount), 100);
+        CreateOrUpdateLabel("Tier2Limit", StringFormat("Tier2 activates <= %.2f", Tier1_Limit), 100);
+        CreateOrUpdateLabel("Tier3Limit", StringFormat("Tier3 activates <= %.2f", Tier2_Limit), 115);
+        CreateOrUpdateLabel("OpenHedges", StringFormat("Open Hedges:    %d", openHedgeCount), 130);
 
         // Clean planner-specific labels when not in elastic mode
         DeleteOverlayLabel("PlannerHeader");
@@ -213,6 +215,9 @@ void UpdateStatusOverlay()
         }
         return;
     }
+
+    DeleteOverlayLabel("Tier2Limit");
+    DeleteOverlayLabel("Tier3Limit");
 
     double balance = AccountInfoDouble(ACCOUNT_BALANCE);
     double cushion = g_lastCushion;
@@ -393,7 +398,7 @@ int CountAllHedgePositions()
 void RemoveStatusOverlay()
 {
     string objects[] = {
-        "Background", "Title", "Balance", "Mode", "NTDailyPnL", "InverseTier", "NextLot", "OpenHedges",
+        "Background", "Title", "Balance", "Mode", "NTDailyPnL", "InverseTier", "NextLot", "Tier2Limit", "Tier3Limit", "OpenHedges",
         "PlannerHeader", "PlannerStatus", "PlannerUpdated",
         "EODHigh", "Cushion", "OHF", "GlobalFutures", "DesiredHedges", "BandDesc", "LastUpdate"
     };

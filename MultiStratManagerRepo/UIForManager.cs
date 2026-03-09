@@ -3438,20 +3438,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                 // The MultiStratManager must continue monitoring trades even when UI is closed
                 LogToBridge("DEBUG", "SYSTEM", "UI cleanup complete - trade monitoring continues in background.");
 
-                // Unregister all strategies from monitoring
-                if (activeStrategies != null)
-                {
-                    foreach (var stratInfo in activeStrategies)
-                    {
-                        if (stratInfo.StrategyReference != null)
-                        {
-                            MultiStratManager.UnregisterStrategyForMonitoring(stratInfo.StrategyReference);
-                            LogToBridge("DEBUG", "SYSTEM", $"Unregistered strategy '{stratInfo.StrategyName}' from monitoring.");
-                        }
-                    }
-                    activeStrategies.Clear();
-                }
-
                 // Unsubscribe from the PingReceivedFromBridge event
                 if (MultiStratManager.Instance != null)
                 {
@@ -3459,34 +3445,6 @@ namespace NinjaTrader.NinjaScript.AddOns
                     LogToBridge("DEBUG", "UI", "[UIForManager] Unsubscribed from PingReceivedFromBridge event.");
                 }
 
-                // ✅ FIX: Disconnect gRPC asynchronously to prevent UI freezing
-                Task.Run(async () =>
-                {
-                    try
-                    {
-                        LogToBridge("INFO", "UI", "[UIForManager] Starting async gRPC cleanup...");
-
-                        // Use a timeout to prevent hanging
-                        var timeoutTask = Task.Delay(5000); // 5 second timeout
-                        var cleanupTask = Task.Run(() => MultiStratManager.Instance?.DisconnectGrpcAndStopAll());
-
-                        var completedTask = await Task.WhenAny(cleanupTask, timeoutTask);
-
-                        if (completedTask == timeoutTask)
-                        {
-                            LogToBridge("WARN", "UI", "[UIForManager] gRPC cleanup timed out after 5 seconds - continuing anyway");
-                        }
-                        else
-                        {
-                            LogToBridge("INFO", "UI", "[UIForManager] gRPC client disconnected successfully");
-                        }
-                    }
-                    catch (Exception grpcEx)
-                    {
-                        LogToBridge("ERROR", "UI", $"[UIForManager] Error in async gRPC cleanup: {grpcEx.Message}");
-                    }
-                });
-                
                 // Nullify UI elements to help with garbage collection, though not strictly necessary with WPF's GC.
                 accountComboBox = null;
                 realizedBalanceText = null;

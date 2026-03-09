@@ -1,7 +1,7 @@
 #property link      ""
 #property version   "1.24"
 #property strict
-#property description "gRPC Hedge Receiver with self-managed elastic closures"
+#property description "gRPC Hedge Receiver with MT5 hedge management"
 
 //+------------------------------------------------------------------+
 //| gRPC Connection Settings                                         |
@@ -14,16 +14,18 @@ input int    BridgeServerPort = 50051;            // gRPC Server Port
 //| Trading Settings                                                |
 //+------------------------------------------------------------------+
 input group "===== Trading Settings =====";
-enum LOT_MODE { Fixed_Lot_Size = 0, Self_Elastic_Closures = 1, LOTS_INVERSE_PNL = 2 };
-input LOT_MODE LotSizingMode = Self_Elastic_Closures;    // Lot sizing method
+enum LOT_MODE { Fixed_Lot_Size = 0, LOTS_INVERSE_PNL = 2 };
+input LOT_MODE LotSizingMode = LOTS_INVERSE_PNL;    // Lot sizing method
+
+// Status overlay expects SELF_ELASTIC_MODE; self-elastic mode is removed in V2.
+#define SELF_ELASTIC_MODE (-1)
 
 input bool   EnableHedging = true;   // Enable hedging? (false = copy direction)
 input double DefaultLot = 1.0;       // Default lot size if not specified
 input int    Slippage = 200;         // Slippage
 input int    MagicNumber = 12345;    // MagicNumber for trades
 
-input bool   SelfElastic_Enabled              = false;    // Enable planner-based closures
-input double SimpleStopLoss_Points            = 4000;       // Static SL distance (points) when planner-based closures are disabled (0 = off)
+input double SimpleStopLoss_Points            = 4000;       // Static SL distance (points), 0 = off
 input bool   AllowManualStopAdjustments       = true;     // Allow manual SL edits without snapback (simple SL mode)
 
 input group "===== Inverse PnL Settings =====";
@@ -54,38 +56,6 @@ input double Tier3_FixedTrail_ActivationPts    = 0.0; // Tier 3 trailing activat
 input double Tier3_FixedTrail_StepPts          = 0.0; // Tier 3 trailing step (points, 0 = off)
 input double Tier3_FixedTrail_ModificationPts  = 0.0; // Tier 3 trailing stop modification (points, 0 = off)
 
-input group "===== Planner Inputs =====";
-input double Planner_EntryLots            = 0.16;   // Starting lot size to analyze
-input double Planner_StopDistancePoints   = 4000;   // Stop distance (points from entry)
-input double Planner_MaxLoss              = 175.0;  // Desired max total loss (account currency)
-input int    Planner_MaxClosures          = 25;     // Maximum closures to search for
-
-input group "===== Advanced Trim Options =====";
-input bool   Planner_EnableInitialTrim    = false;  // Kick off scale-out with a custom partial
-input double Planner_FirstTrimDistancePts = 800;    // Distance (pts) for the first trim
-input double Planner_FirstTrimRatio       = 0.50;   // Portion of position closed on the first trim (0..1)
-input bool   Planner_EnableAdaptiveCompression = false; // Apply spacing compression multiplier to remaining tiers
-input double Planner_CompressionFactor    = 0.75;   // Multiplier (<1 tightens spacing); ignored if adaptive compression disabled
-
-input group "===== Planner Output Options =====";
-input bool   Planner_LogDetails           = true;   // Print the summary to the Experts log
-input bool   Planner_ShowOnChart          = true;   // Write the summary to the chart comment
-input bool   Planner_DrawLevels           = true;   // Draw horizontal reference lines for closure levels
-input int    Planner_LevelPreviewCount    = 6;      // Number of closure levels to list explicitly
-
-input group "===== Negative Trailing (Fixed) =====";
-input bool   NegativeTrailing_Enabled         = true;    // Enable synthetic negative trailing
-input double Stop_profit                      = 200;     // Points offset from each partial closure trigger
-input double Trailing_Increments_Points       = 0;       // Trailing Step (0 = only partial closures)
-input color  NegativeTrailing_LineColor       = clrOrangeRed; // Color for visual trailing line
-input double NegativeTrailing_TouchBufferPoints = 20;    // Allowable buffer (points) when price touches the trail
-
-input group "===== Reactive ATR Trailing =====";
-input double ATRReactive_Multiplier           = 0.85;    // Tighter ATR distance multiplier
-input int    ATRReactive_Period               = 8;       // Shorter ATR lookback for responsiveness
-input double ATRReactive_MinStopPoints        = 150;     // Override for minimum trailing distance (points)
-input double ATRTrailing_UpdateIntervalSec    = 0.6;     // Minimum seconds between trailing updates per ticket
-
 //+------------------------------------------------------------------+
 //| MT5 Hedge Trade Run-Up Inputs                                    |
 //+------------------------------------------------------------------+
@@ -97,13 +67,9 @@ input RUNUP_INCREMENT_MODE HedgeRunUp_IncrementMode = RunUpIncrement_Points; // 
 input double HedgeRunUp_IncrementPoints     = 100;    // Run-up increment step in points (when Points mode)
 input int    HedgeRunUp_DemaPeriod          = 7;      // Run-up DEMA-ATR period (run-up only)
 input double HedgeRunUp_DemaMultiplier      = 1.2;    // Run-up DEMA-ATR multiplier (run-up only)
-input bool   HedgeRunUp_UseReactiveATR      = true;   // Use reactive ATR params for DEMA-ATR run-up step
+input bool   HedgeRunUp_UseReactiveATR      = true;   // Use built-in reactive ATR values for DEMA-ATR run-up step
 
 input group "--- General Settings ---";
-
-#include <gRPC/ATRtrailing_gRPC.mqh>
-
-#define SELF_ELASTIC_MODE Self_Elastic_Closures
 
 input group "=====On-Chart Element Positions=====";
 input int StatusLabelXPos_EA    = 200; // X distance for status label position
@@ -126,15 +92,6 @@ CTrade trade;
 
 const string CandleCountdownObjName = "ACHM_CandleCountdown";
 datetime g_last_candle_countdown_update = 0;
-
-struct ATRTrailingRuntimeState
-{
-    ulong ticket;
-    double lastAppliedStop;
-    datetime lastUpdateTime;
-};
-
-ATRTrailingRuntimeState g_atrTrailingStates[];
 
 struct HedgeRunUpState
 {
@@ -183,14 +140,7 @@ Tier1DollarTrailState g_tier1DollarTrailStates[];
 #define ERR_TRADE_NOT_ALLOWED           4756  // Trading is prohibited
 
 // Function declarations for functions not in include files
-void InitATRTrailing();
-void CleanupATRTrailing();
-void HandleATRTrailingForPosition(ulong ticket, double entryPrice, double currentPrice, string orderType, double volume);
-void AddElasticPosition(string baseId, ulong positionTicket, double lots);
 bool IsTradingPermitted(string &reason); // Forward declaration for trading permission preflight
-int  FindAtrTrailingStateIndex(ulong ticket);
-void RecordAtrTrailingUpdate(ulong ticket, double stopPrice);
-void ClearAtrTrailingState(ulong ticket);
 int  FindRunUpStateIndex(ulong ticket);
 bool IsRunUpActiveForTicket(ulong ticket);
 void RemoveRunUpState(ulong ticket);
@@ -512,69 +462,10 @@ datetime g_nt_closed_timestamps[]; // Stores timestamps when positions were clos
 string g_closed_base_ids[];       // Stores base IDs that have been closed (to ignore trailing stop updates)
 datetime g_closed_base_timestamps[]; // Stores timestamps when base IDs were closed (for cleanup)
 
-// ELASTIC HEDGING: Track elastic positions and their reduction history
-struct ElasticHedgePosition
-{
-    string baseId;
-    ulong positionTicket;
-    double entryPrice;
-    double initialLots;
-    double remainingLots;
-    double stopDistancePoints;
-    double stopPrice;
-    int    totalLevels;
-    int    nextLevelIndex;
-    double projectedLoss;
-    int    positionType; // ENUM_POSITION_TYPE stored as int
-    double planLots[];       // Lots to close per level (pre-rounded)
-    double planDistances[];  // Distance in points at which each level triggers
-    double planLinePrices[]; // Cached price for each plan level
-    string planLineNames[];  // Chart objects for level lines
-    string planLabelNames[]; // Chart objects for level labels
-    bool   planLevelTriggered[];
-    double planAnchorPrice;
-    bool   negativeTrailActive;
-    double trailLinePrice;
-    datetime lastTrailUpdate;
-    string trailObjectName;
-    double lastPartialTriggerPoints;
-    double trailDistancePoints;
-    double nextIncrementTriggerPoints;
-};
-
-ElasticHedgePosition g_elasticPositions[];  // Array of elastic hedge positions
-
-// Planner helpers
-double SelfElasticPointValuePerLot();
+// Stop-loss helpers
 double GetStopLossDistance();
-double GetAtrDistance();
 double ExtractStopPriceFromDealComment(const string &dealComment);
-const string PLANNER_PROJECTED_LOSS_PLACEHOLDER = "<PLANNER_PROJECTED_LOSS>";
-bool BuildSelfElasticPlan(double entryLots,
-                          double stopPoints,
-                          double targetLoss,
-                          int maxClosures,
-                          double minLot,
-                          double lotStep,
-                          double pointValue,
-                          double anchorPrice,
-                          int &closureCount,
-                          double &estimatedLoss,
-                          string &reason,
-                          bool &targetAchieved,
-                          double &planDistances[],
-                          double &planLots[],
-                          string &summaryOut);
-void ActivateNegativeTrailing(int idx);
-void UpdateNegativeTrailingLine(int idx, double currentPriceBid, double currentPriceAsk);
-void UpdateNegativeTrailingTarget(int idx, double triggerDistancePoints);
-void ApplyNegativeTrailIncrements(int idx, double adversePoints);
 double GetBrokerMinimumStopPoints();
-double GetEffectiveStopProfitPoints();
-void CleanupStaleNegativeTrails();
-void RemovePlanLine(int idx, int levelIndex);
-void ClearElasticPlanLines(int idx);
-void DrawElasticPlanLines(int idx);
 
 // COMPREHENSIVE DUPLICATE PREVENTION: Track all notifications sent per base_id to prevent multiple notifications
 string g_notified_base_ids[];     // Stores base_ids that have already been notified
@@ -739,12 +630,6 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
                                  ENUM_POSITION_TYPE posType,
                                  double entryPrice)
 {
-    // Self-elastic positions manage their own protection.
-    if(SelfElastic_Enabled)
-    {
-        { string __log="SIMPLE_SL_SKIP: SelfElastic enabled; simple SL not applied."; Print(__log); ULogInfoPrint(__log); }
-        return;
-    }
     if(SimpleStopLoss_Points <= 0.0)
     {
         { string __log="SIMPLE_SL_SKIP: SimpleStopLoss_Points <= 0; simple SL not applied."; Print(__log); ULogInfoPrint(__log); }
@@ -808,13 +693,9 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
 
     double existingSL = PositionGetDouble(POSITION_SL);
 
-    // In inverse-PnL mode, keep the SL locked at the entry-time tier distance unless run-up/manual/fixed trailing is active.
+    // In inverse-PnL mode, keep the SL locked at the entry-time tier distance unless run-up or fixed trailing is active.
     if(inverseMode && existingSL > 0.0)
     {
-        // If the user explicitly enabled manual trailing, do not fight it.
-        if(ManualTrailingActivated)
-            return;
-
         if(AllowManualStopAdjustments && slPrice > 0.0 && MathAbs(existingSL - slPrice) > _Point * 5.0)
         {
             if(g_inverse_sl_locks != NULL)
@@ -1512,7 +1393,6 @@ int OnInit()
     // Initialize UI elements (before gRPC to ensure they work regardless)
     InitStatusIndicator();
     InitStatusOverlay();
-    InitATRTrailing();
 
     // Initialize or reuse gRPC connection (NON-BLOCKING)
     { string __log="Attempting gRPC connection (EA will work without bridge)..."; Print(__log); ULogInfoPrint(__log); }
@@ -1788,9 +1668,8 @@ void ProcessTradeFromJson(const string& trade_json)
 
     { string __log=""; StringConcatenate(__log, "ACHM_LOG: [ProcessTradeFromJson] Parsed NT base_id: '", baseIdFromJson, "', Action: '", incomingNtAction, "', Qty: ", incomingNtQuantity); Print(__log); ULogInfoPrint(__log); }
 
-    // Special-case: handle elastic/trailing events delivered over the trade stream (Option B)
+    // Special-case: handle trailing events delivered over the trade stream (Option B)
     // Expecting JSON fields:
-    //  - elastic_ping: base_id, elastic_current_profit/current_profit, elastic_profit_level/profit_level
     //  - trailing_stop_update: base_id, new_stop_price[, current_price]
     string evtType = GetJSONStringValue(trade_json, "\"event_type\"");
     // Log event_type presence and a short JSON snippet for diagnostics
@@ -1801,18 +1680,7 @@ void ProcessTradeFromJson(const string& trade_json)
     }
     if (evtType == "elastic_ping")
     {
-        string evtBaseId = GetJSONStringValue(trade_json, "\"base_id\"");
-        if(StringLen(evtBaseId) == 0) evtBaseId = baseIdFromJson; // fallback to previously parsed base id
-        // Support both new elastic_* field names and legacy names
-        double evtProfit = GetJSONDouble(trade_json, "elastic_current_profit");
-        if(evtProfit == 0.0)
-            evtProfit = GetJSONDouble(trade_json, "current_profit");
-        int evtProfitLevel = GetJSONIntValue(trade_json, "elastic_profit_level", INT_MIN);
-        if(evtProfitLevel == INT_MIN)
-            evtProfitLevel = GetJSONIntValue(trade_json, "profit_level", 0);
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Received elastic ping for BaseID: ", evtBaseId, ", Profit: $", DoubleToString(evtProfit, 2), ", Level: ", (string)IntegerToString(evtProfitLevel)); Print(__log); ULogInfoPrint(__log); }
-        ProcessElasticHedgeUpdate(evtBaseId, evtProfit, evtProfitLevel);
-        // Do not process further as a regular trade
+        { string __log=""; StringConcatenate(__log, "ELASTIC_PING: Ignoring elastic ping event (self-elastic closures removed). base_id=", baseIdFromJson); Print(__log); ULogInfoPrint(__log); }
         return;
     }
     else if (evtType == "trailing_stop_update")
@@ -2000,7 +1868,6 @@ void RemoveOpenPositionTracking(ulong ticket)
             ArrayResize(g_open_mt5_actions, last);
             ArrayResize(g_open_mt5_original_nt_actions, last);
             ArrayResize(g_open_mt5_original_nt_quantities, last);
-            ClearAtrTrailingState(ticket);
             RemoveRunUpState(ticket);
             break;
         }
@@ -2166,8 +2033,6 @@ void ProcessCloseHedgeAction(const string& baseId, const string& trade_json, ulo
         }
 
         ulong remainingTickets[]; datetime remainingTimes[]; double remainingVolumes[];
-        if(CollectTicketsForBaseId(canonicalBaseId, remainingTickets, remainingTimes, remainingVolumes) == 0)
-            RemoveElasticPosition(canonicalBaseId);
         return;
     }
 
@@ -2204,8 +2069,6 @@ void ProcessCloseHedgeAction(const string& baseId, const string& trade_json, ulo
     }
 
     ulong remainingTickets[]; datetime remainingTimes[]; double remainingVolumes[];
-    if(CollectTicketsForBaseId(canonicalBaseId, remainingTickets, remainingTimes, remainingVolumes) == 0)
-        RemoveElasticPosition(canonicalBaseId);
 }
 
 void ProcessTPSLOrder(const string& baseId, const string& orderType, int measurementPips, const string& trade_json)
@@ -2368,19 +2231,6 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
         {
             double slPrice = 0.0;
             double tpPrice = 0.0;
-            if(LotSizingMode == Self_Elastic_Closures && SelfElastic_Enabled && Planner_StopDistancePoints > 0)
-            {
-                double quote = (orderType == ORDER_TYPE_BUY)
-                               ? SymbolInfoDouble(_Symbol, SYMBOL_ASK)
-                               : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                double slOffset = Planner_StopDistancePoints * _Point;
-                if(orderType == ORDER_TYPE_BUY)
-                    slPrice = NormalizeDouble(quote - slOffset, _Digits);
-                else
-                    slPrice = NormalizeDouble(quote + slOffset, _Digits);
-                if(slPrice < 0) slPrice = 0.0;
-            }
-
             if(orderType == ORDER_TYPE_BUY) {
                 success = trade.Buy(sendLot, _Symbol, 0, slPrice, tpPrice, comment);
             } else {
@@ -2498,17 +2348,6 @@ void ProcessRegularTrade(const string& action, double quantity, double price, co
             // Submit success result for each trade
             SubmitTradeResult("success", positionTicket, lotSize, false, baseId);
             successfulTrades++;
-
-            // Handle ATR trailing for this position if enabled
-            if(UseATRTrailing) {
-                double currentPrice = (orderType == ORDER_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_ASK) : SymbolInfoDouble(_Symbol, SYMBOL_BID);
-                string positionType = (orderType == ORDER_TYPE_BUY) ? "BUY" : "SELL";
-                HandleATRTrailingForPosition(positionTicket, price, currentPrice, positionType, lotSize);
-            }
-
-            // Attach self-elastic planner to the freshly opened position
-            if(positionTicket > 0)
-                AddElasticPosition(baseId, positionTicket, sendLot);
 
         } else {
             int error = (lastError != 0 ? lastError : GetLastError());
@@ -2744,10 +2583,6 @@ double CalculateLotSize(double ntQuantity, const string& baseId, const string& t
             lotSize = DefaultLot;
             break;
 
-        case Self_Elastic_Closures:
-            lotSize = Planner_EntryLots;
-            break;
-
         case LOTS_INVERSE_PNL:
             lotSize = CalculateInversePnLLot(orderType);
             break;
@@ -2916,7 +2751,6 @@ void OnDeinit(const int reason)
     // Step 5: Clean up UI elements (always safe)
     RemoveStatusIndicator();
     RemoveStatusOverlay();
-    RemoveAllElasticPositions();
     ObjectDelete(0, CandleCountdownObjName);
     Comment("");
     Print("OnDeinit: UI elements cleaned up");
@@ -2940,10 +2774,7 @@ void OnDeinit(const int reason)
         Print("OnDeinit: Position tracking map cleaned up");
     }
 
-    // Step 7: Clean up ATR trailing resources
-    CleanupATRTrailing();
-
-    // Step 8: Final brief pause to ensure cleanup completion
+    // Step 7: Final brief pause to ensure cleanup completion
     Sleep(25);  // Reduced from 200ms for faster shutdown
 
     Print("OnDeinit: EA shutdown complete - all resources cleaned up");
@@ -3029,19 +2860,11 @@ void OnTick()
                     }
                     else
                     {
-                        HandleATRTrailingForPosition(ticket, entryPrice, currentPrice, positionType == POSITION_TYPE_BUY ? "BUY" : "SELL", volume);
                         HandleTier1DollarTrailingForPosition(ticket, positionType, entryPrice, currentPrice, volume);
                         HandleTierFixedTrailingForPosition(ticket, positionType, entryPrice, currentPrice);
 
-                        // Self elastic scaling and negative trailing
-                        ServiceSelfElasticPosition(ticket,
-                                                   positionType,
-                                                   entryPrice,
-                                                   bidPrice,
-                                                   askPrice);
-
-                        // Simple stop-loss enforcement when planner is disabled
-                        if(!SelfElastic_Enabled && SimpleStopLoss_Points > 0.0)
+                        // Simple stop-loss enforcement when enabled
+                        if(SimpleStopLoss_Points > 0.0)
                             ApplySimpleStopLossIfNeeded(ticket, positionType, entryPrice);
                     }
                 }
@@ -3052,8 +2875,6 @@ void OnTick()
     CleanupRunUpStates();
     CleanupTierFixedTrailStates();
     CleanupTier1DollarTrailStates();
-
-    CleanupStaleNegativeTrails();
 
     // Update status overlay only when necessary - throttle with UI updates
     if(tick_counter == 0) {
@@ -3287,8 +3108,7 @@ void OnTradeTransaction(const MqlTradeTransaction& trans,
     // Dedup: if a specific hedge_close was already sent or is pending for this baseId/ticket, skip generic notification
     string dedupKey = baseId + ":" + StringFormat("%I64u", position_ticket);
     if(HasNotificationBeenSent(dedupKey, "hedge_close") ||
-       HasNotificationBeenSent(dedupKey, "hedge_close_pending") ||
-       HasNotificationBeenSent(dedupKey, "elastic_partial_close"))
+       HasNotificationBeenSent(dedupKey, "hedge_close_pending"))
     {
         { string __log; StringConcatenate(__log, "CLOSURE_DETECTION: Skipping generic MT5_position_closed for ", dedupKey,
               " because a specific hedge_close was already sent."); Print(__log); ULogInfoPrint(__log); }
@@ -3662,403 +3482,8 @@ void ResetTradeGroups()
 }
 
 //+------------------------------------------------------------------+
-//| Self-elastic planner helpers                                     |
+//| Stop-loss helpers                                               |
 //+------------------------------------------------------------------+
-double SelfElasticPointValuePerLot()
-{
-    double tickValue = 0.0;
-    double tickSize  = 0.0;
-    double pointSize = 0.0;
-
-    if(!SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE, tickValue)) return 0.0;
-    if(!SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE, tickSize))   return 0.0;
-    if(!SymbolInfoDouble(_Symbol, SYMBOL_POINT, pointSize))           return 0.0;
-
-    if(tickValue <= 0.0 || tickSize <= 0.0 || pointSize <= 0.0)
-        return 0.0;
-
-    return tickValue * (pointSize / tickSize);
-}
-
-bool BuildSelfElasticPlan(double entryLots,
-                          double stopPoints,
-                          double targetLoss,
-                          int maxClosures,
-                          double minLot,
-                          double lotStep,
-                          double pointValue,
-                          double anchorPrice,
-                          int &closureCount,
-                          double &estimatedLoss,
-                          string &reason,
-                          bool &targetAchieved,
-                          double &planDistances[],
-                          double &planLots[],
-                          string &summaryOut)
-{
-    closureCount = 0;
-    estimatedLoss = 0.0;
-    targetAchieved = false;
-    reason = "";
-    summaryOut = "";
-    ArrayResize(planDistances, 0);
-    ArrayResize(planLots, 0);
-
-    if(entryLots <= 0.0) {
-        reason = "Entry lots must be positive";
-        return false;
-    }
-    if(stopPoints <= 0.0) {
-        reason = "Stop distance must be positive";
-        return false;
-    }
-    if(targetLoss <= 0.0) {
-        reason = "Target loss must be positive";
-        return false;
-    }
-    if(pointValue <= 0.0) {
-        reason = "Unable to derive point value for symbol";
-        return false;
-    }
-
-    if(lotStep <= 0.0)
-        lotStep = 0.01;
-    double effectiveMinLot = (minLot > 0.0) ? minLot : lotStep;
-    if(effectiveMinLot <= 0.0)
-        effectiveMinLot = 0.01;
-
-    double baseLoss = entryLots * pointValue * stopPoints;
-
-    AppendLine(summaryOut, "===== Elastic Partial Closure Planner =====");
-    AppendLine(summaryOut, StringFormat("Symbol: %s", _Symbol));
-    AppendLine(summaryOut, StringFormat("Entry lots: %.4f", entryLots));
-    AppendLine(summaryOut, StringFormat("Stop distance: %.1f pts (~%.5f price)", stopPoints, stopPoints * _Point));
-    AppendLine(summaryOut, StringFormat("Target max loss: %.2f", targetLoss));
-    AppendLine(summaryOut, PLANNER_PROJECTED_LOSS_PLACEHOLDER);
-    AppendLine(summaryOut, StringFormat("Base loss w/o scaling: %.2f", baseLoss));
-
-    if(baseLoss <= targetLoss + 1e-6) {
-        AppendLine(summaryOut, "No partial closures required—base loss already <= target.");
-        AppendLine(summaryOut, StringFormat("Projected loss: %.2f", baseLoss));
-        estimatedLoss = baseLoss;
-        targetAchieved = true;
-        reason = "Base loss already within target";
-        UpdateProjectedLossLine(summaryOut, estimatedLoss);
-        OverlaySetPlannerStatistics(summaryOut, estimatedLoss, targetAchieved);
-        return true;
-    }
-
-    int closureLimit = MathMax(1, maxClosures);
-    bool advancedMode = (Planner_EnableInitialTrim || Planner_EnableAdaptiveCompression);
-
-    const double tolerance = 1e-6;
-
-    if(!advancedMode)
-    {
-        int feasible = (int)MathFloor((entryLots + 1e-8) / effectiveMinLot);
-        if(feasible < 1)
-            feasible = 1;
-        if(closureLimit > feasible)
-            closureLimit = feasible;
-
-        int bestClosureCount = -1;
-        double bestLossEstimate = baseLoss;
-
-        for(int n = closureLimit; n >= 1; n--)
-        {
-            double candidateLoss = baseLoss * (n + 1.0) / (2.0 * n);
-            if(candidateLoss <= targetLoss + tolerance)
-            {
-                bestClosureCount = n;
-                bestLossEstimate = candidateLoss;
-                targetAchieved = true;
-                break;
-            }
-        }
-
-        if(bestClosureCount < 0)
-        {
-            bestClosureCount = closureLimit;
-            bestLossEstimate = baseLoss * (bestClosureCount + 1.0) / (2.0 * bestClosureCount);
-            targetAchieved = (bestLossEstimate <= targetLoss + tolerance);
-            reason = StringFormat("Need more than %d closures to reach %.2f.", closureLimit, targetLoss);
-        }
-
-        closureCount = bestClosureCount;
-        estimatedLoss = bestLossEstimate;
-
-        AppendLine(summaryOut, StringFormat("Closures needed: %d", closureCount));
-
-        if(closureCount <= 0)
-        {
-            AppendLine(summaryOut, StringFormat("Projected total loss after final close: %.2f", estimatedLoss));
-            UpdateProjectedLossLine(summaryOut, estimatedLoss);
-            OverlaySetPlannerStatistics(summaryOut, estimatedLoss, targetAchieved);
-            return true;
-        }
-
-        double pointIncrement = stopPoints / closureCount;
-        double lotsPerClosure = entryLots / MathMax(1, closureCount);
-        double normalizedLots = NormalizeVolumeToStepValue(lotsPerClosure, lotStep);
-        if(effectiveMinLot > 0.0 && normalizedLots < effectiveMinLot)
-            normalizedLots = effectiveMinLot;
-
-        AppendLine(summaryOut, StringFormat("Lots per closure: raw %.4f | step-adjusted %.4f",
-                                            lotsPerClosure,
-                                            normalizedLots));
-        AppendLine(summaryOut, StringFormat("Distance between closures: %.1f pts (~%.5f price)",
-                                            pointIncrement,
-                                            pointIncrement * _Point));
-
-        ArrayResize(planDistances, closureCount);
-        ArrayResize(planLots, closureCount);
-        double remaining = entryLots;
-
-        for(int i = 0; i < closureCount; ++i)
-        {
-            int levelsLeft = closureCount - i;
-            double idealShare = remaining / levelsLeft;
-            double chunk = (i == closureCount - 1) ? remaining : NormalizeVolumeToStepValue(idealShare, lotStep);
-
-            if(i != closureCount - 1 && chunk < effectiveMinLot)
-                chunk = effectiveMinLot;
-
-            double maxAllow = remaining - effectiveMinLot * (levelsLeft - 1);
-            if(maxAllow < effectiveMinLot)
-                maxAllow = effectiveMinLot;
-            if(chunk > maxAllow)
-                chunk = maxAllow;
-            if(chunk > remaining)
-                chunk = remaining;
-
-            planDistances[i] = pointIncrement * (i + 1);
-            planLots[i] = NormalizeDouble(chunk, 8);
-            remaining -= chunk;
-        }
-
-        if(MathAbs(remaining) > 1e-8 && closureCount > 0)
-        {
-            planLots[closureCount - 1] = NormalizeDouble(planLots[closureCount - 1] + remaining, 8);
-            remaining = 0.0;
-        }
-
-        AppendLine(summaryOut, StringFormat("Projected total loss after final close: %.2f", estimatedLoss));
-        string preview = BuildLevelPreview(closureCount, pointIncrement);
-        AppendLine(summaryOut, StringFormat("Closure levels preview: %s", preview));
-        UpdateProjectedLossLine(summaryOut, estimatedLoss);
-        OverlaySetPlannerStatistics(summaryOut, estimatedLoss, targetAchieved);
-        return true;
-    }
-
-    int bestAdvancedClosures = -1;
-    double bestAdvancedLoss = baseLoss;
-    double bestFirstDistance = 0.0;
-    double bestFirstLots = 0.0;
-    double bestRestSegment = 0.0;
-    double bestRestLots = 0.0;
-    double bestFinalDistance = stopPoints;
-    double bestDistances[];
-    double bestLots[];
-    bool planFound = false;
-
-    int fallbackClosures = -1;
-    double fallbackLoss = DBL_MAX;
-    double fallbackFirstDistance = 0.0;
-    double fallbackFirstLots = 0.0;
-    double fallbackRestSegment = 0.0;
-    double fallbackRestLots = 0.0;
-    double fallbackFinalDistance = stopPoints;
-    double fallbackDistances[];
-    double fallbackLots[];
-
-    for(int n = maxClosures; n >= 1; n--)
-    {
-        double planLoss = 0.0;
-        double firstDistanceOut = 0.0;
-        double firstLotsOut = 0.0;
-        double restSegmentOut = 0.0;
-        double restLotsOut = 0.0;
-        double finalDistanceOut = 0.0;
-        double simDistances[];
-        double simLots[];
-
-        if(!SimulateAdvancedPlan(entryLots,
-                                 stopPoints,
-                                 pointValue,
-                                 effectiveMinLot,
-                                 n,
-                                 Planner_EnableInitialTrim,
-                                 Planner_FirstTrimDistancePts,
-                                 Planner_FirstTrimRatio,
-                                 Planner_EnableAdaptiveCompression,
-                                 Planner_CompressionFactor,
-                                 planLoss,
-                                 firstDistanceOut,
-                                 firstLotsOut,
-                                 restSegmentOut,
-                                 restLotsOut,
-                                 finalDistanceOut,
-                                 simDistances,
-                                 simLots))
-        {
-            continue;
-        }
-
-        if(planLoss < fallbackLoss - 1e-6)
-        {
-            fallbackLoss = planLoss;
-            fallbackClosures = n;
-            fallbackFirstDistance = firstDistanceOut;
-            fallbackFirstLots = firstLotsOut;
-            fallbackRestSegment = restSegmentOut;
-            fallbackRestLots = restLotsOut;
-            fallbackFinalDistance = finalDistanceOut;
-            ArrayResize(fallbackDistances, ArraySize(simDistances));
-            for(int i = 0; i < ArraySize(simDistances); ++i)
-                fallbackDistances[i] = simDistances[i];
-            ArrayResize(fallbackLots, ArraySize(simLots));
-            for(int i = 0; i < ArraySize(simLots); ++i)
-                fallbackLots[i] = simLots[i];
-        }
-
-        if(planLoss <= targetLoss + tolerance)
-        {
-            bestAdvancedClosures = n;
-            bestAdvancedLoss = planLoss;
-            bestFirstDistance = firstDistanceOut;
-            bestFirstLots = firstLotsOut;
-            bestRestSegment = restSegmentOut;
-            bestRestLots = restLotsOut;
-            bestFinalDistance = finalDistanceOut;
-            ArrayResize(bestDistances, ArraySize(simDistances));
-            for(int i = 0; i < ArraySize(simDistances); ++i)
-                bestDistances[i] = simDistances[i];
-            ArrayResize(bestLots, ArraySize(simLots));
-            for(int i = 0; i < ArraySize(simLots); ++i)
-                bestLots[i] = simLots[i];
-            planFound = true;
-            break;
-        }
-    }
-
-    if(!planFound)
-    {
-        if(fallbackClosures < 0)
-        {
-            reason = "Failed to build fallback advanced plan.";
-            return false;
-        }
-
-        bestAdvancedClosures = fallbackClosures;
-        bestAdvancedLoss = fallbackLoss;
-        bestFirstDistance = fallbackFirstDistance;
-        bestFirstLots = fallbackFirstLots;
-        bestRestSegment = fallbackRestSegment;
-        bestRestLots = fallbackRestLots;
-        bestFinalDistance = fallbackFinalDistance;
-        ArrayResize(bestDistances, ArraySize(fallbackDistances));
-        for(int i = 0; i < ArraySize(fallbackDistances); ++i)
-            bestDistances[i] = fallbackDistances[i];
-        ArrayResize(bestLots, ArraySize(fallbackLots));
-        for(int i = 0; i < ArraySize(fallbackLots); ++i)
-            bestLots[i] = fallbackLots[i];
-        reason = StringFormat("Advanced plan could not reach %.2f within %d closure slots.", targetLoss, maxClosures);
-    }
-    else
-    {
-        reason = "";
-    }
-
-    int executedClosures = ArraySize(bestDistances);
-    if(executedClosures <= 0)
-        executedClosures = bestAdvancedClosures;
-
-    closureCount = executedClosures;
-    estimatedLoss = bestAdvancedLoss;
-    targetAchieved = planFound && (bestAdvancedLoss <= targetLoss + tolerance);
-
-    ArrayResize(planDistances, executedClosures);
-    ArrayResize(planLots, executedClosures);
-    double remaining = entryLots;
-    for(int i = 0; i < executedClosures; ++i)
-    {
-        double distValue = (i < ArraySize(bestDistances)) ? bestDistances[i] : (bestFinalDistance / executedClosures) * (i + 1);
-        double rawLot = (i < ArraySize(bestLots)) ? bestLots[i] : remaining;
-        double chunk = NormalizeVolumeToStepValue(rawLot, lotStep);
-
-        if(i != executedClosures - 1 && chunk < effectiveMinLot)
-            chunk = effectiveMinLot;
-        if(chunk > remaining)
-            chunk = remaining;
-        if(i == executedClosures - 1)
-            chunk = remaining;
-
-        planDistances[i] = distValue;
-        planLots[i] = NormalizeDouble(chunk, 8);
-        remaining -= chunk;
-    }
-
-    if(MathAbs(remaining) > 1e-8 && executedClosures > 0)
-    {
-        planLots[executedClosures - 1] = NormalizeDouble(planLots[executedClosures - 1] + remaining, 8);
-        remaining = 0.0;
-    }
-
-    if(executedClosures == bestAdvancedClosures)
-        AppendLine(summaryOut, StringFormat("Advanced closures needed: %d", executedClosures));
-    else
-        AppendLine(summaryOut, StringFormat("Advanced closures executed: %d (slots requested: %d)", executedClosures, bestAdvancedClosures));
-
-    if(Planner_EnableInitialTrim && bestFirstDistance > 0.0 && bestFirstLots > 0.0)
-    {
-        double normalizedFirstLots = NormalizeVolumeToStepValue(bestFirstLots, lotStep);
-        AppendLine(summaryOut, StringFormat("Kick-off trim: %.1f pts (~%.5f price) closing %.4f lots (step-adjusted %.4f)",
-                                            bestFirstDistance,
-                                            bestFirstDistance * _Point,
-                                            bestFirstLots,
-                                            normalizedFirstLots));
-    }
-
-    int restCount = executedClosures - (Planner_EnableInitialTrim ? 1 : 0);
-    if(restCount < 0)
-        restCount = 0;
-
-    if(restCount > 0 && bestRestSegment > 0.0)
-    {
-        double normalizedRestLots = NormalizeVolumeToStepValue(bestRestLots, lotStep);
-        if(effectiveMinLot > 0.0 && normalizedRestLots < effectiveMinLot)
-            normalizedRestLots = effectiveMinLot;
-        AppendLine(summaryOut, StringFormat("Remaining %d tiers spaced %.1f pts each (closing %.4f lots | broker-adjusted %.4f).",
-                                            restCount,
-                                            bestRestSegment,
-                                            bestRestLots,
-                                            normalizedRestLots));
-    }
-
-    if(Planner_EnableAdaptiveCompression)
-    {
-        double factor = ClampDouble(Planner_CompressionFactor, 0.05, 1.0);
-        AppendLine(summaryOut, StringFormat("Adaptive spacing compression factor %.2f → last closure triggers at %.1f pts (stop %.1f).",
-                                            factor,
-                                            bestFinalDistance,
-                                            stopPoints));
-    }
-    else
-    {
-        AppendLine(summaryOut, StringFormat("Last closure triggers at %.1f pts (stop %.1f).",
-                                            bestFinalDistance,
-                                            stopPoints));
-    }
-
-    AppendLine(summaryOut, StringFormat("Projected total loss after advanced plan: %.2f", estimatedLoss));
-    string finalPreview = BuildAdvancedPreview(planDistances, planLots);
-    AppendLine(summaryOut, StringFormat("Closure levels preview: %s", finalPreview));
-    UpdateProjectedLossLine(summaryOut, estimatedLoss);
-    OverlaySetPlannerStatistics(summaryOut, estimatedLoss, targetAchieved);
-
-    return true;
-}
-
 double GetStopLossDistance()
 {
     double brokerMinPts = GetBrokerMinimumStopPoints();
@@ -4079,274 +3504,24 @@ double GetStopLossDistance()
         return effectivePts * _Point;
     }
 
-    // Non inverse-PnL path: honor SimpleStopLoss when planner is off; otherwise fallback to planner/ATR.
-    if(!SelfElastic_Enabled && SimpleStopLoss_Points > 0.0)
+    if(SimpleStopLoss_Points > 0.0)
     {
         double pts = MathMax(SimpleStopLoss_Points, brokerMinPts);
         return pts * _Point;
     }
 
-    if(Planner_StopDistancePoints > 0)
-        return Planner_StopDistancePoints * _Point;
-
-    double atr = GetAtrDistance();
-    if(atr > 0)
-        return atr;
-
     double effectiveMin = brokerMinPts > 0 ? brokerMinPts * _Point : 100 * _Point;
     return effectiveMin;
 }
 
-void AppendLine(string &dest, const string text)
+double GetBrokerMinimumStopPoints()
 {
-    if(dest == "")
-        dest = text;
-    else
-        dest = dest + "\n" + text;
-}
-
-void UpdateProjectedLossLine(string &summaryText, double projectedLoss)
-{
-    string replacement = (projectedLoss > 0.0)
-        ? StringFormat("Projected total loss: %.2f", projectedLoss)
-        : "Projected total loss: n/a";
-    StringReplace(summaryText, PLANNER_PROJECTED_LOSS_PLACEHOLDER, replacement);
-}
-
-double NormalizeVolumeToStepValue(double volume, double step)
-{
-    if(step <= 0.0)
-        return NormalizeDouble(volume, 8);
-    double rounded = MathRound(volume / step) * step;
-    return NormalizeDouble(rounded, 8);
-}
-
-double ClampDouble(double value, double minValue, double maxValue)
-{
-    if(value < minValue)
-        return minValue;
-    if(value > maxValue)
-        return maxValue;
-    return value;
-}
-
-string BuildLevelPreview(int closures, double pointIncrement)
-{
-    if(closures <= 0 || pointIncrement <= 0.0)
-        return "(not applicable)";
-
-    int previewCount = MathMin(closures, Planner_LevelPreviewCount);
-    if(previewCount <= 0)
-        previewCount = 1;
-
-    string preview = "";
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    for(int i = 1; i <= previewCount; i++)
-    {
-        double distPts = pointIncrement * i;
-        double distPrice = distPts * _Point;
-        string chunk = StringFormat("%d: %.1f pts (~%.*f)", i, distPts, digits, distPrice);
-        if(preview == "")
-            preview = chunk;
-        else
-            preview = preview + ", " + chunk;
-    }
-
-    if(previewCount < closures)
-        preview = preview + StringFormat(", … %d total levels", closures);
-
-    return preview;
-}
-
-string BuildAdvancedPreview(double &distances[], double &lots[])
-{
-    int total = ArraySize(distances);
-    if(total <= 0)
-        return "(not applicable)";
-
-    int previewCount = MathMin(total, Planner_LevelPreviewCount);
-    if(previewCount <= 0)
-        previewCount = 1;
-
-    string preview = "";
-    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
-    for(int i = 0; i < previewCount; i++)
-    {
-        double distPts = distances[i];
-        double priceLevel = distPts * _Point;
-        double lotChunk = (i < ArraySize(lots)) ? lots[i] : 0.0;
-        string chunk = StringFormat("%d: %.1f pts (~%.*f) close %.4f lots",
-                                    i + 1,
-                                    distPts,
-                                    digits,
-                                    priceLevel,
-                                    lotChunk);
-        if(preview == "")
-            preview = chunk;
-        else
-            preview = preview + ", " + chunk;
-    }
-
-    if(previewCount < total)
-        preview = preview + StringFormat(", … %d total closures", total);
-
-    return preview;
-}
-
-bool SimulateAdvancedPlan(double entryLots,
-                          double stopPoints,
-                          double pointValue,
-                          double brokerMinLot,
-                          int totalClosures,
-                          bool enableInitialTrim,
-                          double firstTrimDistance,
-                          double firstTrimRatio,
-                          bool enableAdaptiveCompression,
-                          double compressionFactor,
-                          double &lossOut,
-                          double &firstDistanceOut,
-                          double &firstLotsOut,
-                          double &restSegmentDistanceOut,
-                          double &restLotsOut,
-                          double &finalDistanceOut,
-                          double &distances[],
-                          double &lots[])
-{
-    ArrayResize(distances, 0);
-    ArrayResize(lots, 0);
-
-    if(totalClosures <= 0 || entryLots <= 0.0)
-        return false;
-
-    lossOut = 0.0;
-    firstDistanceOut = 0.0;
-    firstLotsOut = 0.0;
-    restSegmentDistanceOut = 0.0;
-    restLotsOut = 0.0;
-    finalDistanceOut = 0.0;
-
-    double currentLots = entryLots;
-    double distanceCovered = 0.0;
-
-    int closureSlots = totalClosures;
-    ArrayResize(distances, closureSlots);
-    ArrayResize(lots, closureSlots);
-    int idx = 0;
-
-    int restClosures = totalClosures;
-
-    double minLot = (brokerMinLot > 0.0) ? brokerMinLot : 0.0;
-
-    if(enableInitialTrim)
-    {
-        if(restClosures <= 0)
-            return false;
-
-        double ratio = ClampDouble(firstTrimRatio, 0.0, 1.0);
-        if(ratio > 1.0 - 1e-6)
-            ratio = 1.0;
-        double firstDistance = firstTrimDistance;
-        if(firstDistance <= 0.0 || firstDistance >= stopPoints - 1e-6)
-            return false;
-
-        lossOut += currentLots * pointValue * firstDistance;
-        distanceCovered += firstDistance;
-        double closedLots = currentLots * ratio;
-        if(minLot > 0.0 && closedLots > 0.0 && closedLots < minLot)
-            closedLots = minLot;
-        if(closedLots > currentLots)
-            closedLots = currentLots;
-        currentLots -= closedLots;
-        firstDistanceOut = firstDistance;
-        firstLotsOut = closedLots;
-
-        distances[idx] = distanceCovered;
-        lots[idx] = closedLots;
-        idx++;
-        restClosures--;
-    }
-
-    if(restClosures < 0)
-        restClosures = 0;
-
-    double remainingDistance = stopPoints - distanceCovered;
-    if(remainingDistance < -1e-6)
-        return false;
-
-    double effectiveDistance = remainingDistance;
-    if(enableAdaptiveCompression)
-    {
-        double factor = ClampDouble(compressionFactor, 0.05, 1.0);
-        effectiveDistance = remainingDistance * factor;
-    }
-
-    if(restClosures > 0)
-    {
-        if(currentLots <= 0.0)
-        {
-            ArrayResize(distances, idx);
-            ArrayResize(lots, idx);
-            finalDistanceOut = distanceCovered;
-            return true;
-        }
-
-        if(minLot > 0.0)
-        {
-            int maxFeasible = (int)MathFloor((currentLots + 1e-8) / minLot);
-            if(maxFeasible <= 0)
-                return false;
-            if(restClosures > maxFeasible)
-                restClosures = maxFeasible;
-        }
-
-        if(restClosures <= 0)
-        {
-            ArrayResize(distances, idx);
-            ArrayResize(lots, idx);
-            finalDistanceOut = distanceCovered;
-            return true;
-        }
-
-        double segment = effectiveDistance / restClosures;
-        restSegmentDistanceOut = segment;
-        double totalRestLots = currentLots;
-        double uniformLots = totalRestLots / restClosures;
-        restLotsOut = (minLot > 0.0 ? MathMax(uniformLots, minLot) : uniformLots);
-
-        for(int i = 0; i < restClosures; i++)
-        {
-            lossOut += currentLots * pointValue * segment;
-            distanceCovered += segment;
-            double toClose = uniformLots;
-            if(minLot > 0.0)
-                toClose = MathMax(toClose, minLot);
-            int slotsLeft = restClosures - i;
-            if(minLot > 0.0 && slotsLeft > 1)
-            {
-                double minReserved = minLot * (slotsLeft - 1);
-                double maxAvailable = currentLots - minReserved;
-                if(toClose > maxAvailable)
-                    toClose = maxAvailable;
-            }
-            if(toClose <= 0.0 || toClose > currentLots)
-                toClose = currentLots;
-            if(i == restClosures - 1)
-                toClose = currentLots;
-            currentLots -= toClose;
-            distances[idx] = distanceCovered;
-            lots[idx] = toClose;
-            idx++;
-        }
-    }
-
-    ArrayResize(distances, idx);
-    ArrayResize(lots, idx);
-    finalDistanceOut = distanceCovered;
-
-    if(currentLots > 1e-6)
-        return false;
-
-    return true;
+    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+    int minLevel = MathMax(stopLevel, freezeLevel);
+    if(minLevel <= 0)
+        minLevel = 1;
+    return (double)minLevel;
 }
 
 //+------------------------------------------------------------------+
@@ -4528,25 +3703,6 @@ string GetJSONStringValue(string json_string, string key_with_quotes)
 // Duplicate JSON parsing functions removed - using originals at lines 315-331
 
 //+------------------------------------------------------------------+
-//| Elastic Hedging Position Management                             |
-//+------------------------------------------------------------------+
-// Note: ElasticHedgePosition struct and g_elasticPositions array already declared above
-
-//+------------------------------------------------------------------+
-//| Process elastic hedge update from NT                            |
-//+------------------------------------------------------------------+
-void ProcessElasticHedgeUpdate(string baseId, double currentProfit, int profitLevel)
-{
-    { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: External ping ignored for BaseID=", baseId,
-                      ", profit=", DoubleToString(currentProfit, 2),
-                      ", level=", profitLevel, " (self elastic closures active)");
-        Print(__log); ULogInfoPrint(__log); }
-    return;
-
-
-}
-
-//+------------------------------------------------------------------+
 //| Process trailing stop update from NT                            |
 //+------------------------------------------------------------------+
 void ProcessTrailingStopUpdate(string baseId, double newStopPrice, double currentPrice)
@@ -4610,480 +3766,6 @@ void ProcessTrailingStopUpdate(string baseId, double newStopPrice, double curren
 }
 
 //+------------------------------------------------------------------+
-//| Find elastic position by base ID                                |
-//+------------------------------------------------------------------+
-int FindElasticPosition(string baseId)
-{
-    for (int i = 0; i < ArraySize(g_elasticPositions); i++) {
-        if (g_elasticPositions[i].baseId == baseId) {
-            return i;
-        }
-    }
-    return -1;
-}
-
-int FindElasticPositionByTicket(ulong ticket)
-{
-    for(int i = 0; i < ArraySize(g_elasticPositions); ++i)
-    {
-        if(g_elasticPositions[i].positionTicket == ticket)
-            return i;
-    }
-    return -1;
-}
-
-void ActivateNegativeTrailing(int idx)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-
-    g_elasticPositions[idx].negativeTrailActive = true;
-    if(StringLen(g_elasticPositions[idx].trailObjectName) == 0)
-        g_elasticPositions[idx].trailObjectName = StringFormat("NEG_TRAIL_%s_%I64u",
-                                                               g_elasticPositions[idx].baseId,
-                                                               (long)g_elasticPositions[idx].positionTicket);
-}
-
-double GetBrokerMinimumStopPoints()
-{
-    int stopLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
-    int freezeLevel = (int)SymbolInfoInteger(_Symbol, SYMBOL_TRADE_FREEZE_LEVEL);
-    int minLevel = MathMax(stopLevel, freezeLevel);
-    if(minLevel <= 0)
-        minLevel = 1;
-    return (double)minLevel;
-}
-
-double GetEffectiveStopProfitPoints()
-{
-    double brokerMin = GetBrokerMinimumStopPoints();
-    double effective = Stop_profit;
-    if(effective <= 0.0)
-        effective = brokerMin;
-    return MathMax(effective, brokerMin);
-}
-
-void UpdateNegativeTrailingTarget(int idx, double triggerDistancePoints)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-    if(triggerDistancePoints <= 0.0)
-        return;
-
-    double entryPrice = g_elasticPositions[idx].entryPrice;
-    if(entryPrice <= 0.0)
-        return;
-
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)g_elasticPositions[idx].positionType;
-    double brokerMinPts = GetBrokerMinimumStopPoints();
-    double stopProfitPts = GetEffectiveStopProfitPoints();
-
-    double maxOffset = MathMax(brokerMinPts, triggerDistancePoints - brokerMinPts);
-    double appliedOffset = MathMin(stopProfitPts, maxOffset);
-    double targetDistancePts = triggerDistancePoints - appliedOffset;
-    if(targetDistancePts < brokerMinPts)
-        targetDistancePts = brokerMinPts;
-
-    double direction = (posType == POSITION_TYPE_BUY) ? -1.0 : 1.0;
-    double newLinePrice = entryPrice + direction * targetDistancePts * _Point;
-
-    double stopPrice = g_elasticPositions[idx].stopPrice;
-    if(stopPrice > 0.0)
-    {
-        if(posType == POSITION_TYPE_BUY)
-            newLinePrice = MathMax(newLinePrice, stopPrice);
-        else if(posType == POSITION_TYPE_SELL)
-            newLinePrice = MathMin(newLinePrice, stopPrice);
-    }
-
-    g_elasticPositions[idx].trailLinePrice = newLinePrice;
-    g_elasticPositions[idx].lastPartialTriggerPoints = triggerDistancePoints;
-    g_elasticPositions[idx].lastTrailUpdate = TimeCurrent();
-    g_elasticPositions[idx].trailDistancePoints = MathAbs(entryPrice - newLinePrice) / _Point;
-    double incrementSetting = Trailing_Increments_Points;
-    if(incrementSetting > 0.0 && triggerDistancePoints > 0.0)
-        g_elasticPositions[idx].nextIncrementTriggerPoints = triggerDistancePoints + incrementSetting;
-    else
-        g_elasticPositions[idx].nextIncrementTriggerPoints = 0.0;
-
-    { string __log=""; StringConcatenate(__log,
-        "ELASTIC_HEDGE: Updated negative trail after partial baseId=", g_elasticPositions[idx].baseId,
-        " triggerPts=", DoubleToString(triggerDistancePoints, 1),
-        " stopProfit=", DoubleToString(stopProfitPts, 1),
-        " line=", DoubleToString(newLinePrice, _Digits));
-      Print(__log); ULogInfoPrint(__log); }
-}
-
-void ApplyNegativeTrailIncrements(int idx, double adversePoints)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-    double increment = Trailing_Increments_Points;
-    if(increment <= 0.0)
-        return;
-    double entryPrice = g_elasticPositions[idx].entryPrice;
-    if(entryPrice <= 0.0)
-        return;
-    double baselineTrigger = g_elasticPositions[idx].lastPartialTriggerPoints;
-    if(baselineTrigger <= 0.0)
-        return;
-    double nextTrigger = g_elasticPositions[idx].nextIncrementTriggerPoints;
-    if(nextTrigger <= 0.0)
-        nextTrigger = baselineTrigger + increment;
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)g_elasticPositions[idx].positionType;
-    double direction = (posType == POSITION_TYPE_BUY) ? -1.0 : 1.0;
-    double stopPrice = g_elasticPositions[idx].stopPrice;
-    bool updated = false;
-
-    while(adversePoints + 1e-6 >= nextTrigger)
-    {
-        double nextDistance = g_elasticPositions[idx].trailDistancePoints + increment;
-        double newLinePrice = entryPrice + direction * nextDistance * _Point;
-        if(stopPrice > 0.0)
-        {
-            if(posType == POSITION_TYPE_BUY)
-                newLinePrice = MathMax(newLinePrice, stopPrice);
-            else
-                newLinePrice = MathMin(newLinePrice, stopPrice);
-        }
-        g_elasticPositions[idx].trailLinePrice = newLinePrice;
-        g_elasticPositions[idx].trailDistancePoints = MathAbs(entryPrice - newLinePrice) / _Point;
-        g_elasticPositions[idx].lastTrailUpdate = TimeCurrent();
-        updated = true;
-        nextTrigger += increment;
-    }
-
-    g_elasticPositions[idx].nextIncrementTriggerPoints = nextTrigger;
-
-    if(updated)
-    {
-        { string __log=""; StringConcatenate(__log,
-            "ELASTIC_HEDGE: Incrementally trailed baseId=", g_elasticPositions[idx].baseId,
-            " newLine=", DoubleToString(g_elasticPositions[idx].trailLinePrice, _Digits),
-            " nextTrigger=", DoubleToString(nextTrigger, 1));
-          Print(__log); ULogInfoPrint(__log); }
-    }
-}
-
-double GetAtrDistance()
-{
-    int effectivePeriod = MathMax(1, (int)ATRReactive_Period);
-    int handle = iATR(_Symbol, PERIOD_CURRENT, effectivePeriod);
-    double fallbackPoints = ATRReactive_MinStopPoints > 0.0 ? ATRReactive_MinStopPoints : Stop_profit;
-    double brokerMinPoints = GetBrokerMinimumStopPoints();
-    if(fallbackPoints <= 0.0)
-        fallbackPoints = brokerMinPoints;
-    fallbackPoints = MathMax(fallbackPoints, brokerMinPoints);
-    double fallback = fallbackPoints * _Point;
-    if(handle == INVALID_HANDLE)
-        return fallback;
-
-    double buffer[];
-    if(CopyBuffer(handle, 0, 0, 1, buffer) != 1)
-    {
-        IndicatorRelease(handle);
-        return fallback;
-    }
-    IndicatorRelease(handle);
-    double val = buffer[0];
-    if(val <= 0.0)
-        val = fallback;
-    return val;
-}
-
-void UpdateNegativeTrailingLine(int idx, double bid, double ask)
-{
-    if(!NegativeTrailing_Enabled)
-        return;
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-
-    double entryPrice = g_elasticPositions[idx].entryPrice;
-    if(entryPrice <= 0.0)
-        return;
-
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)g_elasticPositions[idx].positionType;
-    double adversePoints = 0.0;
-    if(posType == POSITION_TYPE_BUY)
-        adversePoints = MathMax(0.0, (entryPrice - bid) / _Point);
-    else if(posType == POSITION_TYPE_SELL)
-        adversePoints = MathMax(0.0, (ask - entryPrice) / _Point);
-
-    ApplyNegativeTrailIncrements(idx, adversePoints);
-
-    double linePrice = g_elasticPositions[idx].trailLinePrice;
-    if(linePrice <= 0.0)
-        return;
-
-    double priceEpsilon = SymbolInfoDouble(_Symbol, SYMBOL_POINT) * 0.25;
-    double touchBuffer = MathMax(priceEpsilon, NegativeTrailing_TouchBufferPoints * _Point);
-    double spreadBuffer = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) * _Point;
-    double sellTouchBuffer = MathMax(touchBuffer, spreadBuffer); // ensure shorts trigger at bid-line even with spread
-    double stopPrice = g_elasticPositions[idx].stopPrice;
-
-    if(stopPrice > 0.0)
-    {
-        if(posType == POSITION_TYPE_BUY)
-            linePrice = MathMax(linePrice, stopPrice);
-        else if(posType == POSITION_TYPE_SELL)
-            linePrice = MathMin(linePrice, stopPrice);
-        g_elasticPositions[idx].trailLinePrice = linePrice;
-        g_elasticPositions[idx].trailDistancePoints = MathAbs(entryPrice - linePrice) / _Point;
-    }
-
-    if(posType == POSITION_TYPE_BUY)
-    {
-        if(bid >= linePrice - touchBuffer)
-        {
-            { string __log=""; StringConcatenate(__log,
-                "ELASTIC_HEDGE: Negative trailing trigger (BUY) baseId=", g_elasticPositions[idx].baseId,
-                " bid=", DoubleToString(bid, _Digits),
-                " line=", DoubleToString(linePrice, _Digits));
-              Print(__log); ULogInfoPrint(__log); }
-            if(CloseElasticHedgeFully(g_elasticPositions[idx].baseId,
-                                      g_elasticPositions[idx].positionTicket,
-                                      "elastic_negative_trailing"))
-            {
-                return;
-            }
-        }
-    }
-    else if(posType == POSITION_TYPE_SELL)
-    {
-        if(ask <= linePrice + sellTouchBuffer)
-        {
-            { string __log=""; StringConcatenate(__log,
-                "ELASTIC_HEDGE: Negative trailing trigger (SELL) baseId=", g_elasticPositions[idx].baseId,
-                " ask=", DoubleToString(ask, _Digits),
-                " line=", DoubleToString(linePrice, _Digits));
-              Print(__log); ULogInfoPrint(__log); }
-            if(CloseElasticHedgeFully(g_elasticPositions[idx].baseId,
-                                      g_elasticPositions[idx].positionTicket,
-                                      "elastic_negative_trailing"))
-            {
-                return;
-            }
-        }
-    }
-
-    if(StringLen(g_elasticPositions[idx].trailObjectName) == 0)
-        g_elasticPositions[idx].trailObjectName = StringFormat("NEG_TRAIL_%s", g_elasticPositions[idx].baseId);
-
-    if(ObjectFind(0, g_elasticPositions[idx].trailObjectName) < 0)
-    {
-        ObjectCreate(0, g_elasticPositions[idx].trailObjectName, OBJ_HLINE, 0, 0, g_elasticPositions[idx].trailLinePrice);
-        ObjectSetInteger(0, g_elasticPositions[idx].trailObjectName, OBJPROP_COLOR, NegativeTrailing_LineColor);
-        ObjectSetInteger(0, g_elasticPositions[idx].trailObjectName, OBJPROP_SELECTABLE, false);
-    }
-
-    ObjectSetDouble(0, g_elasticPositions[idx].trailObjectName, OBJPROP_PRICE, g_elasticPositions[idx].trailLinePrice);
-}
-
-void ServiceSelfElasticPosition(ulong ticket,
-                                ENUM_POSITION_TYPE positionType,
-                                double entryPrice,
-                                double bid,
-                                double ask)
-{
-    int idx = FindElasticPositionByTicket(ticket);
-    if(idx < 0)
-        return;
-
-    g_elasticPositions[idx].positionType = (int)positionType;
-
-    double adversePoints = 0.0;
-    if(positionType == POSITION_TYPE_BUY)
-        adversePoints = MathMax(0.0, (entryPrice - bid) / _Point);
-    else if(positionType == POSITION_TYPE_SELL)
-        adversePoints = MathMax(0.0, (ask - entryPrice) / _Point);
-
-    while(g_elasticPositions[idx].nextLevelIndex < g_elasticPositions[idx].totalLevels)
-    {
-        int lvl = g_elasticPositions[idx].nextLevelIndex;
-        double triggerPoints = 0.0;
-        if(ArraySize(g_elasticPositions[idx].planDistances) > lvl)
-            triggerPoints = g_elasticPositions[idx].planDistances[lvl];
-
-        if(triggerPoints <= 0.0 || adversePoints + 1e-6 < triggerPoints)
-            break;
-
-        double lotsToClose = 0.0;
-        if(ArraySize(g_elasticPositions[idx].planLots) > lvl)
-            lotsToClose = g_elasticPositions[idx].planLots[lvl];
-        if(lotsToClose <= 0.0)
-        {
-            g_elasticPositions[idx].nextLevelIndex++;
-            continue;
-        }
-        if(!PositionSelectByTicket(ticket))
-            break;
-        double currentVolume = PositionGetDouble(POSITION_VOLUME);
-        if(lotsToClose > currentVolume)
-            lotsToClose = currentVolume;
-
-        if(!PartialClosePosition(ticket, lotsToClose, lvl + 1))
-            break;
-
-        RemovePlanLine(idx, lvl);
-        if(ArraySize(g_elasticPositions[idx].planLevelTriggered) > lvl)
-            g_elasticPositions[idx].planLevelTriggered[lvl] = true;
-
-        g_elasticPositions[idx].nextLevelIndex++;
-        g_elasticPositions[idx].remainingLots = PositionGetDouble(POSITION_VOLUME);
-        g_elasticPositions[idx].lastTrailUpdate = TimeCurrent();
-        if(g_elasticPositions[idx].remainingLots <= 1e-8)
-        {
-            RemoveElasticPositionByTicket(ticket);
-            return;
-        }
-
-        ActivateNegativeTrailing(idx);
-        UpdateNegativeTrailingTarget(idx, triggerPoints);
-    }
-
-    if(g_elasticPositions[idx].negativeTrailActive)
-        UpdateNegativeTrailingLine(idx, bid, ask);
-}
-
-void RemovePlanLine(int idx, int levelIndex)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions) || levelIndex < 0)
-        return;
-    if(levelIndex < ArraySize(g_elasticPositions[idx].planLineNames))
-    {
-        string lineName = g_elasticPositions[idx].planLineNames[levelIndex];
-        if(StringLen(lineName) > 0)
-            ObjectDelete(0, lineName);
-        g_elasticPositions[idx].planLineNames[levelIndex] = "";
-    }
-    if(levelIndex < ArraySize(g_elasticPositions[idx].planLabelNames))
-    {
-        string labelName = g_elasticPositions[idx].planLabelNames[levelIndex];
-        if(StringLen(labelName) > 0)
-            ObjectDelete(0, labelName);
-        g_elasticPositions[idx].planLabelNames[levelIndex] = "";
-    }
-    if(levelIndex < ArraySize(g_elasticPositions[idx].planLinePrices))
-        g_elasticPositions[idx].planLinePrices[levelIndex] = 0.0;
-}
-
-void ClearElasticPlanLines(int idx)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-    for(int i = 0; i < ArraySize(g_elasticPositions[idx].planLineNames); ++i)
-    {
-        string lineName = g_elasticPositions[idx].planLineNames[i];
-        if(StringLen(lineName) > 0)
-            ObjectDelete(0, lineName);
-        g_elasticPositions[idx].planLineNames[i] = "";
-    }
-    for(int i = 0; i < ArraySize(g_elasticPositions[idx].planLabelNames); ++i)
-    {
-        string labelName = g_elasticPositions[idx].planLabelNames[i];
-        if(StringLen(labelName) > 0)
-            ObjectDelete(0, labelName);
-        g_elasticPositions[idx].planLabelNames[i] = "";
-    }
-    for(int i = 0; i < ArraySize(g_elasticPositions[idx].planLinePrices); ++i)
-        g_elasticPositions[idx].planLinePrices[i] = 0.0;
-}
-
-void DrawElasticPlanLines(int idx)
-{
-    ClearElasticPlanLines(idx);
-    if(!Planner_DrawLevels)
-        return;
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-
-    int total = g_elasticPositions[idx].totalLevels;
-    if(total <= 0 || ArraySize(g_elasticPositions[idx].planDistances) <= 0)
-        return;
-
-    double anchorPrice = g_elasticPositions[idx].planAnchorPrice;
-    if(anchorPrice <= 0.0)
-        anchorPrice = g_elasticPositions[idx].entryPrice;
-    if(anchorPrice <= 0.0)
-        anchorPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-    if(anchorPrice <= 0.0)
-        return;
-
-    int tfSeconds = PeriodSeconds((ENUM_TIMEFRAMES)Period());
-    if(tfSeconds <= 0)
-        tfSeconds = 60;
-    datetime baseTime = TimeCurrent();
-    if(baseTime <= 0)
-        baseTime = iTime(_Symbol, PERIOD_CURRENT, 0);
-
-    ArrayResize(g_elasticPositions[idx].planLineNames, total);
-    ArrayResize(g_elasticPositions[idx].planLabelNames, total);
-    ArrayResize(g_elasticPositions[idx].planLinePrices, total);
-
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)g_elasticPositions[idx].positionType;
-
-    for(int i = 0; i < total; ++i)
-    {
-        double distPts = (i < ArraySize(g_elasticPositions[idx].planDistances)) ? g_elasticPositions[idx].planDistances[i] : 0.0;
-        if(distPts <= 0.0)
-            continue;
-
-        double levelPrice = (posType == POSITION_TYPE_BUY)
-            ? anchorPrice - distPts * _Point
-            : anchorPrice + distPts * _Point;
-
-        string lineName = StringFormat("ElasticPlanLine_%I64u_%d", (long)g_elasticPositions[idx].positionTicket, i);
-        if(!ObjectCreate(0, lineName, OBJ_HLINE, 0, 0, levelPrice))
-            continue;
-        ObjectSetInteger(0, lineName, OBJPROP_COLOR, clrDodgerBlue);
-        ObjectSetInteger(0, lineName, OBJPROP_STYLE, STYLE_DOT);
-        ObjectSetInteger(0, lineName, OBJPROP_WIDTH, 1);
-        ObjectSetInteger(0, lineName, OBJPROP_SELECTABLE, false);
-        g_elasticPositions[idx].planLineNames[i] = lineName;
-        g_elasticPositions[idx].planLinePrices[i] = levelPrice;
-
-        string labelName = StringFormat("ElasticPlanLabel_%I64u_%d", (long)g_elasticPositions[idx].positionTicket, i);
-        datetime labelTime = baseTime + (i + 1) * tfSeconds;
-        if(ObjectCreate(0, labelName, OBJ_TEXT, 0, labelTime, levelPrice))
-        {
-            string labelText = StringFormat("#%d: close %.4f", i + 1,
-                                            (i < ArraySize(g_elasticPositions[idx].planLots)) ? g_elasticPositions[idx].planLots[i] : 0.0);
-            ObjectSetString(0, labelName, OBJPROP_TEXT, labelText);
-            ObjectSetInteger(0, labelName, OBJPROP_COLOR, clrDodgerBlue);
-            ObjectSetInteger(0, labelName, OBJPROP_ANCHOR, ANCHOR_LEFT);
-            g_elasticPositions[idx].planLabelNames[i] = labelName;
-        }
-    }
-}
-
-void RemoveAllElasticPositions()
-{
-    for(int i = ArraySize(g_elasticPositions) - 1; i >= 0; --i)
-        RemoveElasticPositionAtIndex(i);
-}
-
-void CleanupStaleNegativeTrails()
-{
-    for(int i = ArraySize(g_elasticPositions) - 1; i >= 0; --i)
-    {
-        ulong ticket = g_elasticPositions[i].positionTicket;
-        bool stillActive = false;
-        if(ticket != 0 && PositionSelectByTicket(ticket))
-        {
-            if(PositionGetInteger(POSITION_MAGIC) == MagicNumber &&
-               PositionGetString(POSITION_SYMBOL) == _Symbol &&
-               PositionGetDouble(POSITION_VOLUME) > 1e-8)
-            {
-                stillActive = true;
-            }
-        }
-        if(!stillActive)
-            RemoveElasticPositionAtIndex(i);
-    }
-}
-
-
-//+------------------------------------------------------------------+
 //| Find position index by base ID                                  |
 //+------------------------------------------------------------------+
 int FindPositionByBaseId(string baseId)
@@ -5095,404 +3777,6 @@ int FindPositionByBaseId(string baseId)
         }
     }
     return -1;
-}
-
-//+------------------------------------------------------------------+
-//| Partial close position function                                 |
-//+------------------------------------------------------------------+
-// Include profitLevel so we can emit a distinct hedge_close per level
-bool PartialClosePosition(ulong ticket, double lotsToClose, int profitLevel)
-{
-    // Safety: only allow partial closes when Elastic mode is active
-    if(!SelfElastic_Enabled || LotSizingMode != Self_Elastic_Closures) {
-        { string __log="ELASTIC_HEDGE: Partial close skipped (Elastic disabled or LotSizingMode != Self_Elastic_Closures)"; Print(__log); ULogWarnPrint(__log); }
-        return false;
-    }
-
-    if (!PositionSelectByTicket(ticket)) {
-        Print("ELASTIC_HEDGE: Failed to select position ", ticket);
-        return false;
-    }
-
-    double currentLots = PositionGetDouble(POSITION_VOLUME);
-    bool closeEntirePosition = (lotsToClose >= currentLots - 1e-8);
-
-    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    if(lotStep <= 0.0) lotStep = 0.01;
-
-    if(!closeEntirePosition)
-    {
-        lotsToClose = NormalizeDouble(MathRound(lotsToClose / lotStep) * lotStep, 8);
-        if(lotsToClose < minLot)
-        {
-            Print("ELASTIC_HEDGE: Lots to close (", lotsToClose, ") is less than minimum (", minLot, ")");
-            return false;
-        }
-    }
-    else
-    {
-        lotsToClose = currentLots;
-    }
-
-    // Execute partial close using CTrade
-    trade.SetExpertMagicNumber(MagicNumber);
-    trade.SetDeviationInPoints(Slippage);
-
-    // Compute context for reasoned notification and dedup suppression
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-    string action = (posType == POSITION_TYPE_BUY) ? "SELL" : "BUY"; // counter action reflects what was closed
-
-    // Resolve base_id for this ticket (via map first, then open positions arrays)
-    string baseId = "";
-    if(g_map_position_id_to_base_id != NULL)
-    {
-        string _val = "";
-        if(g_map_position_id_to_base_id.TryGetValue((long)ticket, _val) && _val != "")
-            baseId = _val;
-    }
-    if(baseId == "")
-    {
-        for(int i = 0; i < ArraySize(g_open_mt5_pos_ids); i++)
-        {
-            if((ulong)g_open_mt5_pos_ids[i] == ticket)
-            {
-                baseId = g_open_mt5_base_ids[i];
-                break;
-            }
-        }
-    }
-
-    string tkStr = StringFormat("%I64u", ticket);
-    string pendingKey = baseId + ":" + tkStr;
-
-    // Pre-mark pending to suppress generic MT5_position_closed from OnTradeTransaction
-    if(baseId != "" && !HasNotificationBeenSent(pendingKey, "hedge_close_pending"))
-    {
-        MarkNotificationSent(pendingKey, "hedge_close_pending");
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Marked pending hedge_close for ", pendingKey, " before PositionClosePartial"); Print(__log); ULogInfoPrint(__log); }
-    }
-
-    // Use PositionClosePartial which is designed for partial closes
-    bool closeResult = false;
-    if(closeEntirePosition)
-        closeResult = trade.PositionClose(ticket);
-    else
-        closeResult = trade.PositionClosePartial(ticket, lotsToClose);
-
-    if (!closeResult) {
-        Print("ELASTIC_HEDGE: Partial/Full close failed. Error: ", GetLastError(), ", Result comment: ", trade.ResultComment());
-        // Clear pending mark on failure
-        if(baseId != "") RemoveNotificationMark(pendingKey, "hedge_close_pending");
-        return false;
-    }
-
-    // Check result
-    if (trade.ResultRetcode() != TRADE_RETCODE_DONE) {
-        Print("ELASTIC_HEDGE: Close failed. Retcode: ", trade.ResultRetcode(), ", Comment: ", trade.ResultComment());
-        if(baseId != "") RemoveNotificationMark(pendingKey, "hedge_close_pending");
-        return false;
-    }
-
-    Print("ELASTIC_HEDGE: Successfully closed ", lotsToClose, " lots of position ", ticket);
-
-    // CRITICAL FIX: Preserve the position mapping after partial close
-    // MT5 partial closes don't change the position ticket, but we need to ensure mapping persists
-    if(baseId != "" && g_map_position_id_to_base_id != NULL)
-    {
-        // Re-confirm mapping exists after partial close (defensive programming)
-        string existingMapping = "";
-        if(!g_map_position_id_to_base_id.TryGetValue((long)ticket, existingMapping) || existingMapping == "")
-        {
-            // Mapping was lost during partial close - restore it
-            if(g_map_position_id_to_base_id.Add((long)ticket, baseId))
-            {
-                { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Restored lost mapping after partial close - Ticket: ", ticket, " -> BaseID: ", baseId); Print(__log); ULogWarnPrint(__log); }
-            }
-            else
-            {
-
-                { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Failed to restore mapping after partial close for ticket: ", ticket); Print(__log); ULogErrorPrint(__log); }
-            }
-        }
-        else
-        {
-            { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Position mapping verified intact after partial close - Ticket: ", ticket, " -> BaseID: ", baseId); Print(__log); ULogInfoPrint(__log); }
-        }
-    }
-
-    // Send specific hedge_close for partial reduction so NT can skip auto-close while trailing+profit
-    if(baseId != "")
-    {
-        // Per-level notification (unique per ticket+level)
-        SendHedgeCloseNotification(baseId, _Symbol, "MT5_Account", lotsToClose, action, TimeCurrent(), "elastic_partial_close", profitLevel, ticket);
-        // Mark level-specific key so we don't emit duplicate partial notifications
-        MarkNotificationSent(baseId + ":" + tkStr + ":lvl" + IntegerToString(profitLevel), "elastic_partial_close");
-        // Also mark the ticket-level key so CLOSURE_DETECTION skips generic MT5_position_closed handling
-        MarkNotificationSent(baseId + ":" + tkStr, "elastic_partial_close");
-        // Clear pending
-        RemoveNotificationMark(pendingKey, "hedge_close_pending");
-    }
-
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Remove position from elastic tracking                            |
-//+------------------------------------------------------------------+
-void RemoveElasticPosition(string baseId)
-{
-    if(baseId == "")
-        return;
-
-    bool removed = false;
-    for(int i = ArraySize(g_elasticPositions) - 1; i >= 0; --i)
-    {
-        if(g_elasticPositions[i].baseId == baseId)
-        {
-            ulong ticket = g_elasticPositions[i].positionTicket;
-            RemoveElasticPositionAtIndex(i);
-            removed = true;
-            { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Removed elastic tracking for BaseID: ", baseId, " (Ticket: ", (long)ticket, ")"); Print(__log); ULogInfoPrint(__log); }
-        }
-    }
-
-    if(!removed)
-    {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: No tracked elastic position found for BaseID: ", baseId, " to remove."); Print(__log); ULogInfoPrint(__log); }
-    }
-}
-
-void RemoveElasticPositionByTicket(ulong ticket)
-{
-    if(ticket == 0)
-        return;
-
-    for(int i = 0; i < ArraySize(g_elasticPositions); ++i)
-    {
-        if(g_elasticPositions[i].positionTicket == ticket)
-        {
-            string baseId = g_elasticPositions[i].baseId;
-            RemoveElasticPositionAtIndex(i);
-            { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Removed elastic tracking for Ticket: ", (long)ticket, " (BaseID: ", baseId, ")"); Print(__log); ULogInfoPrint(__log); }
-            return;
-        }
-    }
-}
-
-void RemoveElasticPositionAtIndex(int idx)
-{
-    if(idx < 0 || idx >= ArraySize(g_elasticPositions))
-        return;
-
-    string objName = g_elasticPositions[idx].trailObjectName;
-    if(StringLen(objName) > 0)
-        ObjectDelete(0, objName);
-    ClearElasticPlanLines(idx);
-
-    int last = ArraySize(g_elasticPositions) - 1;
-    if(last < 0)
-        return;
-
-    if(idx != last)
-        g_elasticPositions[idx] = g_elasticPositions[last];
-
-    ArrayResize(g_elasticPositions, last);
-}
-
-//+------------------------------------------------------------------+
-//| Fully close hedge and send reasoned notification                 |
-//+------------------------------------------------------------------+
-bool CloseElasticHedgeFully(string baseId, ulong ticket, string reason)
-{
-    if (!PositionSelectByTicket(ticket)) {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: CloseElasticHedgeFully failed to select ticket ", ticket); Print(__log); ULogErrorPrint(__log); }
-        return false;
-    }
-
-    double vol = PositionGetDouble(POSITION_VOLUME);
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-    string action = (posType == POSITION_TYPE_BUY) ? "SELL" : "BUY";
-
-    // Pre-mark this (baseId,ticket) as having a pending specific hedge_close to suppress generic notification
-    string tkStr = StringFormat("%I64u", ticket);
-    string pendingKey = baseId + ":" + tkStr;
-    if(!HasNotificationBeenSent(pendingKey, "hedge_close_pending"))
-    {
-        MarkNotificationSent(pendingKey, "hedge_close_pending");
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Marked pending hedge_close for ", pendingKey, " before PositionClose"); Print(__log); ULogInfoPrint(__log); }
-    }
-
-    trade.SetExpertMagicNumber(MagicNumber);
-    trade.SetDeviationInPoints(Slippage);
-    if (!trade.PositionClose(ticket)) {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: PositionClose failed for ticket ", ticket, ". Error: ", GetLastError(), ", Comment: ", trade.ResultComment()); Print(__log); ULogErrorPrint(__log); }
-        // Clear pending mark on failure so future generic notifications aren't suppressed erroneously
-        RemoveNotificationMark(pendingKey, "hedge_close_pending");
-        return false;
-    }
-    if (trade.ResultRetcode() != TRADE_RETCODE_DONE) {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: PositionClose retcode != DONE for ticket ", ticket, ", Retcode: ", trade.ResultRetcode(), ", Comment: ", trade.ResultComment()); Print(__log); ULogErrorPrint(__log); }
-        // Clear pending mark on failure
-        RemoveNotificationMark(pendingKey, "hedge_close_pending");
-        return false;
-    }
-
-    // Send immediate notification with explicit reason to prevent NT auto-close
-    SendHedgeCloseNotification(baseId, _Symbol, "MT5_Account", vol, action, TimeCurrent(), reason, -1, ticket);
-    // Mark as notified to avoid duplicate from OnTradeTransaction handler
-    MarkNotificationSent(baseId + ":" + tkStr, "hedge_close");
-    // Clear the pending mark now that the specific notification has been sent
-    RemoveNotificationMark(pendingKey, "hedge_close_pending");
-
-    // Remove mapping and open-position tracking now that MT5 position is gone
-    if(g_map_position_id_to_base_id != NULL)
-        g_map_position_id_to_base_id.Remove((long)ticket);
-    RemoveOpenPositionTracking(ticket);
-
-    // Remove tracking to avoid further updates
-    RemoveElasticPositionByTicket(ticket);
-    return true;
-}
-
-//+------------------------------------------------------------------+
-//| Add position to elastic tracking                                |
-//+------------------------------------------------------------------+
-void AddElasticPosition(string baseId, ulong positionTicket, double lots)
-{
-    if (!SelfElastic_Enabled)
-        return;
-
-    if(LotSizingMode != Self_Elastic_Closures)
-    {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Skipping planner attach for BaseID ", baseId, " because LotSizingMode != Self_Elastic_Closures (", (int)LotSizingMode, ")"); Print(__log); ULogWarnPrint(__log); }
-        return;
-    }
-
-    if(positionTicket == 0)
-        return;
-
-    int existingIndex = FindElasticPositionByTicket(positionTicket);
-    if (existingIndex >= 0) {
-        Print("ELASTIC_HEDGE: Position already tracked for Ticket: ", positionTicket, " (BaseID: ", baseId, ")");
-        return;
-    }
-
-    if(Planner_StopDistancePoints <= 0.0) {
-        Print("ELASTIC_HEDGE: Stop distance is invalid. Cannot attach planner for BaseID: ", baseId);
-        return;
-    }
-
-    if(!PositionSelectByTicket(positionTicket)) {
-        Print("ELASTIC_HEDGE: Unable to select position ", positionTicket, " for BaseID: ", baseId);
-        return;
-    }
-
-    double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
-    double liveLots = PositionGetDouble(POSITION_VOLUME);
-    ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
-
-    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
-    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
-    if(lotStep <= 0.0) lotStep = 0.01;
-    double pointValue = SelfElasticPointValuePerLot();
-
-    int closureCount = 0;
-    double estimatedLoss = 0.0;
-    string reason = "";
-    bool targetAchieved = false;
-    double planDistances[];
-    double planLots[];
-    string planSummary = "";
-
-    if(!BuildSelfElasticPlan(liveLots,
-                             Planner_StopDistancePoints,
-                             Planner_MaxLoss,
-                             Planner_MaxClosures,
-                             minLot,
-                             lotStep,
-                             pointValue,
-                             entryPrice,
-                             closureCount,
-                             estimatedLoss,
-                             reason,
-                             targetAchieved,
-                             planDistances,
-                             planLots,
-                             planSummary))
-    {
-        { string __log=""; StringConcatenate(__log, "ELASTIC_HEDGE: Failed to build plan for BaseID: ", baseId,
-                          " - ", reason); Print(__log); ULogErrorPrint(__log); }
-        return;
-    }
-
-    if(Planner_LogDetails && planSummary != "")
-    {
-        Print(planSummary);
-        ULogInfoPrint(planSummary);
-    }
-
-    if(!targetAchieved)
-    {
-        { string __warn=""; StringConcatenate(__warn, "ELASTIC_HEDGE: Elastic plan target unattainable for ", baseId,
-                          ". Projected loss ", DoubleToString(estimatedLoss, 2),
-                          ". ", reason);
-          Print(__warn); ULogWarnPrint(__warn); }
-    }
-
-    int newSize = ArraySize(g_elasticPositions) + 1;
-    ArrayResize(g_elasticPositions, newSize);
-    int slotIndex = newSize - 1;
-    g_elasticPositions[slotIndex].baseId = baseId;
-    g_elasticPositions[slotIndex].positionTicket = positionTicket;
-    g_elasticPositions[slotIndex].entryPrice = entryPrice;
-    g_elasticPositions[slotIndex].initialLots = liveLots;
-    g_elasticPositions[slotIndex].remainingLots = liveLots;
-    g_elasticPositions[slotIndex].stopDistancePoints = Planner_StopDistancePoints;
-    g_elasticPositions[slotIndex].totalLevels = closureCount;
-    g_elasticPositions[slotIndex].nextLevelIndex = 0;
-    g_elasticPositions[slotIndex].projectedLoss = estimatedLoss;
-    g_elasticPositions[slotIndex].positionType = (int)posType;
-    g_elasticPositions[slotIndex].stopPrice = (posType == POSITION_TYPE_BUY)
-        ? entryPrice - Planner_StopDistancePoints * _Point
-        : entryPrice + Planner_StopDistancePoints * _Point;
-    g_elasticPositions[slotIndex].lastTrailUpdate = 0;
-    g_elasticPositions[slotIndex].negativeTrailActive = false;
-    g_elasticPositions[slotIndex].trailLinePrice = 0.0;
-    g_elasticPositions[slotIndex].trailObjectName = StringFormat("NEG_TRAIL_%s_%I64u", baseId, (long)positionTicket);
-    g_elasticPositions[slotIndex].lastPartialTriggerPoints = 0.0;
-    g_elasticPositions[slotIndex].trailDistancePoints = 0.0;
-    g_elasticPositions[slotIndex].nextIncrementTriggerPoints = 0.0;
-    ArrayResize(g_elasticPositions[slotIndex].planLots, MathMax(0, ArraySize(planLots)));
-    ArrayResize(g_elasticPositions[slotIndex].planDistances, MathMax(0, ArraySize(planDistances)));
-    ArrayResize(g_elasticPositions[slotIndex].planLinePrices, MathMax(0, ArraySize(planDistances)));
-    ArrayResize(g_elasticPositions[slotIndex].planLineNames, MathMax(0, ArraySize(planDistances)));
-    ArrayResize(g_elasticPositions[slotIndex].planLabelNames, MathMax(0, ArraySize(planDistances)));
-    ArrayResize(g_elasticPositions[slotIndex].planLevelTriggered, MathMax(0, ArraySize(planDistances)));
-    g_elasticPositions[slotIndex].planAnchorPrice = entryPrice;
-    for(int i = 0; i < ArraySize(planLots); ++i)
-        g_elasticPositions[slotIndex].planLots[i] = planLots[i];
-    for(int i = 0; i < ArraySize(planDistances); ++i)
-    {
-        g_elasticPositions[slotIndex].planDistances[i] = planDistances[i];
-        g_elasticPositions[slotIndex].planLinePrices[i] = 0.0;
-        g_elasticPositions[slotIndex].planLineNames[i] = "";
-        g_elasticPositions[slotIndex].planLabelNames[i] = "";
-        g_elasticPositions[slotIndex].planLevelTriggered[i] = false;
-    }
-
-    DrawElasticPlanLines(slotIndex);
-
-    Print("ELASTIC_HEDGE: Added self-elastic tracking for BaseID: ", baseId,
-          ", Ticket: ", positionTicket,
-          ", Levels: ", closureCount,
-          ", ProjectedLoss: ", estimatedLoss);
-    { string __log=""; StringConcatenate(__log,
-                      "ELASTIC_HEDGE: Plan for BaseID=", baseId,
-                      ", Closures=", closureCount,
-                      ", ProjectedLoss=", DoubleToString(estimatedLoss, 2),
-                      ", TargetAchieved=", targetAchieved ? "true" : "false");
-      ULogInfoPrint(__log); }
 }
 
 //+------------------------------------------------------------------+
@@ -5583,7 +3867,7 @@ void RemoveNotificationMark(string baseId, string eventType)
 //+------------------------------------------------------------------+
 //| Send hedge close notification to Bridge via gRPC               |
 //+------------------------------------------------------------------+
-// Add optional profit_level to deduplicate per level (enables multiple partials per ticket)
+// Add optional profit_level to deduplicate per level when callers provide it
 void SendHedgeCloseNotification(string base_id,
                                 string nt_instrument_symbol,
                                 string nt_account_name,
@@ -5594,11 +3878,8 @@ void SendHedgeCloseNotification(string base_id,
                                 int profit_level = -1,
                                 ulong mt5_ticket_hint = 0)
 {
-    string reasonLower = closure_reason;
-    StringToLower(reasonLower);
-    bool isPartial = (reasonLower == "elastic_partial_close");
-    string eventType = isPartial ? "ELASTIC_PARTIAL_CLOSE" : "HEDGE_CLOSE";
-    string dedupEvent = isPartial ? "elastic_partial_close" : "hedge_close";
+    string eventType = "HEDGE_CLOSE";
+    string dedupEvent = "hedge_close";
 
     // Try to resolve the associated MT5 ticket (per-ticket fidelity)
     ulong mt5Ticket = mt5_ticket_hint;
@@ -5658,46 +3939,6 @@ void SendHedgeCloseNotification(string base_id,
         string error_msg;
         GrpcGetLastError(error_msg, 1024);
         Print("SendHedgeCloseNotification: Failed to send notification for base_id: ", base_id, ". Error: ", result, " - ", error_msg);
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Send elastic hedge update notification to Bridge via gRPC      |
-//+------------------------------------------------------------------+
-void SendElasticUpdateNotification(string baseId, double currentProfit, int profitLevel)
-{
-    if(HasNotificationBeenSent(baseId, "elastic_update")) {
-        Print("SendElasticUpdateNotification: Skipping duplicate notification for base_id: ", baseId);
-        return;
-    }
-
-    // Find the MT5 position ticket for this BaseID
-    ulong mt5Ticket = 0;
-    int posIndex = FindPositionByBaseId(baseId);
-    if (posIndex >= 0) {
-        mt5Ticket = g_open_mt5_pos_ids[posIndex];
-    }
-
-    string update_json = "{";
-    update_json += "\"event_type\":\"elastic_ping\",";
-    update_json += "\"base_id\":\"" + baseId + "\",";
-    update_json += "\"current_profit\":" + DoubleToString(currentProfit, 2) + ",";
-    update_json += "\"profit_level\":" + IntegerToString(profitLevel) + ",";
-    update_json += "\"timestamp\":\"" + TimeToString(TimeCurrent(), TIME_DATE|TIME_SECONDS) + " GMT\",";
-    update_json += "\"mt5_ticket\":" + IntegerToString(mt5Ticket);
-    update_json += "}";
-
-    Print("ELASTIC_PING: Sending notification with MT5 ticket: ", mt5Ticket, " for BaseID: ", baseId);
-
-    int result = GrpcSubmitElasticUpdate(update_json);
-
-    if(result == 0) {
-    Print("SendElasticUpdateNotification: Successfully sent elastic ping for base_id: ", baseId);
-        MarkNotificationSent(baseId, "elastic_update");
-    } else {
-        string error_msg;
-        GrpcGetLastError(error_msg, 1024);
-    Print("SendElasticUpdateNotification: Failed to send elastic ping for base_id: ", baseId, ". Error: ", result, " - ", error_msg);
     }
 }
 
@@ -5942,8 +4183,7 @@ void PerformStateRecovery()
                     rehydrated_count++;
                     Print("ACHM_RECOVERY: Successfully rehydrated state for MT5 PositionID ", mt5_pos_id, " (Ticket: ", mt5_ticket, ")");
 
-                     // Attach planner/trailing to legacy positions so protection resumes immediately
-                     AddElasticPosition(base_id_str, mt5_ticket, mt5_pos_volume);
+                    // Planner/trailing removed: no per-position elastic tracking required.
                 } else {
                     // CORRUPTION FIX: Even if full parsing failed, ensure parallel arrays are populated with placeholders
                      Print("ACHM_RECOVERY_WARN: Base_id '", base_id_str, "' extracted, but other parts (NTA/NTQ/MTA) for full rehydration are missing/invalid from comment '", comment, "'. Adding to arrays with placeholder values.");
@@ -5969,8 +4209,7 @@ void PerformStateRecovery()
 
                      Print("ACHM_RECOVERY_PLACEHOLDER: Added position ", mt5_pos_id, " to arrays with placeholders - NT_Action:'", placeholder_nt_action, "', NT_Qty:", placeholder_nt_qty, ", MT5_Action:'", placeholder_mt5_action, "'");
 
-                     // Even with placeholder metadata, ensure planner is attached for safety
-                     AddElasticPosition(base_id_str, mt5_ticket, mt5_pos_volume);
+                     // Planner/trailing removed: no per-position elastic tracking required.
                 }
             } else { // base_id_str is empty
                 Print("ACHM_RECOVERY_FAIL: Failed to extract a valid base_id from comment '", comment, "' for position ticket ", mt5_ticket, ". Cannot rehydrate this position's state.");
@@ -5984,7 +4223,7 @@ void PerformStateRecovery()
 // Note: Duplicate OnInit function removed - using the one at line 746
 
 //+------------------------------------------------------------------+
-//| Open a new hedge order - AC-aware + dynamic elastic hedging     |
+//| Open a new hedge order - AC-aware + dynamic hedging             |
 //+------------------------------------------------------------------+
 bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_symbol, string nt_account_name)
 {
@@ -6018,7 +4257,6 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
         double slPoints = slDist / SymbolInfoDouble(_Symbol, SYMBOL_POINT);
         { string __log=""; StringConcatenate(__log,
             "HEDGE_ORDER_SL: base_id=", tradeId,
-            " selfElastic=", (int)SelfElastic_Enabled,
             " simpleSLpts=", DoubleToString(SimpleStopLoss_Points, 2),
             " slDist=", DoubleToString(slDist, 5),
             " slPts=", DoubleToString(slPoints, 2),
@@ -6055,10 +4293,6 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
     if(LotSizingMode == LOTS_INVERSE_PNL)
     {
         volume = CalculateInversePnLLot(request.type);
-    }
-    else if(LotSizingMode == Self_Elastic_Closures && SelfElastic_Enabled)
-    {
-        volume = Planner_EntryLots;
     }
     else
     {
@@ -6263,17 +4497,8 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
                     }
                 }
 
-                // Add to elastic hedging tracking if enabled
-                if (SelfElastic_Enabled && LotSizingMode == Self_Elastic_Closures) {
-                    AddElasticPosition(tradeId, new_mt5_position_id, finalVol);
-                } else if (SelfElastic_Enabled && LotSizingMode != Self_Elastic_Closures) {
-                    Print("ELASTIC_HEDGE: Tracking NOT added for BaseID '", tradeId, "' because LotSizingMode != Self_Elastic_Closures (", (int)LotSizingMode, ")");
-                } else if (!SelfElastic_Enabled) {
-                    Print("ELASTIC_HEDGE: Tracking NOT added for BaseID '", tradeId, "' because SelfElastic_Enabled is false");
-                }
-
-                // Apply simple stop-loss when planner-based closures are disabled
-                if(!SelfElastic_Enabled && SimpleStopLoss_Points > 0.0 && PositionSelectByTicket(new_mt5_position_id))
+                // Apply simple stop-loss for new positions when enabled
+                if(SimpleStopLoss_Points > 0.0 && PositionSelectByTicket(new_mt5_position_id))
                 {
                     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
                     double posEntry = PositionGetDouble(POSITION_PRICE_OPEN);
@@ -6535,48 +4760,7 @@ long FindOldestHedgeToCloseTicket(string hedgeOrigin)
 //+------------------------------------------------------------------+
 void ProcessTradeResult(bool isWin, string tradeId, double profit = 0.0)
 {
-    // Placeholder for future risk tracking. No-op in self-elastic mode.
-}
-
-int FindAtrTrailingStateIndex(ulong ticket)
-{
-    int total = ArraySize(g_atrTrailingStates);
-    for(int i = 0; i < total; i++)
-    {
-        if(g_atrTrailingStates[i].ticket == ticket)
-            return i;
-    }
-    return -1;
-}
-
-void RecordAtrTrailingUpdate(ulong ticket, double stopPrice)
-{
-    int idx = FindAtrTrailingStateIndex(ticket);
-    if(idx < 0)
-    {
-        int newSize = ArraySize(g_atrTrailingStates) + 1;
-        ArrayResize(g_atrTrailingStates, newSize);
-        idx = newSize - 1;
-    }
-    g_atrTrailingStates[idx].ticket = ticket;
-    g_atrTrailingStates[idx].lastAppliedStop = stopPrice;
-    g_atrTrailingStates[idx].lastUpdateTime = TimeCurrent();
-}
-
-void ClearAtrTrailingState(ulong ticket)
-{
-    int idx = FindAtrTrailingStateIndex(ticket);
-    if(idx < 0)
-        return;
-
-    int last = ArraySize(g_atrTrailingStates) - 1;
-    if(last < 0)
-        return;
-
-    if(idx != last)
-        g_atrTrailingStates[idx] = g_atrTrailingStates[last];
-
-    ArrayResize(g_atrTrailingStates, last);
+    // Placeholder for future risk tracking.
 }
 
 //+------------------------------------------------------------------+
@@ -6694,8 +4878,10 @@ double ComputeRunUpIncrementPoints(bool useDemaAtr, bool useReactiveAtr, double 
     if(!useDemaAtr)
         return baseStep;
 
-    int period = useReactiveAtr ? MathMax(2, ATRReactive_Period) : MathMax(2, HedgeRunUp_DemaPeriod);
-    double multiplier = useReactiveAtr ? MathMax(0.1, ATRReactive_Multiplier) : MathMax(0.1, HedgeRunUp_DemaMultiplier);
+    const int runupReactivePeriod = 8;
+    const double runupReactiveMultiplier = 0.85;
+    int period = useReactiveAtr ? MathMax(2, runupReactivePeriod) : MathMax(2, HedgeRunUp_DemaPeriod);
+    double multiplier = useReactiveAtr ? MathMax(0.1, runupReactiveMultiplier) : MathMax(0.1, HedgeRunUp_DemaMultiplier);
 
     double demaAtrPrice = 0.0;
     ComputeRunUpDemaAtrPrice(period, demaAtrPrice);
@@ -7018,8 +5204,6 @@ bool HandleTier1DollarTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posTy
         return false;
     if(ticket == 0 || entryPrice <= 0.0 || currentPrice <= 0.0 || volume <= 0.0)
         return false;
-    if(ManualTrailingActivated)
-        return false;
 
     double activationUsd = 0.0;
     double stepUsd = 0.0;
@@ -7325,8 +5509,6 @@ bool HandleTierFixedTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posType
         return false;
     if(ticket == 0 || entryPrice <= 0.0 || currentPrice <= 0.0)
         return false;
-    if(ManualTrailingActivated)
-        return false;
 
     int tier = ResolveInverseTierForTicket(ticket);
     double activationPts = 0.0;
@@ -7491,70 +5673,6 @@ bool HandleTierFixedTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posType
     }
 
     return false;
-}
-
-bool AtrUpdateIntervalElapsed(int idx, double minIntervalSeconds)
-{
-    if(idx < 0)
-        return true;
-    if(minIntervalSeconds <= 0.0)
-        return true;
-
-    double elapsed = (double)(TimeCurrent() - g_atrTrailingStates[idx].lastUpdateTime);
-    return elapsed >= minIntervalSeconds;
-}
-
-//+------------------------------------------------------------------+
-//| ATR trailing lifecycle hooks                                    |
-//+------------------------------------------------------------------+
-void InitATRTrailing()
-{
-    InitDEMAATR();
-    double effectiveMultiplier = MathMax(0.25, ATRReactive_Multiplier);
-    int effectivePeriod = MathMax(2, ATRReactive_Period);
-    SetATRParameters(effectiveMultiplier, effectivePeriod);
-    SetMinimumStopDistanceOverride(MathMax(50.0, ATRReactive_MinStopPoints));
-    ResetTrailingStats();
-    ArrayResize(g_atrTrailingStates, 0);
-}
-
-void HandleATRTrailingForPosition(ulong ticket, double entryPrice, double currentPrice, string orderType, double volume)
-{
-    if(ticket == 0 || volume <= 0.0)
-        return;
-
-    if(!UseATRTrailing && !ManualTrailingActivated)
-        return;
-
-    // In "simple SL" mode (planner disabled), the intent is a static stop distance.
-    // Do not let DEMA-ATR trailing tighten the hedge unless the user explicitly enables manual trailing.
-    if(!SelfElastic_Enabled && !ManualTrailingActivated)
-        return;
-
-    int idx = FindAtrTrailingStateIndex(ticket);
-    double minInterval = MathMax(0.2, ATRTrailing_UpdateIntervalSec);
-    if(!AtrUpdateIntervalElapsed(idx, minInterval))
-        return;
-
-    bool shouldTrail = ManualTrailingActivated;
-    if(!shouldTrail)
-        shouldTrail = ShouldActivateTrailing(ticket, entryPrice, currentPrice, orderType, volume);
-
-    if(!shouldTrail)
-        return;
-
-    if(!PositionSelectByTicket(ticket))
-    {
-        ClearAtrTrailingState(ticket);
-        return;
-    }
-
-    if(UpdateTrailingStop(ticket, entryPrice, orderType))
-    {
-        double appliedStop = PositionGetDouble(POSITION_SL);
-        RecordAtrTrailingUpdate(ticket, appliedStop);
-        UpdateVisualization();
-    }
 }
 
 // Helper: basic detector for index CFD symbols (reduces oversizing risk)

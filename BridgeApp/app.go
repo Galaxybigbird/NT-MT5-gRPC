@@ -1610,8 +1610,8 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 	// Extract BaseID from request
 	baseID := getBaseIDFromRequest(request)
 
-	// Map closure_reason into nt_trade_result so MT5 can deterministically decide whether to run-up or in-sync close.
-	// NOTE: CLOSE_HEDGE trades do not currently carry closure_reason to MT5 (proto Trade lacks that field).
+	// Map closure_reason into nt_trade_result for MT5 heuristics.
+	// CLOSE_HEDGE does not carry closure_reason directly; we forward it via event_type.
 	closureReason := strings.ToLower(strings.TrimSpace(getClosureReasonFromRequest(request)))
 	ntTradeResult := "closed"
 	if strings.HasPrefix(closureReason, "nt_partial") {
@@ -1633,6 +1633,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			TotalQuantity:   1,
 			ContractNum:     1,
 			OrderType:       "CLOSE",
+			EventType:       closureReason,
 			MeasurementPips: 0,
 			RawMeasurement:  0.0,
 			Instrument:      getInstrumentFromRequest(request),
@@ -1708,6 +1709,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			TotalQuantity:   qtyForMsg,
 			ContractNum:     1,
 			OrderType:       "CLOSE",
+			EventType:       closureReason,
 			MeasurementPips: 0,
 			RawMeasurement:  0.0,
 			Instrument:      getInstrumentFromRequest(request),
@@ -1901,7 +1903,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 		return nil
 	}
 
-	// No tickets known – alignment is disabled to avoid mis-routing closures; keep original base strictly
+	// No tickets known — alignment is disabled to avoid mis-routing closures; keep original base strictly
 
 	// intentionally no alignment here
 

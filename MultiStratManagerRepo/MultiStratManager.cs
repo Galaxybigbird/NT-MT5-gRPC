@@ -61,6 +61,17 @@ namespace NinjaTrader.NinjaScript.AddOns
         private readonly ConcurrentQueue<PendingHedgeCommand> pendingHedgeCommands = new ConcurrentQueue<PendingHedgeCommand>();
         private int hedgeFlushInProgress = 0;
 
+        private sealed class ManualCloseOverride
+        {
+            public string Reason;
+            public DateTime ExpiresAtUtc;
+        }
+
+        private readonly ConcurrentDictionary<string, ManualCloseOverride> manualCloseOverrides =
+            new ConcurrentDictionary<string, ManualCloseOverride>(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, bool> hedgeRunUpRequests =
+            new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
         // ✅ RECOMPILATION SAFETY: Track if we've already cleaned up to prevent multiple cleanup attempts
         private static bool hasPerformedStaticCleanup = false;
 
@@ -141,6 +152,7 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         public static MultiStratManager Instance { get; private set; }
         public TradeSyncService TradeSync => tradeSyncService;
+        public bool IsGrpcReady => grpcInitialized && TradingGrpcClient.IsConnected;
         public event Action PingReceivedFromBridge;
 
         private SLTPRemovalLogic sltpRemovalLogic;
@@ -2265,6 +2277,83 @@ public TrailingActivationType TrailingStopType
             }
         }
 
+        internal void RegisterManualCloseOverride(string tradeId, string reason, TimeSpan? ttl = null)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return;
+
+            string trimmed = tradeId.Trim();
+            string resolvedReason = string.IsNullOrWhiteSpace(reason) ? "NT_MANUAL_BUTTON" : reason.Trim();
+            TimeSpan window = ttl ?? TimeSpan.FromSeconds(10);
+            manualCloseOverrides[trimmed] = new ManualCloseOverride
+            {
+                Reason = resolvedReason,
+                ExpiresAtUtc = DateTime.UtcNow.Add(window)
+            };
+        }
+
+        private bool TryGetManualCloseOverride(string tradeId, out string reason)
+        {
+            reason = null;
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return false;
+
+            if (!manualCloseOverrides.TryGetValue(tradeId, out var entry) || entry == null)
+                return false;
+
+            if (entry.ExpiresAtUtc < DateTime.UtcNow)
+            {
+                manualCloseOverrides.TryRemove(tradeId, out _);
+                return false;
+            }
+
+            reason = entry.Reason;
+            return !string.IsNullOrWhiteSpace(reason);
+        }
+
+        internal bool RequestHedgeRunUp(string tradeId, string reason)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return false;
+
+            string baseId = tradeId.Trim();
+            if (!hedgeRunUpRequests.TryAdd(baseId, true))
+            {
+                LogAndPrint($"RUNUP_REQUEST: Already requested for BaseID {baseId}; skipping duplicate.");
+                return false;
+            }
+
+            if (tradeSyncService == null || !tradeSyncService.TryGetTrade(baseId, out var record))
+            {
+                LogAndPrint($"RUNUP_REQUEST: Trade {baseId} not tracked; cannot request MT5 run-up.");
+                hedgeRunUpRequests.TryRemove(baseId, out _);
+                return false;
+            }
+
+            int qty = record.RemainingQuantity > 0 ? record.RemainingQuantity : record.NtQuantity;
+            if (qty <= 0)
+                qty = Math.Max(1, record.NtQuantity);
+
+            string reasonField = string.IsNullOrWhiteSpace(reason) ? "NT_CHOP_LIMIT_FILL" : reason.Trim();
+            SendHedgeCloseRequest(record, qty, reasonField);
+            LogAndPrint($"RUNUP_REQUEST: Sent CLOSE_HEDGE to trigger MT5 run-up for {baseId} (reason={reasonField}, qty={qty}).");
+            return true;
+        }
+
+        private bool IsHedgeRunUpRequested(string tradeId)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return false;
+            return hedgeRunUpRequests.ContainsKey(tradeId.Trim());
+        }
+
+        private void ClearHedgeRunUpRequest(string tradeId)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return;
+            hedgeRunUpRequests.TryRemove(tradeId.Trim(), out _);
+        }
+
         private void ForceCloseAllHedgesForDailyLimit(string accountName, string sourceStrategy)
         {
             try
@@ -2387,11 +2476,9 @@ public TrailingActivationType TrailingStopType
         {
             try
             {
-                // Skip if UI is not open (manual connection mode)
-                if (!IsUiOpen)
-                {
+                // Skip only if UI is closed and gRPC has never been initialized (manual connection mode)
+                if (!IsUiOpen && !grpcInitialized)
                     return;
-                }
                 // Circuit breaker: Skip if we've had recent failures
                 if (heartbeatFailureCount >= 3 && DateTime.UtcNow - lastHeartbeatFailure < heartbeatBackoffDuration)
                 {
@@ -2430,11 +2517,11 @@ public TrailingActivationType TrailingStopType
                         LogWarn("SYSTEM", $"Heartbeat failed ({heartbeatFailureCount} failures): {error}");
                     }
 
-                    // Circuit breaker: after sustained failures, disconnect fully to release resources
+                    // Circuit breaker: after sustained failures, reset the gRPC client without stopping monitoring.
                     if (heartbeatFailureCount >= 6)
                     {
-                        LogWarn("GRPC", $"Heartbeat has failed {heartbeatFailureCount} times — disconnecting gRPC and stopping timers to avoid hangs");
-                        DisconnectGrpcAndStopAll();
+                        LogWarn("GRPC", $"Heartbeat has failed {heartbeatFailureCount} times; resetting gRPC connection");
+                        ResetGrpcConnection("heartbeat failures");
                     }
                 }
             }
@@ -2730,6 +2817,56 @@ public TrailingActivationType TrailingStopType
             }
         }
 
+        private void ResetGrpcConnection(string reason)
+        {
+            // Avoid clashing with a full disconnect.
+            lock (grpcDisconnectLock)
+            {
+                if (grpcDisconnectInProgress)
+                {
+                    LogInfo("GRPC", "Reset skipped; disconnect already in progress");
+                    return;
+                }
+                grpcDisconnectInProgress = true;
+            }
+
+            try
+            {
+                StopHeartbeatSystem();
+
+                try
+                {
+                    TradingGrpcClient.StopTradingStream();
+                }
+                catch (Exception ex)
+                {
+                    LogWarn("GRPC", $"Error stopping trading stream during reset: {ex.Message}");
+                }
+
+                try
+                {
+                    TradingGrpcClient.Dispose();
+                }
+                catch (Exception ex)
+                {
+                    LogWarn("GRPC", $"Error disposing gRPC client during reset: {ex.Message}");
+                }
+
+                grpcInitialized = false;
+                grpcInitializing = false;
+                LogWarn("GRPC", $"gRPC connection reset ({reason}); keeping trade monitoring active");
+            }
+            finally
+            {
+                lock (grpcDisconnectLock)
+                {
+                    grpcDisconnectInProgress = false;
+                }
+            }
+
+            Task.Run(async () => await InitializeGrpcClient());
+        }
+
         /// <summary>
         /// Handles state changes in the add-on lifecycle
         /// </summary>
@@ -2884,19 +3021,8 @@ public TrailingActivationType TrailingStopType
                             // Handle window closed event - ensure full cleanup so addon can be reopened/edited without restarting NT
                             window.Closed += new EventHandler(delegate(object o, EventArgs e)
                             {
-                                LogDebug("UI", "Window closed - performing cleanup");
-                                try
-                                {
-                                    DisconnectGrpcAndStopAll();
-                                    SetMonitoredAccount(null);
-                                }
-                                catch (Exception ex)
-                                {
-                                    LogWarn("UI", $"Cleanup on window close encountered: {ex.Message}");
-                                }
+                                LogDebug("UI", "Window closed - UI cleanup only; monitoring stays active");
                                 window = null;
-                                // Allow services to start again when reopened
-                                connectionsStarted = false;
                             });
                             
                             // Handle window loaded event to ensure content is visible
@@ -3396,6 +3522,8 @@ public TrailingActivationType TrailingStopType
 
             if (!grpcInitialized || !TradingGrpcClient.IsConnected)
             {
+                if (!grpcInitialized && !grpcInitializing)
+                    Task.Run(async () => await InitializeGrpcClient());
                 pendingHedgeCommands.Enqueue(command);
                 LogDebug("GRPC", $"Queued hedge entry while gRPC not ready (baseId={baseId}, queue={pendingHedgeCommands.Count})");
                 FlushPendingHedgeCommands();
@@ -3443,7 +3571,11 @@ public TrailingActivationType TrailingStopType
         private void FlushPendingHedgeCommands()
         {
             if (!grpcInitialized)
+            {
+                if (!grpcInitializing)
+                    Task.Run(async () => await InitializeGrpcClient());
                 return;
+            }
 
             if (Interlocked.CompareExchange(ref hedgeFlushInProgress, 1, 0) != 0)
                 return;
@@ -3457,6 +3589,12 @@ public TrailingActivationType TrailingStopType
 
                     while (grpcInitialized && pendingHedgeCommands.TryDequeue(out var command))
                     {
+                        TradeSyncService.TradeRecord record;
+                        if (tradeSyncService == null || !tradeSyncService.TryGetTrade(command.BaseId, out record))
+                        {
+                            LogAndPrint($"GRPC: Dropping pending hedge entry for {command.BaseId} (trade no longer tracked).");
+                            continue;
+                        }
                         bool success = await SubmitHedgeCommandAsync(command);
                         if (!success)
                         {
@@ -3491,6 +3629,12 @@ public TrailingActivationType TrailingStopType
 
             trailingAndElasticManager?.UpdateRemainingQuantity(record.TradeId, record.RemainingQuantity);
 
+            if (IsHedgeRunUpRequested(record.TradeId))
+            {
+                LogAndPrint($"RUNUP_REQUEST: Skipping CLOSE_HEDGE partial for {record.TradeId} (run-up active).");
+                return;
+            }
+
             SendHedgeCloseRequest(record, closedQuantity, "NT_PARTIAL_CLOSE");
         }
 
@@ -3519,6 +3663,13 @@ public TrailingActivationType TrailingStopType
 
             if (closedQuantity <= 0)
                 closedQuantity = record.NtQuantity;
+
+            if (IsHedgeRunUpRequested(record.TradeId))
+            {
+                LogAndPrint($"RUNUP_REQUEST: Skipping CLOSE_HEDGE full close for {record.TradeId} (run-up active).");
+                ClearHedgeRunUpRequest(record.TradeId);
+                return;
+            }
 
             SendHedgeCloseRequest(record, closedQuantity, "NT_FULL_CLOSE");
         }
@@ -3572,13 +3723,17 @@ public TrailingActivationType TrailingStopType
                 }
             }
 
+            string manualOverrideReason;
+            bool manualOverrideApplied = TryGetManualCloseOverride(baseId, out manualOverrideReason);
+
             // If this NT close is a loss, emit a distinct closure_reason so MT5 can trigger run-up.
-            string closureReasonField = reason;
-            if (reason == "NT_FULL_CLOSE" && tradeResultField.Equals("loss", StringComparison.OrdinalIgnoreCase))
+            string closureReasonField = manualOverrideApplied ? manualOverrideReason : reason;
+            if (!manualOverrideApplied && reason == "NT_FULL_CLOSE" && tradeResultField.Equals("loss", StringComparison.OrdinalIgnoreCase))
                 closureReasonField = "NT_LOSS_CLOSE";
+            bool manualOverrideIsManual = closureReasonField.StartsWith("NT_MANUAL_", StringComparison.OrdinalIgnoreCase);
 
             // Daily-limit override: force in-sync close even if this would normally be a loss-close/run-up.
-            if (dailyLimitOverrideActive)
+            if (!manualOverrideIsManual && dailyLimitOverrideActive)
             {
                 string acct = (record.AccountName ?? string.Empty).Trim();
                 string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
@@ -3590,13 +3745,17 @@ public TrailingActivationType TrailingStopType
                     closureReasonField = "NT_DAILY_LIMIT" + suffix;
                 }
             }
-            else if (manualHaltOverrideActive)
+            else if (!manualOverrideIsManual && manualHaltOverrideActive)
             {
                 string acct = (record.AccountName ?? string.Empty).Trim();
                 string overrideAcct = (manualHaltOverrideAccount ?? string.Empty).Trim();
                 if (string.IsNullOrWhiteSpace(overrideAcct) || acct.Equals(overrideAcct, StringComparison.OrdinalIgnoreCase))
                     closureReasonField = "NT_MANUAL_HALT";
             }
+
+            bool isManualReason = closureReasonField.StartsWith("NT_MANUAL_", StringComparison.OrdinalIgnoreCase);
+            if (isManualReason)
+                tradeResultField = "manual";
 
             ulong mt5Ticket = 0;
             for (int retry = 0; retry < 3; retry++)
@@ -4392,7 +4551,7 @@ public TrailingActivationType TrailingStopType
             }
         }
 
-        private static string GetTradeIdFromExecution(Execution execution)
+        private string GetTradeIdFromExecution(Execution execution)
     {
         if (execution == null)
             return string.Empty;
@@ -4403,10 +4562,33 @@ public TrailingActivationType TrailingStopType
 
         tradeId = execution.Order?.Name;
         if (!string.IsNullOrWhiteSpace(tradeId))
-            return tradeId.Trim();
+        {
+            tradeId = tradeId.Trim();
+            int underscore = tradeId.IndexOf('_');
+            if (underscore > 0)
+            {
+                string normalized = tradeId.Substring(0, underscore);
+                LogDebug("EXECUTION", $"Normalized execution trade_id '{tradeId}' -> '{normalized}'");
+                return normalized;
+            }
+            return tradeId;
+        }
 
         tradeId = execution.Name;
-        return tradeId?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(tradeId))
+        {
+            tradeId = tradeId.Trim();
+            int underscore = tradeId.IndexOf('_');
+            if (underscore > 0)
+            {
+                string normalized = tradeId.Substring(0, underscore);
+                LogDebug("EXECUTION", $"Normalized execution trade_id '{tradeId}' -> '{normalized}'");
+                return normalized;
+            }
+            return tradeId;
+        }
+
+        return string.Empty;
     }
 
     // This method replaces the problematic override that caused CS0115.
@@ -4546,11 +4728,20 @@ public TrailingActivationType TrailingStopType
         };
     }
 
-    private bool IsRunUpReason(string closureReason)
-    {
-        return EnableNtRunUp && !string.IsNullOrWhiteSpace(closureReason) &&
-               closureReason.Equals("mt5_simple_sl", StringComparison.OrdinalIgnoreCase);
-    }
+        private bool IsRunUpReason(string closureReason)
+        {
+            return EnableNtRunUp && !string.IsNullOrWhiteSpace(closureReason) &&
+                   closureReason.Equals("mt5_simple_sl", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private bool IsRunUpSkipReason(string closureReason)
+        {
+            if (string.IsNullOrWhiteSpace(closureReason))
+                return false;
+
+            return closureReason.Equals("mt5_simple_sl", StringComparison.OrdinalIgnoreCase) ||
+                   closureReason.Equals("mt5_runup_close", StringComparison.OrdinalIgnoreCase);
+        }
 
     private bool TryActivateNtRunUp(Position position, string baseId, string closureReason)
     {
@@ -4613,9 +4804,15 @@ public TrailingActivationType TrailingStopType
             var reason = notification.ClosureReason ?? ExtractJsonValue(SimpleJson.SerializeObject(notification), "closure_reason");
             bool isElasticCompletion = !string.IsNullOrEmpty(reason) && reason.Equals("elastic_completion", StringComparison.OrdinalIgnoreCase);
             bool isElasticPartial = !string.IsNullOrEmpty(reason) && reason.Equals("elastic_partial_close", StringComparison.OrdinalIgnoreCase);
-            if (IsRunUpReason(reason) && TryActivateNtRunUp(position, notification.base_id, reason))
+            bool runUpReason = IsRunUpReason(reason);
+            if (runUpReason && TryActivateNtRunUp(position, notification.base_id, reason))
             {
                 LogAndPrint($"[RUN_UP_BYPASS] Keeping NT trade open for {notification.base_id}; MT5 hedge stopped out (reason={reason})");
+                return;
+            }
+            if (!runUpReason && IsRunUpSkipReason(reason))
+            {
+                LogAndPrint($"[RUN_UP_BYPASS] Keeping NT trade open for {notification.base_id}; MT5 hedge closed via run-up (reason={reason})");
                 return;
             }
             // 1) elastic_partial_close: NEVER close the NT position; MT5 is reducing hedge size only
@@ -4722,7 +4919,7 @@ public TrailingActivationType TrailingStopType
     /// <returns>True if a closing order should be created, false otherwise</returns>
     private bool ShouldCreateClosingOrderForReason(string closureReason)
     {
-        if (IsRunUpReason(closureReason))
+        if (IsRunUpSkipReason(closureReason))
         {
             LogAndPrint($"CLOSURE_LOGIC: Reason '{closureReason}' is handled by NT Run-Up. Skipping NT close.");
             return false;

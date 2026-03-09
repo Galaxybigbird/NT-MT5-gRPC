@@ -83,6 +83,11 @@ namespace NinjaTrader.NinjaScript.AddOns
             get { return epoch; }
         }
 
+        public bool IsReady
+        {
+            get { return owner != null && owner.IsGrpcReady; }
+        }
+
         public void Shutdown(string reason)
         {
             lock (gate)

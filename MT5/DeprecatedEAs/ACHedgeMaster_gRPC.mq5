@@ -927,6 +927,12 @@ void CheckGrpcConnection()
         return;
     }
 
+    static datetime last_health_check = 0;
+    datetime now = TimeCurrent();
+    if(now - last_health_check < 1)
+        return;
+    last_health_check = now;
+
     // Check if connection is still active
     int connected = GrpcIsConnected();
     // Treat health check as source of truth to avoid false negatives from GrpcIsConnected
@@ -988,11 +994,10 @@ void ProcessGrpcTrades()
         return; // No trades to process
     }
 
-    // Process up to 10 trades per timer cycle to avoid overload
+    // Process all queued trades per timer cycle to minimize hedge latency
     int processed = 0;
-    const int MAX_TRADES_PER_CYCLE = 10;
 
-    while(processed < MAX_TRADES_PER_CYCLE && processed < queue_size) {
+    while(processed < queue_size) {
         string trade_json;
         StringReserve(trade_json, 8192); // Pre-allocate buffer for C++ DLL
         int result = GrpcGetNextTrade(trade_json, 8192);
@@ -1033,11 +1038,10 @@ void ProcessGrpcTradesQuiet()
         return; // No trades to process - silent return
     }
 
-    // Process up to 10 trades per timer cycle to avoid overload
+    // Process all queued trades per timer cycle to minimize hedge latency
     int processed = 0;
-    const int MAX_TRADES_PER_CYCLE = 10;
 
-    while(processed < MAX_TRADES_PER_CYCLE && processed < queue_size) {
+    while(processed < queue_size) {
         string trade_json;
         StringReserve(trade_json, 8192); // Pre-allocate buffer for C++ DLL
         int result = GrpcGetNextTrade(trade_json, 8192);
