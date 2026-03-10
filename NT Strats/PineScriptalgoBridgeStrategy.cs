@@ -1,4 +1,4 @@
-﻿#region Using declarations
+#region Using declarations
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -110,6 +110,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool lastStatusPnlNegative;
         private string lastChecklistText = string.Empty;
         private bool lastChecklistReady;
+        private DateTime lastSignalDiagnosticsBarTime = Core.Globals.MinDate;
 
         protected override void OnStateChange()
         {
@@ -118,7 +119,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Name = "PineScriptalgoBridgeStrategy";
                 Calculate = Calculate.OnEachTick;
                 IsOverlay = true;
-                StartBehavior = StartBehavior.WaitUntilFlat;
+                StartBehavior = StartBehavior.ImmediatelySubmit;
                 EntryHandling = EntryHandling.AllEntries;
                 EntriesPerDirection = MaxTradesPerEntry;
                 IsExitOnSessionCloseStrategy = true;
@@ -185,8 +186,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 TradesPerEntry = 1;
                 TreatMultiEntryAsSingleTrade = false;
+                StartHaltedOnEnable = false;
                 EnableDailyPnLLimits = false;
-                DailyLossLimit = 2000;
+                DailyLossLimit = -2000;
                 DailyProfitLimit = 840;
 
                 ShowRibbon = true;
@@ -195,7 +197,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ShowStatusPanel = true;
                 ShowChecklistPanel = true;
                 RiskLineRightBars = 10;
-                EnableDebugLogging = false;
+                Debug = false;
+                EnableSignalDiagnostics = false;
+                EnableTradeStoryLogging = false;
             }
             else if (State == State.Configure)
             {
@@ -207,13 +211,31 @@ namespace NinjaTrader.NinjaScript.Strategies
                     AddDataSeries(signalBarsType, signalBarsValue);
 
                 signalSeriesIndex = signalSeriesUsesPrimary ? 0 : 2;
+
+                if (Debug)
+                {
+                    StrategyLogDebug(string.Format(CultureInfo.InvariantCulture,
+                        "PARAMS: TPSType={0} SetupType={1} TFx={2} Lookahead={3} Filter={4} TradesPerEntry={5} TreatMulti={6} StartHalted={7} DailyLimits={8} DLL={9} DPL={10} EntryStop={11}/{12} Trailing={13}/{14}",
+                        TPSType,
+                        SetupType,
+                        TimeframeMultiplier,
+                        UseLookaheadApproximation,
+                        SidewaysFilterType,
+                        TradesPerEntry,
+                        TreatMultiEntryAsSingleTrade,
+                        StartHaltedOnEnable,
+                        EnableDailyPnLLimits,
+                        DailyLossLimit,
+                        DailyProfitLimit,
+                        EnableEntryStopLoss,
+                        EntryStopLossType,
+                        EnableTrailingEngine,
+                        TrailingMode));
+                }
             }
             else if (State == State.DataLoaded)
             {
-                tradeStates = new Dictionary<string, PineTradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
-                entrySignalToTradeId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-                syncGroups = new Dictionary<string, PineTradeSyncGroup>(StringComparer.OrdinalIgnoreCase);
-                workingEntryOrders = new Dictionary<string, Order>(StringComparer.OrdinalIgnoreCase);
+                ResetRuntimeState();
                 trackedSessionDate = Core.Globals.MinDate;
 
                 try
@@ -221,14 +243,32 @@ namespace NinjaTrader.NinjaScript.Strategies
                     MultiStratManager.Instance?.TradeSync?.RegisterStrategy(this);
                 }
                 catch { }
-
-                if (ChartControl != null)
-                    ChartControl.Dispatcher.BeginInvoke(new Action(TryInitializeChartTraderButtons));
+            }
+            else if (State == State.Historical)
+            {
+                TryInitializeChartTraderButtons();
             }
             else if (State == State.Realtime)
             {
-                if (ChartControl != null)
-                    ChartControl.Dispatcher.BeginInvoke(new Action(TryInitializeChartTraderButtons));
+                ResetDailyLimitState("realtime_start");
+                manualHaltActive = false;
+                manualHaltActivatedAt = DateTime.MinValue;
+                haltReason = string.Empty;
+                ResetRuntimeState();
+                StrategyLogInfo("[AUTO] Strategy entered realtime; automation enabled");
+
+                TryInitializeChartTraderButtons();
+
+                if (StartHaltedOnEnable)
+                {
+                    HandleManualHaltRequest(false);
+                    StrategyLogInfo("[MANUAL_HALT] Strategy started halted (config).");
+                }
+                else
+                {
+                    BootstrapExistingPositionState();
+                    UpdateManualTradeButtons(true);
+                }
             }
             else if (State == State.Terminated)
             {
@@ -261,8 +301,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (CurrentBar < BarsRequiredToTrade)
                 return;
 
-            if (State == State.Realtime && ChartControl != null && !chartTraderButtonsAdded)
-                TryInitializeChartTraderButtons();
+            UpdateTradeExcursions(High[0], Low[0]);
 
             if (!IsFirstTickOfBar)
             {
@@ -278,12 +317,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!EvaluateBar(out st) || !st.Valid)
             {
                 lastUiEvalState = null;
+                if (EnableSignalDiagnostics && State == State.Realtime)
+                    StrategyLogInfo(string.Format(CultureInfo.InvariantCulture, "[SIGNAL] time={0:yyyy-MM-dd HH:mm:ss} decision=INVALID_EVAL pos={1} halted={2}", Time[0], FormatPositionSummary(), IsExecutionHalted() ? haltReason : "OFF"));
                 UpdateStatusOverlay(Time[0]);
                 UpdateChecklistOverlay();
                 return;
             }
 
             lastUiEvalState = st;
+            LogSignalDiagnostics(st);
             pineCondition = st.ConditionNow;
             pineEntryLine = st.EntryLine;
             pineSlLine = st.SlLine;
@@ -333,7 +375,31 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             base.OnOrderUpdate(order, limitPrice, stopPrice, quantity, filled, averageFillPrice, orderState, time, error, nativeError);
 
-            if (order == null || string.IsNullOrEmpty(order.Name) || workingEntryOrders == null)
+            if (order == null)
+                return;
+
+            string name = order.Name ?? "<null>";
+            bool looksManual = !string.IsNullOrEmpty(name) &&
+                (name.IndexOf("MAN", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                 name.IndexOf("MHLT", StringComparison.OrdinalIgnoreCase) >= 0);
+            if (looksManual || Debug)
+            {
+                StrategyLogInfo(string.Format("[ORDER] name={0} fromEntry={1} action={2} state={3} qty={4} filled={5} avg={6:F2} oco={7} stop={8:F2} limit={9:F2} error={10} native='{11}'",
+                    name,
+                    order.FromEntrySignal ?? "<null>",
+                    order.OrderAction,
+                    orderState,
+                    order.Quantity,
+                    order.Filled,
+                    averageFillPrice,
+                    order.Oco ?? "<none>",
+                    stopPrice,
+                    limitPrice,
+                    error,
+                    string.IsNullOrEmpty(nativeError) ? "<none>" : nativeError));
+            }
+
+            if (string.IsNullOrEmpty(order.Name) || workingEntryOrders == null)
                 return;
 
             if (!entrySignalToTradeId.ContainsKey(order.Name))
@@ -387,6 +453,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 state.AccountName = execution.Account != null ? execution.Account.Name : (Account != null ? Account.Name : string.Empty);
                 double pointValue = execution.Instrument != null && execution.Instrument.MasterInstrument != null ? execution.Instrument.MasterInstrument.PointValue : Instrument.MasterInstrument.PointValue;
                 state.NtPointsPer1kLoss = pointValue > 0 ? 1000.0 / pointValue : 0.0;
+                if (state.MaxFavorablePrice <= 0.0)
+                    state.MaxFavorablePrice = execution.Price;
+                if (state.MaxAdversePrice <= 0.0)
+                    state.MaxAdversePrice = execution.Price;
+
+                if (Debug || EnableSignalDiagnostics || state.IsManualEntry)
+                {
+                    StrategyLogInfo(string.Format("[EXEC] ENTRY trade={0} side={1} qty={2} price={3:F2} ctx={4} reason={5}",
+                        state.TradeId,
+                        state.EntrySide,
+                        quantity,
+                        execution.Price,
+                        string.IsNullOrWhiteSpace(state.EntryContext) ? "AUTO" : state.EntryContext,
+                        string.IsNullOrWhiteSpace(state.EntryReason) ? signal : state.EntryReason));
+                }
+
                 PublishOpenEvent(state);
                 return;
             }
@@ -401,8 +483,26 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (closeQty <= 0)
                     continue;
 
+                double exitPrice = execution.Price > 0 ? execution.Price : (execution.Order.AverageFillPrice > 0 ? execution.Order.AverageFillPrice : price);
+                double execPnl = ComputeExecutionPnl(state, closeQty, exitPrice);
+                string exitReason = ResolveExitReason(execution, state);
+
                 state.RemainingQuantity = Math.Max(0, state.RemainingQuantity - closeQty);
                 remainingToAllocate -= closeQty;
+
+                if (Debug || EnableTradeStoryLogging || state.IsManualEntry)
+                {
+                    StrategyLogInfo(string.Format("[EXEC] EXIT trade={0} side={1} qty={2} exit={3:F2} pnl={4:C2} remaining={5} reason={6}",
+                        state.TradeId,
+                        state.EntrySide,
+                        closeQty,
+                        exitPrice,
+                        execPnl,
+                        state.RemainingQuantity,
+                        exitReason));
+                }
+
+                LogTradeOutcomeStory(execution, state, closeQty, execPnl, exitReason);
 
                 if (state.RemainingQuantity > 0)
                     PublishPartialEvent(state);
@@ -499,6 +599,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             manager.TradeSync.PublishOpen(this, state.TradeId, state.InstrumentName, state.EntrySide, state.OriginalQuantity, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, false);
+            StrategyLogDebug(string.Format("[SYNC] Published OPEN trade={0} qty={1} side={2} price={3:F2}", state.TradeId, state.OriginalQuantity, state.EntrySide, state.EntryPrice));
         }
 
         private void PublishPartialEvent(PineTradeRuntimeState state)
@@ -526,6 +627,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             manager.TradeSync.PublishPartial(this, state.TradeId, state.RemainingQuantity);
+            StrategyLogDebug(string.Format("[SYNC] Published PARTIAL trade={0} remaining={1}", state.TradeId, state.RemainingQuantity));
         }
 
         private void PublishClosedEvent(PineTradeRuntimeState state)
@@ -559,6 +661,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             manager.TradeSync.PublishClosed(this, state.TradeId);
+            StrategyLogDebug(string.Format("[SYNC] Published CLOSED trade={0}", state.TradeId));
         }
 
         private int GetSyncGroupRemainingQuantity(string syncTradeId)
@@ -904,6 +1007,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     AccountName = Account != null ? Account.Name : string.Empty,
                     EntryTimeUtc = DateTime.UtcNow
                 };
+                CaptureEntryDiagnostics(state, st, tag, manual);
                 tradeStates[tradeId] = state;
                 entrySignalToTradeId[entrySignal] = tradeId;
                 openTradeOrder.Add(tradeId);
@@ -915,6 +1019,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                     SetStopLoss(entrySignal, CalculationMode.Price, entryStop, false);
                 else if (TPSType == PineTpSType.Atr && st != null && st.Valid)
                     SetStopLoss(entrySignal, CalculationMode.Price, RoundToTickSize(st.SlLine), false);
+
+                if (Debug || EnableSignalDiagnostics || manual)
+                {
+                    StrategyLogInfo(string.Format("[ENTRY_SUBMIT] trade={0} side={1} tag={2} manual={3} sync={4} ctx={5} reason={6}",
+                        tradeId,
+                        side,
+                        tag,
+                        manual,
+                        string.IsNullOrEmpty(syncTradeId) ? "OFF" : syncTradeId,
+                        string.IsNullOrWhiteSpace(state.EntryContext) ? "AUTO" : state.EntryContext,
+                        string.IsNullOrWhiteSpace(state.EntryReason) ? tag : state.EntryReason));
+                }
 
                 if (side == MarketPosition.Long)
                     EnterLong(1, entrySignal);
@@ -929,6 +1045,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (quantity <= 0)
                 return;
+
+            TrackPendingExitReason(side, quantity, signalName);
+            if (Debug || EnableTradeStoryLogging)
+                StrategyLogInfo(string.Format("[EXIT_SUBMIT] side={0} qty={1} reason={2} pos={3} posQty={4}", side, quantity, signalName, Position.MarketPosition, Position.Quantity));
 
             if (side == MarketPosition.Long)
                 ExitLong(quantity, BuildExitSignalName(signalName), string.Empty);
@@ -1098,6 +1218,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             SetStopLoss(state.EntrySignal, CalculationMode.Price, proposedStop, false);
             state.LastStopPrice = proposedStop;
+            StrategyLogDebug(string.Format(CultureInfo.InvariantCulture, "[STOP] trade={0} side={1} stop={2:F2}", state.TradeId, state.EntrySide, proposedStop));
         }
 
         private bool ComputeTrendType(out bool trendType, out double rsiValue, out double atrNow, out double atrMa)
@@ -1952,15 +2073,348 @@ namespace NinjaTrader.NinjaScript.Strategies
             return string.Format(CultureInfo.InvariantCulture, "PX_{0}_{1}", token, Interlocked.Increment(ref tradeSequence));
         }
 
+        private string ResolvePrimaryTradeRef()
+        {
+            if (openTradeOrder != null)
+            {
+                foreach (string tradeId in openTradeOrder)
+                {
+                    if (!string.IsNullOrWhiteSpace(tradeId))
+                        return tradeId;
+                }
+            }
+
+            if (tradeStates != null)
+            {
+                PineTradeRuntimeState state = tradeStates.Values.FirstOrDefault(x => x != null && x.RemainingQuantity > 0 && !string.IsNullOrWhiteSpace(x.TradeId));
+                if (state != null)
+                    return state.TradeId;
+            }
+
+            return string.Empty;
+        }
+
         private void StrategyLogInfo(string message)
         {
             Print("[" + Name + "] " + message);
+            var manager = MultiStratManager.Instance;
+            if (manager != null)
+            {
+                string tradeRef = ResolvePrimaryTradeRef();
+                manager.LogInfo("STRATEGY", message, tradeRef, tradeRef);
+            }
         }
 
         private void StrategyLogDebug(string message)
         {
-            if (EnableDebugLogging)
-                Print("[" + Name + "][DEBUG] " + message);
+            if (!Debug)
+                return;
+
+            Print("[" + Name + "][DEBUG] " + message);
+            var manager = MultiStratManager.Instance;
+            if (manager != null)
+            {
+                string tradeRef = ResolvePrimaryTradeRef();
+                manager.LogDebug("STRATEGY", message, tradeRef, tradeRef);
+            }
+        }
+
+        private void CaptureEntryDiagnostics(PineTradeRuntimeState state, PineEvalState st, string tag, bool manual)
+        {
+            if (state == null)
+                return;
+
+            state.IsManualEntry = manual;
+            state.EntryContext = manual
+                ? "MANUAL"
+                : string.Format(CultureInfo.InvariantCulture, "AUTO:{0}/{1}/{2}", TPSType, SetupType, tag);
+            state.EntryReason = BuildEntryReason(tag, st, state.EntrySide, manual);
+            state.EntrySignalTime = st != null && st.BarTime != DateTime.MinValue
+                ? st.BarTime
+                : (Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow);
+
+            if (st == null)
+                return;
+
+            state.EntryConditionPrev = st.ConditionPrev;
+            state.EntryConditionNow = st.ConditionNow;
+            state.EntryTrendAllowed = st.TrendAllowed;
+            state.EntryRawBuySignal = st.RawBuySignal;
+            state.EntryRawSellSignal = st.RawSellSignal;
+            state.EntryRsiValue = st.RsiValue;
+            state.EntryAtrFilterValue = st.AtrFilterValue;
+            state.EntryAtrMaValue = st.AtrMaValue;
+            state.EntryLine = st.EntryLine;
+            state.EntrySlLine = st.SlLine;
+            state.EntryTp1Line = st.Tp1Line;
+            state.EntryTp2Line = st.Tp2Line;
+            state.EntryTp3Line = st.Tp3Line;
+        }
+
+        private string BuildEntryReason(string tag, PineEvalState st, MarketPosition side, bool manual)
+        {
+            if (manual)
+                return string.Format(CultureInfo.InvariantCulture, "Manual {0}", side);
+
+            if (st == null)
+                return string.IsNullOrWhiteSpace(tag) ? "signal" : tag;
+
+            return string.Format(CultureInfo.InvariantCulture,
+                "{0} {1} rawBuy={2} rawSell={3} trend={4} cond={5}->{6} entry={7:F2} sl={8:F2} tp1={9:F2}",
+                TPSType,
+                string.IsNullOrWhiteSpace(tag) ? "signal" : tag,
+                st.RawBuySignal,
+                st.RawSellSignal,
+                st.TrendAllowed,
+                DescribeCondition(st.ConditionPrev),
+                DescribeCondition(st.ConditionNow),
+                st.EntryLine,
+                st.SlLine,
+                st.Tp1Line);
+        }
+
+        private void LogSignalDiagnostics(PineEvalState st)
+        {
+            if (!EnableSignalDiagnostics || State != State.Realtime || st == null || !st.Valid)
+                return;
+
+            DateTime diagTime = st.BarTime != DateTime.MinValue ? st.BarTime : (Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow);
+            if (diagTime == lastSignalDiagnosticsBarTime)
+                return;
+            lastSignalDiagnosticsBarTime = diagTime;
+
+            StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
+                "[SIGNAL] time={0:yyyy-MM-dd HH:mm:ss} tp={1} setup={2} tfx={3} filter={4} rawBuy={5} rawSell={6} trend={7} buyEntry={8} sellEntry={9} cond={10}->{11} pos={12} halted={13} decision={14} rsi={15:F2} atr={16:F2} atrMa={17:F2} entry={18:F2} sl={19:F2} tp1={20:F2} tp2={21:F2} tp3={22:F2} flags={23}",
+                diagTime,
+                TPSType,
+                SetupType,
+                TimeframeMultiplier,
+                SidewaysFilterType,
+                st.RawBuySignal,
+                st.RawSellSignal,
+                st.TrendAllowed,
+                st.BuyEntry,
+                st.SellEntry,
+                DescribeCondition(st.ConditionPrev),
+                DescribeCondition(st.ConditionNow),
+                FormatPositionSummary(),
+                IsExecutionHalted() ? haltReason : "OFF",
+                ComputeDiagnosticDecision(st),
+                st.RsiValue,
+                st.AtrFilterValue,
+                st.AtrMaValue,
+                st.EntryLine,
+                st.SlLine,
+                st.Tp1Line,
+                st.Tp2Line,
+                st.Tp3Line,
+                FormatSignalFlags(st)));
+        }
+
+        private string ComputeDiagnosticDecision(PineEvalState st)
+        {
+            if (st == null)
+                return "NONE";
+            if (IsExecutionHalted())
+                return "HALTED:" + haltReason;
+
+            switch (TPSType)
+            {
+                case PineTpSType.Atr:
+                    if (st.LongE)
+                        return Position.MarketPosition == MarketPosition.Long ? "SKIP_ALREADY_LONG" : (Position.MarketPosition == MarketPosition.Short ? "REV_TO_LONG" : "ENTER_LONG");
+                    if (st.ShortE)
+                        return Position.MarketPosition == MarketPosition.Short ? "SKIP_ALREADY_SHORT" : (Position.MarketPosition == MarketPosition.Long ? "REV_TO_SHORT" : "ENTER_SHORT");
+                    if (Position.MarketPosition == MarketPosition.Long)
+                    {
+                        if (st.LongSL) return "EXIT_LONG_SL";
+                        if (st.LongTP1) return "EXIT_LONG_TP1";
+                        if (st.LongTP2) return "EXIT_LONG_TP2";
+                        if (st.LongTP3) return "EXIT_LONG_TP3";
+                    }
+                    if (Position.MarketPosition == MarketPosition.Short)
+                    {
+                        if (st.ShortSL) return "EXIT_SHORT_SL";
+                        if (st.ShortTP1) return "EXIT_SHORT_TP1";
+                        if (st.ShortTP2) return "EXIT_SHORT_TP2";
+                        if (st.ShortTP3) return "EXIT_SHORT_TP3";
+                    }
+                    break;
+                case PineTpSType.Options:
+                    if (st.BuyEntry)
+                        return Position.MarketPosition == MarketPosition.Long ? "SKIP_ALREADY_LONG" : (Position.MarketPosition == MarketPosition.Short ? "REV_TO_LONG" : "ENTER_LONG");
+                    if (st.SellEntry && Position.MarketPosition == MarketPosition.Long)
+                        return "EXIT_LONG_OPTIONS";
+                    if (st.SellEntry)
+                        return "SELL_SIGNAL_NO_ACTION";
+                    break;
+                default:
+                    if (st.BuyEntry)
+                        return Position.MarketPosition == MarketPosition.Long ? "SKIP_ALREADY_LONG" : (Position.MarketPosition == MarketPosition.Short ? "REV_TO_LONG" : "ENTER_LONG");
+                    if (st.SellEntry)
+                        return Position.MarketPosition == MarketPosition.Short ? "SKIP_ALREADY_SHORT" : (Position.MarketPosition == MarketPosition.Long ? "REV_TO_SHORT" : "ENTER_SHORT");
+                    break;
+            }
+
+            return "NONE";
+        }
+
+        private string FormatSignalFlags(PineEvalState st)
+        {
+            if (st == null)
+                return "none";
+
+            var flags = new List<string>();
+            if (st.LongE) flags.Add("LongE");
+            if (st.ShortE) flags.Add("ShortE");
+            if (st.LongSL) flags.Add("LongSL");
+            if (st.ShortSL) flags.Add("ShortSL");
+            if (st.LongTP1) flags.Add("LongTP1");
+            if (st.ShortTP1) flags.Add("ShortTP1");
+            if (st.LongTP2) flags.Add("LongTP2");
+            if (st.ShortTP2) flags.Add("ShortTP2");
+            if (st.LongTP3) flags.Add("LongTP3");
+            if (st.ShortTP3) flags.Add("ShortTP3");
+            return flags.Count == 0 ? "none" : string.Join(",", flags);
+        }
+
+        private void UpdateTradeExcursions(double high, double low)
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return;
+
+            double useHigh = high > 0 ? high : Close[0];
+            double useLow = low > 0 ? low : Close[0];
+            foreach (PineTradeRuntimeState state in tradeStates.Values.Where(x => x != null && x.RemainingQuantity > 0 && x.EntryPrice > 0))
+            {
+                if (state.MaxFavorablePrice <= 0.0)
+                    state.MaxFavorablePrice = state.EntryPrice;
+                if (state.MaxAdversePrice <= 0.0)
+                    state.MaxAdversePrice = state.EntryPrice;
+
+                if (state.EntrySide == MarketPosition.Long)
+                {
+                    state.MaxFavorablePrice = Math.Max(state.MaxFavorablePrice, useHigh);
+                    state.MaxAdversePrice = Math.Min(state.MaxAdversePrice, useLow);
+                }
+                else if (state.EntrySide == MarketPosition.Short)
+                {
+                    state.MaxFavorablePrice = Math.Min(state.MaxFavorablePrice, useLow);
+                    state.MaxAdversePrice = Math.Max(state.MaxAdversePrice, useHigh);
+                }
+            }
+        }
+
+        private double ComputeExecutionPnl(PineTradeRuntimeState state, int quantity, double exitPrice)
+        {
+            if (state == null || quantity <= 0 || state.EntryPrice <= 0.0 || exitPrice <= 0.0)
+                return 0.0;
+
+            double pointValue = Instrument != null && Instrument.MasterInstrument != null ? Instrument.MasterInstrument.PointValue : 0.0;
+            if (pointValue <= 0.0 && state.NtPointsPer1kLoss > 0.0)
+                pointValue = 1000.0 / state.NtPointsPer1kLoss;
+            if (pointValue <= 0.0)
+                return 0.0;
+
+            double points = state.EntrySide == MarketPosition.Long
+                ? exitPrice - state.EntryPrice
+                : state.EntryPrice - exitPrice;
+            return points * pointValue * Math.Max(1, quantity);
+        }
+
+        private string ResolveExitReason(Execution execution, PineTradeRuntimeState state)
+        {
+            if (state != null && !string.IsNullOrWhiteSpace(state.LastExitReason))
+                return state.LastExitReason;
+            if (execution != null && execution.Order != null && !string.IsNullOrWhiteSpace(execution.Order.Name))
+                return execution.Order.Name;
+            return "EXIT";
+        }
+
+        private void LogTradeOutcomeStory(Execution execution, PineTradeRuntimeState state, int quantity, double execPnl, string exitReason)
+        {
+            if (!EnableTradeStoryLogging || execution == null || state == null)
+                return;
+
+            double exitPrice = execution.Price > 0 ? execution.Price : (execution.Order != null && execution.Order.AverageFillPrice > 0 ? execution.Order.AverageFillPrice : 0.0);
+            string outcome = execPnl >= 0.0 ? "PROFIT" : "LOSS";
+            double pointValue = Instrument != null && Instrument.MasterInstrument != null ? Instrument.MasterInstrument.PointValue : 0.0;
+            if (pointValue <= 0.0 && state.NtPointsPer1kLoss > 0.0)
+                pointValue = 1000.0 / state.NtPointsPer1kLoss;
+
+            double favorable = state.MaxFavorablePrice > 0.0 ? state.MaxFavorablePrice : state.EntryPrice;
+            double adverse = state.MaxAdversePrice > 0.0 ? state.MaxAdversePrice : state.EntryPrice;
+            double mfePoints = 0.0;
+            double maePoints = 0.0;
+            if (state.EntryPrice > 0.0)
+            {
+                if (state.EntrySide == MarketPosition.Long)
+                {
+                    mfePoints = Math.Max(0.0, favorable - state.EntryPrice);
+                    maePoints = Math.Max(0.0, state.EntryPrice - adverse);
+                }
+                else if (state.EntrySide == MarketPosition.Short)
+                {
+                    mfePoints = Math.Max(0.0, state.EntryPrice - favorable);
+                    maePoints = Math.Max(0.0, adverse - state.EntryPrice);
+                }
+            }
+
+            StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
+                "[TRADE_STORY] trade={0} side={1} qty={2} entry={3:F2} exit={4:F2} pnl={5:C2} {6} reason={7} ctx={8} entryReason={9} rawBuy={10} rawSell={11} trend={12} cond={13}->{14} rsi={15:F2} atr={16:F2} atrMa={17:F2} entryLine={18:F2} sl={19:F2} tp1={20:F2} tp2={21:F2} tp3={22:F2} mfe={23} mae={24} entryTime={25:yyyy-MM-dd HH:mm:ss} exitTime={26:yyyy-MM-dd HH:mm:ss}",
+                state.TradeId,
+                state.EntrySide,
+                Math.Max(1, quantity),
+                state.EntryPrice,
+                exitPrice,
+                execPnl,
+                outcome,
+                string.IsNullOrWhiteSpace(exitReason) ? "EXIT" : exitReason,
+                string.IsNullOrWhiteSpace(state.EntryContext) ? "AUTO" : state.EntryContext,
+                string.IsNullOrWhiteSpace(state.EntryReason) ? "n/a" : state.EntryReason,
+                state.EntryRawBuySignal,
+                state.EntryRawSellSignal,
+                state.EntryTrendAllowed,
+                DescribeCondition(state.EntryConditionPrev),
+                DescribeCondition(state.EntryConditionNow),
+                state.EntryRsiValue,
+                state.EntryAtrFilterValue,
+                state.EntryAtrMaValue,
+                state.EntryLine,
+                state.EntrySlLine,
+                state.EntryTp1Line,
+                state.EntryTp2Line,
+                state.EntryTp3Line,
+                FormatExcursionText(mfePoints, pointValue, quantity),
+                FormatExcursionText(maePoints, pointValue, quantity),
+                state.EntrySignalTime != DateTime.MinValue ? state.EntrySignalTime : state.EntryTimeUtc.ToLocalTime(),
+                execution.Time != DateTime.MinValue ? execution.Time : DateTime.Now));
+        }
+
+        private string FormatExcursionText(double points, double pointValue, int quantity)
+        {
+            if (points <= 0.0)
+                return "$0.00 (0.00pt)";
+
+            double cash = pointValue > 0.0 ? points * pointValue * Math.Max(1, quantity) : 0.0;
+            return string.Format(CultureInfo.InvariantCulture, "{0:C2} ({1:F2}pt)", cash, points);
+        }
+
+        private void TrackPendingExitReason(MarketPosition side, int quantity, string signalName)
+        {
+            if (tradeStates == null || tradeStates.Count == 0 || quantity <= 0)
+                return;
+
+            int remaining = Math.Abs(quantity);
+            foreach (PineTradeRuntimeState state in tradeStates.Values.Where(x => x != null && x.RemainingQuantity > 0 && x.EntrySide == side).OrderBy(x => x.EntryTimeUtc))
+            {
+                if (remaining <= 0)
+                    break;
+
+                int applied = Math.Min(remaining, Math.Max(1, state.RemainingQuantity));
+                state.LastExitReason = signalName;
+                remaining -= applied;
+            }
         }
 
         private void UpdateSignalDrawings(PineEvalState st)
@@ -2426,137 +2880,105 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateManualTradeButtons(bool force)
         {
-            if (!chartTraderButtonsAdded)
+            if ((manualFlattenButton == null && manualResumeButton == null && manualBuyButton == null && manualSellButton == null) || ChartControl == null)
                 return;
 
-            bool manualEnabled = State == State.Realtime && !dailyLimitHalted;
-            bool resumeEnabled = State == State.Realtime && manualHaltActive && !dailyLimitHalted;
+            bool manualEnabled = manualHaltActive && State == State.Realtime;
+            bool resumeEnabled = manualHaltActive && State == State.Realtime;
             if (!force && manualEnabled == lastManualButtonsEnabled && resumeEnabled == lastResumeEnabled)
                 return;
 
             lastManualButtonsEnabled = manualEnabled;
             lastResumeEnabled = resumeEnabled;
-            if (manualBuyButton != null)
-                manualBuyButton.IsEnabled = manualEnabled;
-            if (manualSellButton != null)
-                manualSellButton.IsEnabled = manualEnabled;
-            if (manualResumeButton != null)
-                manualResumeButton.IsEnabled = resumeEnabled;
-            if (manualFlattenButton != null)
-                manualFlattenButton.IsEnabled = State == State.Realtime;
+
+            Action apply = () =>
+            {
+                if (manualBuyButton != null)
+                {
+                    manualBuyButton.IsEnabled = manualEnabled;
+                    manualBuyButton.Background = manualEnabled ? Brushes.DarkGreen : Brushes.DimGray;
+                    manualBuyButton.Foreground = manualEnabled ? Brushes.White : Brushes.LightGray;
+                    manualBuyButton.Opacity = manualEnabled ? 1.0 : 0.6;
+                    manualBuyButton.ToolTip = manualEnabled
+                        ? "Manual trades enabled while strategy is halted."
+                        : "Enable by clicking Flatten + Halt.";
+                }
+
+                if (manualSellButton != null)
+                {
+                    manualSellButton.IsEnabled = manualEnabled;
+                    manualSellButton.Background = manualEnabled ? Brushes.DarkRed : Brushes.DimGray;
+                    manualSellButton.Foreground = manualEnabled ? Brushes.White : Brushes.LightGray;
+                    manualSellButton.Opacity = manualEnabled ? 1.0 : 0.6;
+                    manualSellButton.ToolTip = manualEnabled
+                        ? "Manual trades enabled while strategy is halted."
+                        : "Enable by clicking Flatten + Halt.";
+                }
+
+                if (manualResumeButton != null)
+                    manualResumeButton.IsEnabled = resumeEnabled;
+                if (manualFlattenButton != null)
+                    manualFlattenButton.IsEnabled = State == State.Realtime;
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
         }
 
         private void UpdateRuntimeInputBoxes(bool force)
         {
-            if (!chartTraderButtonsAdded)
+            if ((tradesPerEntryTextBox == null && dllTextBox == null && dplTextBox == null) || ChartControl == null)
                 return;
 
             int tradesValue = GetEffectiveTradesPerEntry();
             double dllValue = Math.Abs(GetEffectiveDailyLossLimit());
             double dplValue = GetEffectiveDailyProfitLimit();
 
-            if (tradesPerEntryTextBox != null && (force || lastTradesPerEntryDisplay != tradesValue) && !tradesPerEntryTextBox.IsKeyboardFocusWithin)
+            Action apply = () =>
             {
-                tradesPerEntryTextBox.Text = tradesValue.ToString(CultureInfo.InvariantCulture);
-                lastTradesPerEntryDisplay = tradesValue;
-            }
-            if (dllTextBox != null && (force || Math.Abs(lastDllDisplay - dllValue) > 1e-9) && !dllTextBox.IsKeyboardFocusWithin)
-            {
-                dllTextBox.Text = dllValue.ToString("0.##", CultureInfo.InvariantCulture);
-                lastDllDisplay = dllValue;
-            }
-            if (dplTextBox != null && (force || Math.Abs(lastDplDisplay - dplValue) > 1e-9) && !dplTextBox.IsKeyboardFocusWithin)
-            {
-                dplTextBox.Text = dplValue.ToString("0.##", CultureInfo.InvariantCulture);
-                lastDplDisplay = dplValue;
-            }
+                if (tradesPerEntryTextBox != null && (force || lastTradesPerEntryDisplay != tradesValue) && !tradesPerEntryTextBox.IsKeyboardFocusWithin)
+                {
+                    tradesPerEntryTextBox.Text = tradesValue.ToString(CultureInfo.InvariantCulture);
+                    lastTradesPerEntryDisplay = tradesValue;
+                }
+                if (dllTextBox != null && (force || Math.Abs(lastDllDisplay - dllValue) > 1e-9) && !dllTextBox.IsKeyboardFocusWithin)
+                {
+                    dllTextBox.Text = dllValue.ToString("0.##", CultureInfo.InvariantCulture);
+                    lastDllDisplay = dllValue;
+                }
+                if (dplTextBox != null && (force || Math.Abs(lastDplDisplay - dplValue) > 1e-9) && !dplTextBox.IsKeyboardFocusWithin)
+                {
+                    dplTextBox.Text = dplValue.ToString("0.##", CultureInfo.InvariantCulture);
+                    lastDplDisplay = dplValue;
+                }
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
         }
 
         private void ManualFlattenButton_Click(object sender, RoutedEventArgs e)
         {
-            TriggerCustomEvent(o =>
-            {
-                if (State != State.Realtime)
-                    return;
-                manualHaltActive = true;
-                manualHaltActivatedAt = DateTime.UtcNow;
-                haltReason = "manual_halt";
-                try
-                {
-                    MultiStratManager.Instance?.ActivateManualHaltOverride(Account != null ? Account.Name : string.Empty, Name);
-                }
-                catch { }
-                EnforceFlatWhenHalted("manual_halt");
-                UpdateManualTradeButtons(true);
-                UpdateStatusOverlay(Time[0]);
-                UpdateChecklistOverlay();
-            }, null);
+            TriggerCustomEvent(o => HandleManualHaltRequest(), null);
         }
 
         private void ManualResumeButton_Click(object sender, RoutedEventArgs e)
         {
-            TriggerCustomEvent(o =>
-            {
-                if (State != State.Realtime || dailyLimitHalted)
-                    return;
-                manualHaltActive = false;
-                manualHaltActivatedAt = DateTime.MinValue;
-                haltReason = string.Empty;
-                try
-                {
-                    MultiStratManager.Instance?.ClearManualHaltOverride(Account != null ? Account.Name : string.Empty, "manual_resume");
-                }
-                catch { }
-                UpdateManualTradeButtons(true);
-                UpdateStatusOverlay(Time[0]);
-                UpdateChecklistOverlay();
-            }, null);
+            TriggerCustomEvent(o => HandleManualResumeRequest(), null);
         }
 
         private void ManualBuyButton_Click(object sender, RoutedEventArgs e)
         {
-            TriggerCustomEvent(o =>
-            {
-                if (State != State.Realtime)
-                {
-                    StrategyLogInfo("[MANUAL] Manual buy ignored (strategy not realtime).");
-                    return;
-                }
-
-                if (dailyLimitHalted)
-                {
-                    StrategyLogInfo("[MANUAL] Manual buy ignored (daily limit halted).");
-                    return;
-                }
-
-                if (Position.MarketPosition == MarketPosition.Short)
-                    SubmitExit(MarketPosition.Short, Position.Quantity, "MANUAL_REV");
-                SubmitEntryBatch(MarketPosition.Long, "MANBUY", null, true);
-                StrategyLogInfo("[MANUAL] Manual buy submitted.");
-            }, null);
+            TriggerCustomEvent(o => HandleManualOrderRequest(MarketPosition.Long), null);
         }
 
         private void ManualSellButton_Click(object sender, RoutedEventArgs e)
         {
-            TriggerCustomEvent(o =>
-            {
-                if (State != State.Realtime)
-                {
-                    StrategyLogInfo("[MANUAL] Manual sell ignored (strategy not realtime).");
-                    return;
-                }
-
-                if (dailyLimitHalted)
-                {
-                    StrategyLogInfo("[MANUAL] Manual sell ignored (daily limit halted).");
-                    return;
-                }
-
-                if (Position.MarketPosition == MarketPosition.Long)
-                    SubmitExit(MarketPosition.Long, Position.Quantity, "MANUAL_REV");
-                SubmitEntryBatch(MarketPosition.Short, "MANSELL", null, true);
-                StrategyLogInfo("[MANUAL] Manual sell submitted.");
-            }, null);
+            TriggerCustomEvent(o => HandleManualOrderRequest(MarketPosition.Short), null);
         }
 
         private void TradesPerEntryTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
@@ -2626,6 +3048,327 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             string text = dplTextBox.Text;
             TriggerCustomEvent(o => HandleDplOverrideRequest(o as string), text);
+        }
+
+        private void HandleManualHaltRequest()
+        {
+            HandleManualHaltRequest(true);
+        }
+
+        private void HandleManualHaltRequest(bool allowBootstrap)
+        {
+            if (State != State.Realtime)
+            {
+                StrategyLogInfo("[MANUAL_HALT] Flatten ignored (strategy not realtime).");
+                return;
+            }
+
+            if (allowBootstrap)
+                EnsureManualTradeStateForPosition();
+            manualHaltActive = true;
+            manualHaltActivatedAt = DateTime.UtcNow;
+            haltReason = "manual_halt";
+
+            try
+            {
+                MultiStratManager.Instance?.ActivateManualHaltOverride(Account != null ? Account.Name : string.Empty, Name);
+            }
+            catch { }
+
+            EnforceFlatWhenHalted("manual_halt");
+            StrategyLogInfo("[MANUAL_HALT] Flatten requested.");
+            UpdateManualTradeButtons(true);
+            UpdateStatusOverlay(CurrentBar > 0 ? Time[0] : DateTime.Now);
+            UpdateChecklistOverlay();
+        }
+
+        private void HandleManualResumeRequest()
+        {
+            if (State != State.Realtime)
+            {
+                StrategyLogInfo("[MANUAL_HALT] Resume ignored (strategy not realtime).");
+                return;
+            }
+
+            if (!manualHaltActive)
+            {
+                UpdateStatusOverlay(CurrentBar > 0 ? Time[0] : DateTime.Now);
+                return;
+            }
+
+            manualHaltActive = false;
+            manualHaltActivatedAt = DateTime.MinValue;
+            haltReason = string.Empty;
+            try
+            {
+                MultiStratManager.Instance?.ClearManualHaltOverride(Account != null ? Account.Name : string.Empty, "manual_resume");
+            }
+            catch { }
+            StrategyLogInfo("[MANUAL_HALT] Strategy resumed by user.");
+            UpdateManualTradeButtons(true);
+            UpdateStatusOverlay(CurrentBar > 0 ? Time[0] : DateTime.Now);
+            UpdateChecklistOverlay();
+        }
+
+        private void HandleManualOrderRequest(MarketPosition direction)
+        {
+            if (State != State.Realtime)
+            {
+                StrategyLogInfo("[MANUAL] Manual trade ignored (strategy not realtime).");
+                return;
+            }
+
+            if (!manualHaltActive)
+            {
+                StrategyLogInfo("[MANUAL] Manual trade ignored (manual halt not active).");
+                return;
+            }
+
+            EnsureManualTradeStateForPosition();
+
+            if (direction == MarketPosition.Long)
+            {
+                if (Position.MarketPosition == MarketPosition.Short)
+                    SubmitExit(MarketPosition.Short, Position.Quantity, "MANUAL_REV");
+                SubmitEntryBatch(MarketPosition.Long, "MANBUY", null, true);
+            }
+            else if (direction == MarketPosition.Short)
+            {
+                if (Position.MarketPosition == MarketPosition.Long)
+                    SubmitExit(MarketPosition.Long, Position.Quantity, "MANUAL_REV");
+                SubmitEntryBatch(MarketPosition.Short, "MANSELL", null, true);
+            }
+        }
+
+        private void EnsureManualTradeStateForPosition()
+        {
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return;
+
+            if (tradeStates != null && tradeStates.Count > 0)
+                return;
+
+            if (TryRestoreTradeStateFromTradeSync())
+                return;
+
+            BootstrapExistingPositionState(true);
+        }
+
+        private bool TryRestoreTradeStateFromTradeSync()
+        {
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return false;
+
+            var manager = MultiStratManager.Instance;
+            var tradeSync = manager != null ? manager.TradeSync : null;
+            if (tradeSync == null || Account == null || Instrument == null)
+                return false;
+
+            string acct = Account.Name ?? string.Empty;
+            string inst = Instrument.FullName ?? string.Empty;
+            MarketPosition side = Position.MarketPosition;
+            var openTrades = tradeSync.GetOpenTradesSnapshot();
+            if (openTrades == null || openTrades.Count == 0)
+                return false;
+
+            var record = openTrades.FirstOrDefault(r =>
+                r != null &&
+                r.Side == side &&
+                string.Equals((r.AccountName ?? string.Empty).Trim(), acct.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals((r.Instrument ?? string.Empty).Trim(), inst.Trim(), StringComparison.OrdinalIgnoreCase));
+            if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
+                return false;
+
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, PineTradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+            if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
+                return false;
+
+            int posQty = Math.Abs(Position.Quantity);
+            int qty = record.RemainingQuantity > 0 ? record.RemainingQuantity : Math.Max(1, posQty);
+            int originalQty = record.NtQuantity > 0 ? record.NtQuantity : Math.Max(1, posQty);
+            double entryPrice = record.EntryPrice > 0 ? record.EntryPrice : Position.AveragePrice;
+
+            var state = new PineTradeRuntimeState
+            {
+                TradeId = record.TradeId,
+                SyncTradeId = record.AggregateEntry ? record.TradeId : null,
+                EntrySignal = record.TradeId,
+                EntrySide = record.Side,
+                OriginalQuantity = originalQty,
+                RemainingQuantity = qty,
+                InstrumentName = string.IsNullOrWhiteSpace(record.Instrument) ? inst : record.Instrument,
+                AccountName = string.IsNullOrWhiteSpace(record.AccountName) ? acct : record.AccountName,
+                EntryPrice = entryPrice,
+                OpenPublished = true,
+                IsSynthetic = false,
+                EntryTimeUtc = DateTime.UtcNow,
+                NtPointsPer1kLoss = record.NtPointsPer1kLoss
+            };
+
+            if (state.NtPointsPer1kLoss <= 0)
+            {
+                try
+                {
+                    double pointValue = Instrument.MasterInstrument.PointValue;
+                    state.NtPointsPer1kLoss = pointValue > 0 ? 1000.0 / pointValue : 0.0;
+                }
+                catch
+                {
+                    state.NtPointsPer1kLoss = 0.0;
+                }
+            }
+
+            tradeStates[record.TradeId] = state;
+            openTradeOrder.Add(record.TradeId);
+            entrySignalToTradeId[record.TradeId] = record.TradeId;
+            if (!string.IsNullOrEmpty(state.SyncTradeId))
+            {
+                syncGroups[state.SyncTradeId] = new PineTradeSyncGroup
+                {
+                    TradeId = state.SyncTradeId,
+                    Side = state.EntrySide,
+                    TotalQuantity = originalQty,
+                    LastPublishedRemaining = qty,
+                    OpenPublished = true,
+                    CreatedAtUtc = DateTime.UtcNow
+                };
+                syncGroups[state.SyncTradeId].MemberTradeIds.Add(record.TradeId);
+            }
+
+            StrategyLogDebug("[MANUAL][SYNC] Rehydrated trade state from TradeSync for " + record.TradeId + ".");
+            return true;
+        }
+
+        private void BootstrapExistingPositionState(bool allowWhileHalted = false)
+        {
+            if (manualHaltActive && !allowWhileHalted)
+                return;
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return;
+
+            int accountQty = GetAccountInstrumentSignedQuantity();
+            if (StartBehavior == StartBehavior.ImmediatelySubmitSynchronizeAccount && accountQty == 0)
+            {
+                StrategyLogDebug("[AUTO][BOOTSTRAP] Deferring bootstrap while waiting for start-behavior sync entry (account flat).");
+                return;
+            }
+
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, PineTradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+            if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
+                return;
+
+            MarketPosition side = Position.MarketPosition;
+            int qty = Math.Abs(Position.Quantity);
+            string tradeId = CreateTradeId(side == MarketPosition.Long ? "LONG" : "SHORT");
+            var state = new PineTradeRuntimeState
+            {
+                TradeId = tradeId,
+                SyncTradeId = null,
+                EntrySignal = tradeId,
+                EntrySide = side,
+                OriginalQuantity = qty,
+                RemainingQuantity = qty,
+                InstrumentName = Instrument != null ? Instrument.FullName : string.Empty,
+                AccountName = Account != null ? Account.Name : string.Empty,
+                EntryPrice = Position.AveragePrice,
+                OpenPublished = false,
+                IsSynthetic = false,
+                EntryTimeUtc = DateTime.UtcNow
+            };
+
+            try
+            {
+                double pointValue = Instrument?.MasterInstrument?.PointValue ?? 0.0;
+                state.NtPointsPer1kLoss = pointValue > 0 ? 1000.0 / pointValue : 0.0;
+            }
+            catch
+            {
+                state.NtPointsPer1kLoss = 0.0;
+            }
+
+            tradeStates[tradeId] = state;
+            openTradeOrder.Add(tradeId);
+            entrySignalToTradeId[tradeId] = tradeId;
+            StrategyLogInfo(string.Format("[AUTO][BOOTSTRAP] Seeded trade {0} for existing position {1} qty={2}", tradeId, side, qty));
+
+            if (State == State.Realtime)
+                PublishOpenEvent(state);
+        }
+
+        private int GetAccountInstrumentSignedQuantity()
+        {
+            if (Account == null || Instrument == null)
+                return 0;
+
+            try
+            {
+                foreach (var accountPosition in Account.Positions)
+                {
+                    if (accountPosition?.Instrument == null)
+                        continue;
+                    if (!string.Equals(accountPosition.Instrument.FullName, Instrument.FullName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    return (int)GetSignedQuantity(accountPosition.MarketPosition, accountPosition.Quantity);
+                }
+            }
+            catch (Exception ex)
+            {
+                StrategyLogDebug(string.Format("[AUTO][BOOTSTRAP] Unable to read account quantity: {0}", ex.Message));
+            }
+
+            return 0;
+        }
+
+        private static double GetSignedQuantity(MarketPosition marketPosition, double quantity)
+        {
+            double absQty = Math.Abs(quantity);
+            switch (marketPosition)
+            {
+                case MarketPosition.Long:
+                    return absQty;
+                case MarketPosition.Short:
+                    return -absQty;
+                default:
+                    return 0;
+            }
+        }
+
+        private void ResetRuntimeState()
+        {
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, PineTradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+            else
+                tradeStates.Clear();
+
+            if (entrySignalToTradeId == null)
+                entrySignalToTradeId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            else
+                entrySignalToTradeId.Clear();
+
+            if (syncGroups == null)
+                syncGroups = new Dictionary<string, PineTradeSyncGroup>(StringComparer.OrdinalIgnoreCase);
+            else
+                syncGroups.Clear();
+
+            if (workingEntryOrders == null)
+                workingEntryOrders = new Dictionary<string, Order>(StringComparer.OrdinalIgnoreCase);
+            else
+                workingEntryOrders.Clear();
+
+            openTradeOrder.Clear();
+            atrEntryQuantity = 0;
+            atrEntrySide = MarketPosition.Flat;
+            lastUiEvalState = null;
+            lastStatusText = string.Empty;
+            lastStatusHealthy = false;
+            lastStatusHasPnLLines = false;
+            lastStatusPnlNegative = false;
+            lastChecklistText = string.Empty;
+            lastChecklistReady = false;
+            lastSignalDiagnosticsBarTime = Core.Globals.MinDate;
         }
 
         private void FocusRuntimeTextBox(TextBox textBox, MouseButtonEventArgs e)
@@ -3029,13 +3772,16 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Treat Multi-Entry As Single Trade", GroupName = "07 - Runtime", Order = 1)]
         public bool TreatMultiEntryAsSingleTrade { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits", GroupName = "07 - Runtime", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Start Halted On Enable", GroupName = "07 - Runtime", Order = 2)]
+        public bool StartHaltedOnEnable { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits", GroupName = "07 - Runtime", Order = 3)]
         public bool EnableDailyPnLLimits { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Daily Loss Limit", GroupName = "07 - Runtime", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Daily Loss Limit", GroupName = "07 - Runtime", Order = 4)]
         public double DailyLossLimit { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Daily Profit Limit", GroupName = "07 - Runtime", Order = 4)]
+        [NinjaScriptProperty, Display(Name = "Daily Profit Limit", GroupName = "07 - Runtime", Order = 5)]
         public double DailyProfitLimit { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Show Ribbon", GroupName = "08 - Visuals", Order = 0)]
@@ -3056,18 +3802,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(1, 100), Display(Name = "Risk Line Right Bars", GroupName = "08 - Visuals", Order = 5)]
         public int RiskLineRightBars { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Debug Logging", GroupName = "09 - Diagnostics", Order = 0)]
-        public bool EnableDebugLogging { get; set; }
+        [NinjaScriptProperty, Display(Name = "Debug", GroupName = "09 - Diagnostics", Order = 0)]
+        public bool Debug { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Signal Diagnostics", GroupName = "09 - Diagnostics", Order = 1)]
+        public bool EnableSignalDiagnostics { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Trade Story Logging", GroupName = "09 - Diagnostics", Order = 2)]
+        public bool EnableTradeStoryLogging { get; set; }
     }
 }
-
-
-
-
-
-
-
-
-
-
-

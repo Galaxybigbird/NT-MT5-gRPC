@@ -14,6 +14,7 @@ namespace NinjaTrader.NinjaScript.Shared
         public int RemainingQuantity;
         public bool OpenPublished;
         public bool IsSynthetic;
+        public bool IsManualEntry;
         public string InstrumentName;
         public string AccountName;
         public double NtPointsPer1kLoss;
@@ -22,6 +23,25 @@ namespace NinjaTrader.NinjaScript.Shared
         public double LastTargetPrice;
         public bool PendingClosePublish;
         public DateTime EntryTimeUtc;
+        public string EntryContext;
+        public string EntryReason;
+        public DateTime EntrySignalTime;
+        public double EntryConditionPrev;
+        public double EntryConditionNow;
+        public bool EntryTrendAllowed;
+        public bool EntryRawBuySignal;
+        public bool EntryRawSellSignal;
+        public double EntryRsiValue;
+        public double EntryAtrFilterValue;
+        public double EntryAtrMaValue;
+        public double EntryLine;
+        public double EntrySlLine;
+        public double EntryTp1Line;
+        public double EntryTp2Line;
+        public double EntryTp3Line;
+        public string LastExitReason;
+        public double MaxFavorablePrice;
+        public double MaxAdversePrice;
     }
 
     internal sealed class PineTradeSyncGroup
@@ -36,4 +56,3 @@ namespace NinjaTrader.NinjaScript.Shared
         public readonly List<string> MemberTradeIds = new List<string>();
     }
 }
-

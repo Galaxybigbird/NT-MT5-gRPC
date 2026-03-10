@@ -1,214 +1,4 @@
-PARAMS: AtrPeriod=14, StopType=ATR, StopTicks=40, AtrStopMult=3, TargetType=ATR, TargetTicks=60, AtrTargetMult=9, UseDemaAtrTrailing=True, DemaAtrPeriod=7, DemaAtrMultiplier=1.2, DemaAtrActivationMode=Dollars, DemaAtrActivationValue=25, UseBreakEven=False, BETriggerTicks=30, BEPlusTicks=2
-[NT_ADDON][DEBUG][STRATEGY] PARAMS: AtrPeriod=14, StopType=ATR, StopTicks=40, AtrStopMult=3, TargetType=ATR, TargetTicks=60, AtrTargetMult=9, UseDemaAtrTrailing=True, DemaAtrPeriod=7, DemaAtrMultiplier=1.2, DemaAtrActivationMode=Dollars, DemaAtrActivationValue=25, UseBreakEven=False, BETriggerTicks=30, BEPlusTicks=2
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-Enabling NinjaScript strategy 'BaseOptStrategyAuto/345425805' : On starting a real-time strategy - StartBehavior=ImmediatelySubmitSynchronizeAccount EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
-[AUTO] Strategy entered realtime; automation enabled
-[NT_ADDON][INFO][STRATEGY] [AUTO] Strategy entered realtime; automation enabled
-[NT_ADDON] MANUAL_HALT_OVERRIDE: Activated acct=Playback101 src=BaseOptStrategyAuto
-[MANUAL_HALT] Flatten requested due to manual_halt (cancelledOrders=0, submittedFlattens=0)
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Flatten requested due to manual_halt (cancelledOrders=0, submittedFlattens=0)
-[MANUAL_HALT] Flatten requested (submittedExits=0).
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Flatten requested (submittedExits=0).
-[MANUAL_HALT] Strategy started halted (config).
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Strategy started halted (config).
-[NT_ADDON] MANUAL_HALT_OVERRIDE: Cleared (strategy_terminated).
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-Disabling NinjaScript strategy 'BaseOptStrategyAuto/345425805'
-[SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-[NT_ADDON][INFO][STRATEGY] [SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-[SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-[NT_ADDON][INFO][STRATEGY] [SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-[SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-[NT_ADDON][INFO][STRATEGY] [SAFETY] Strategy terminating while account disconnected; preserving protective orders.
-[NT_ADDON][DEBUG] OnStateChange called - State: Terminated
-[NT_ADDON][INFO][SYSTEM] MultiStratManager Terminated - performing aggressive cleanup
-[NT_ADDON][INFO][TRADE_SYNC] TradeSyncService shutdown: AddOn terminated
-[NT_ADDON] Manual bridge connection mode - no monitoring to stop
-[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
-[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
-[SLTP_LOGIC] Cleaning up SLTPRemovalLogic resources (timers and processed IDs).
-[NT_ADDON][INFO][SYSTEM] [MultiStratManager] Monitored account set to null. PnL tracking stopped.
-[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
-[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
-[NT_ADDON][INFO][GRPC] Cancelled managed stops and stopped trailing/elastic monitors prior to gRPC disconnect
-[NT_ADDON][INFO][GRPC] Disconnected gRPC and stopped timers
-[NT_ADDON][INFO][SYSTEM] MultiStratManager termination cleanup completed
-[NT_ADDON][DEBUG][UI] ControlCenter window destroyed
-[NT_ADDON][DEBUG] OnStateChange called - State: SetDefaults
-[NT_ADDON][DEBUG] Setting defaults...
-[NT_ADDON][DEBUG] SetDefaults completed - progressing to Active
-[NT_ADDON][INFO][GRPC] Deferred gRPC initialization until UI opens or user connects
-[NT_ADDON][INFO][INIT] MultiStratManager constructor called
-[NT_ADDON][DEBUG] Current State: Active
-[NT_ADDON][DEBUG] Constructor completed successfully
-[NT_ADDON][UI] ControlCenter window detected - registering menu item
-[NT_ADDON][UI] Added Multi-Strategy Manager to Control Center menu
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-[NT_ADDON][DEBUG] OnStateChange called - State: Terminated
-[NT_ADDON][INFO][SYSTEM] MultiStratManager Terminated - performing aggressive cleanup
-[NT_ADDON][INFO][TRADE_SYNC] TradeSyncService shutdown: AddOn terminated
-[NT_ADDON] Manual bridge connection mode - no monitoring to stop
-[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
-[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
-[SLTP_LOGIC] Cleaning up SLTPRemovalLogic resources (timers and processed IDs).
-[NT_ADDON][INFO][SYSTEM] [MultiStratManager] Monitored account set to null. PnL tracking stopped.
-[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
-[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
-[NT_ADDON][INFO][GRPC] Cancelled managed stops and stopped trailing/elastic monitors prior to gRPC disconnect
-[NT_ADDON][INFO][GRPC] Disconnected gRPC and stopped timers
-[NT_ADDON][INFO][SYSTEM] MultiStratManager termination cleanup completed
-[NT_ADDON][DEBUG][UI] ControlCenter window destroyed
-[NT_ADDON][DEBUG] OnStateChange called - State: SetDefaults
-[NT_ADDON][DEBUG] Setting defaults...
-[NT_ADDON][DEBUG] SetDefaults completed - progressing to Active
-[NT_ADDON][INFO][GRPC] Deferred gRPC initialization until UI opens or user connects
-[NT_ADDON][INFO][INIT] MultiStratManager constructor called
-[NT_ADDON][DEBUG] Current State: Active
-[NT_ADDON][DEBUG] Constructor completed successfully
-[NT_ADDON][UI] ControlCenter window detected - registering menu item
-[NT_ADDON][UI] Added Multi-Strategy Manager to Control Center menu
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-Strategy 'PineScriptalgoBridgeStrategy/345425806': A signal at '12/11/2025 19:13:20' has been ignored since signal name 'PineScriptalgoBridgeStrategy_SE_20260309200522527_1' was longer than 50 characters. Please fix your strategy.
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-Enabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425806' : On starting a real-time strategy - StartBehavior=WaitUntilFlat EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On each tick IsUnmanaged=False MaxRestarts=4 in 5 minutes
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-Disabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425806'
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-Enabling NinjaScript strategy 'BaseOptStrategyAuto/345425807' : On starting a real-time strategy - StartBehavior=ImmediatelySubmitSynchronizeAccount EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On bar close IsUnmanaged=False MaxRestarts=4 in 5 minutes
-[AUTO] Strategy entered realtime; automation enabled
-[NT_ADDON][INFO][STRATEGY] [AUTO] Strategy entered realtime; automation enabled
-[NT_ADDON] MANUAL_HALT_OVERRIDE: Activated acct=Sim101 src=BaseOptStrategyAuto
-[MANUAL_HALT] Flatten requested due to manual_halt (cancelledOrders=0, submittedFlattens=0)
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Flatten requested due to manual_halt (cancelledOrders=0, submittedFlattens=0)
-[MANUAL_HALT] Flatten requested (submittedExits=0).
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Flatten requested (submittedExits=0).
-[MANUAL_HALT] Strategy started halted (config).
-[NT_ADDON][INFO][STRATEGY] [MANUAL_HALT] Strategy started halted (config).
-[UI] SMA visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] SMA visuals toggled OFF
-[UI] EMA visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] EMA visuals toggled OFF
-[UI] RSI visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] RSI visuals toggled OFF
-[UI] Chop BB visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] Chop BB visuals toggled OFF
-[UI] ATR visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] ATR visuals toggled OFF
-[UI] MACD visuals toggled OFF
-[NT_ADDON][INFO][STRATEGY] [UI] MACD visuals toggled OFF
-[UI] VWAP visuals toggled ON
-[NT_ADDON][INFO][STRATEGY] [UI] VWAP visuals toggled ON
-[UI] VWAP visuals toggled ON
-[NT_ADDON][INFO][STRATEGY] [UI] VWAP visuals toggled ON
-[NT_ADDON] MANUAL_HALT_OVERRIDE: Cleared (strategy_terminated).
-ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
-ManualOrderTestStrategy: State.Terminated entered.
-NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+Q_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
 NQ_PivotPrior_Scalper_v2: State.Terminated entered.
 ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
 NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
@@ -262,4 +52,58 @@ Disabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425808'
 Strategy 'PineScriptalgoBridgeStrategy/345425808': A signal at '03/05/2026 18:29:10' has been ignored since signal name 'PineScriptalgoBridgeStrategy_LE_20260309202504593_621' was longer than 50 characters. Please fix your strategy.
 ManualOrderTestStrategy: State.Terminated entered.
 NQ_PivotPrior_Scalper_v2: State.Terminated entered.
-Enabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425808' : On starting a real-time strategy - StartBehavior=ImmediatelySubmitSynchronizeAccount EntryHandling=All entries EntriesPerDirection=10 S
+Enabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425808' : On starting a real-time strategy - StartBehavior=ImmediatelySubmitSynchronizeAccount EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On each tick IsUnmanaged=False MaxRestarts=4 in 5 minutes
+[NT_ADDON][DEBUG] OnStateChange called - State: Terminated
+[NT_ADDON][INFO][SYSTEM] MultiStratManager Terminated - performing aggressive cleanup
+[NT_ADDON][INFO][TRADE_SYNC] TradeSyncService shutdown: AddOn terminated
+[NT_ADDON] Manual bridge connection mode - no monitoring to stop
+[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
+[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
+[SLTP_LOGIC] Cleaning up SLTPRemovalLogic resources (timers and processed IDs).
+[NT_ADDON][INFO][SYSTEM] [MultiStratManager] Monitored account set to null. PnL tracking stopped.
+[NT_ADDON][INFO][TRAILING] Cleaning up 0 BarsRequest subscriptions
+[NT_ADDON][INFO][TRAILING] BarsRequest cleanup complete
+[NT_ADDON][INFO][GRPC] Cancelled managed stops and stopped trailing/elastic monitors prior to gRPC disconnect
+[NT_ADDON][INFO][GRPC] Disconnected gRPC and stopped timers
+[NT_ADDON][INFO][SYSTEM] MultiStratManager termination cleanup completed
+[NT_ADDON][DEBUG][UI] ControlCenter window destroyed
+[NT_ADDON][DEBUG] OnStateChange called - State: SetDefaults
+[NT_ADDON][DEBUG] Setting defaults...
+[NT_ADDON][DEBUG] SetDefaults completed - progressing to Active
+[NT_ADDON][INFO][GRPC] Deferred gRPC initialization until UI opens or user connects
+[NT_ADDON][INFO][INIT] MultiStratManager constructor called
+[NT_ADDON][DEBUG] Current State: Active
+[NT_ADDON][DEBUG] Constructor completed successfully
+[NT_ADDON][UI] ControlCenter window detected - registering menu item
+[NT_ADDON][UI] Added Multi-Strategy Manager to Control Center menu
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+Disabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425808'
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+Enabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425809' : On starting a real-time strategy - StartBehavior=WaitUntilFlat Position=NQ MAR26 1S, NQ MAR26 1S, NQ MAR26 1S EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On each tick IsUnmanaged=False MaxRestarts=4 in 5 minutes
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+Strategy 'PineScriptalgoBridgeStrategy': Error on calling 'OnBarUpdate' method on bar 3473: The calling thread cannot access this object because a different thread owns it.
+Disabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425809'
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+ManualOrderTestStrategy: State.SetDefaults completed. IsOverlay: True
+NQ_PivotPrior_Scalper_v2: State.SetDefaults completed. IsOverlay: True
+Enabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425809' : On starting a real-time strategy - StartBehavior=WaitUntilFlat Position=NQ MAR26 1S, NQ MAR26 1S, NQ MAR26 1S EntryHandling=All entries EntriesPerDirection=10 StopTargetHandling=Per entry execution ErrorHandling=Stop strategy, cancel orders, close positions ExitOnSessionClose=True / triggering 60 seconds before close SetOrderQuantityBy=Strategy ConnectionLossHandling=Recalculate DisconnectDelaySeconds=10 CancelEntriesOnStrategyDisable=False CancelExitsOnStrategyDisable=False Calculate=On each tick IsUnmanaged=False MaxRestarts=4 in 5 minutes
+ManualOrderTestStrategy: State.Terminated entered.
+NQ_PivotPrior_Scalper_v2: State.Terminated entered.
+Strategy 'PineScriptalgoBridgeStrategy': Error on calling 'OnBarUpdate' method on bar 3474: The calling thread cannot access this object because a different thread owns it.
+Disabling NinjaScript strategy 'PineScriptalgoBridgeStrategy/345425809'
