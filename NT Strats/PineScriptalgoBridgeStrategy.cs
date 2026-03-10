@@ -1,4 +1,4 @@
-#region Using declarations
+﻿#region Using declarations
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -30,6 +30,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const int TickSeriesIndex = 1;
         private const double DailyProfitConfirmSeconds = 0.75;
         private const string StatusTag = "PINE79_STATUS";
+        private const string StatusPnlTag = "PINE79_STATUS_PNL";
+        private const string StatusLimitsTag = "PINE79_STATUS_LIMITS";
+        private const string ChecklistGreenTag = "PINE79_CHECKLIST_GREEN";
+        private const string ChecklistRedTag = "PINE79_CHECKLIST_RED";
+        private const string ChecklistNeutralTag = "PINE79_CHECKLIST_NEUTRAL";
         private const string RibbonTopTag = "PINE79_RIB_TOP";
         private const string RibbonBottomTag = "PINE79_RIB_BOT";
         private const string EntryLineTag = "PINE79_ENTRY";
@@ -98,6 +103,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool chartTraderButtonsAdded;
         private bool lastManualButtonsEnabled;
         private bool lastResumeEnabled;
+        private PineEvalState lastUiEvalState;
+        private string lastStatusText = string.Empty;
+        private bool lastStatusHealthy;
+        private bool lastStatusHasPnLLines;
+        private bool lastStatusPnlNegative;
+        private string lastChecklistText = string.Empty;
+        private bool lastChecklistReady;
 
         protected override void OnStateChange()
         {
@@ -180,6 +192,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ShowRibbon = true;
                 ShowRiskLines = true;
                 ShowEventLabels = true;
+                ShowStatusPanel = true;
+                ShowChecklistPanel = true;
                 RiskLineRightBars = 10;
                 EnableDebugLogging = false;
             }
@@ -253,6 +267,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!IsFirstTickOfBar)
             {
                 UpdateStatusOverlay(Time[0]);
+                UpdateChecklistOverlay();
                 return;
             }
 
@@ -262,10 +277,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             PineEvalState st;
             if (!EvaluateBar(out st) || !st.Valid)
             {
+                lastUiEvalState = null;
                 UpdateStatusOverlay(Time[0]);
+                UpdateChecklistOverlay();
                 return;
             }
 
+            lastUiEvalState = st;
             pineCondition = st.ConditionNow;
             pineEntryLine = st.EntryLine;
             pineSlLine = st.SlLine;
@@ -306,6 +324,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             UpdateSignalDrawings(st);
             UpdateStatusOverlay(st.BarTime);
+            UpdateChecklistOverlay();
             UpdateManualTradeButtons(false);
             UpdateRuntimeInputBoxes(false);
         }
@@ -626,7 +645,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             st.TradeDateAllowed = true;
 
             bool trendType;
-            if (!ComputeTrendType(out trendType))
+            double filterRsi;
+            double atrNow;
+            double atrMa;
+            if (!ComputeTrendType(out trendType, out filterRsi, out atrNow, out atrMa))
                 return false;
 
             bool buySig;
@@ -640,6 +662,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!ok)
                 return false;
 
+            st.TrendAllowed = trendType;
+            st.RawBuySignal = buySig;
+            st.RawSellSignal = sellSig;
+            st.RsiValue = filterRsi;
+            st.AtrFilterValue = atrNow;
+            st.AtrMaValue = atrMa;
             st.BuyEntry = buySig && trendType;
             st.SellEntry = sellSig && trendType;
             st.LeTrigger = st.BuyEntry;
@@ -1072,13 +1100,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             state.LastStopPrice = proposedStop;
         }
 
-        private bool ComputeTrendType(out bool trendType)
+        private bool ComputeTrendType(out bool trendType, out double rsiValue, out double atrNow, out double atrMa)
         {
             trendType = true;
-            double rsi;
-            if (!TryReadRsiForSeries(0, RsiPeriod, 1, out rsi))
+            rsiValue = 0.0;
+            atrNow = 0.0;
+            atrMa = 0.0;
+
+            if (!TryReadRsiForSeries(0, RsiPeriod, 1, out rsiValue))
                 return false;
-            rsi = PineAlgoMath.Truncate2(rsi);
+            rsiValue = PineAlgoMath.Truncate2(rsiValue);
 
             int count = Math.Max(AtrMaLength + 20, 80);
             var bars = BuildBarsOldestFirst(0, 1, count);
@@ -1086,22 +1117,22 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return false;
 
             List<double> atrSeries = ComputeAtrSeriesOldestFirst(bars, AtrFilterLength);
-            double atrNow = atrSeries[atrSeries.Count - 1];
+            atrNow = atrSeries[atrSeries.Count - 1];
             if (atrNow <= 0.0)
                 return false;
 
             int windowCount = Math.Min(AtrMaLength, atrSeries.Count);
             var atrWindow = atrSeries.Skip(atrSeries.Count - windowCount).ToList();
-            double atrMa = ReplicateAtrMaTypo
+            atrMa = ReplicateAtrMaTypo
                 ? atrWindow.Average()
                 : (AtrMaUseEmaWhenTypoDisabled ? ComputeEmaTailOldestFirst(atrWindow, AtrMaLength) : atrWindow.Average());
 
             bool cndSidwayss1 = atrNow >= atrMa;
-            bool cndSidwayss2 = rsi > TopLimitRsi || rsi < BottomLimitRsi;
+            bool cndSidwayss2 = rsiValue > TopLimitRsi || rsiValue < BottomLimitRsi;
             bool cndSidways = cndSidwayss1 || cndSidwayss2;
             bool cndSidways1 = cndSidwayss1 && cndSidwayss2;
             bool sideways1 = atrNow <= atrMa;
-            bool sideways2 = rsi < TopLimitRsi && rsi > BottomLimitRsi;
+            bool sideways2 = rsiValue < TopLimitRsi && rsiValue > BottomLimitRsi;
             bool sideways = sideways1 || sideways2;
             bool sidewaysAnd = sideways1 && sideways2;
 
@@ -1120,7 +1151,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     trendType = cndSidways1;
                     break;
                 case PineSidewaysFilterType.NoFilter:
-                    trendType = rsi > 0.0;
+                    trendType = rsiValue > 0.0;
                     break;
                 case PineSidewaysFilterType.SidewaysAtrOrRsi:
                     trendType = sideways;
@@ -1901,12 +1932,24 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private string CreateTradeId(string prefix)
         {
-            return string.Format(CultureInfo.InvariantCulture, "{0}_{1}_{2}_{3}", Name, prefix, DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture), Interlocked.Increment(ref tradeSequence));
+            string token = string.IsNullOrWhiteSpace(prefix) ? "SIG" : prefix.Trim().ToUpperInvariant();
+            if (token.Length > 12)
+                token = token.Substring(0, 12);
+
+            return string.Format(CultureInfo.InvariantCulture,
+                "P_{0}_{1}_{2}",
+                token,
+                DateTime.UtcNow.ToString("HHmmssfff", CultureInfo.InvariantCulture),
+                Interlocked.Increment(ref tradeSequence));
         }
 
         private string BuildExitSignalName(string reason)
         {
-            return string.Format(CultureInfo.InvariantCulture, "{0}_{1}", Name, reason ?? "EXIT");
+            string token = string.IsNullOrWhiteSpace(reason) ? "EXIT" : reason.Trim().ToUpperInvariant();
+            if (token.Length > 12)
+                token = token.Substring(0, 12);
+
+            return string.Format(CultureInfo.InvariantCulture, "PX_{0}_{1}", token, Interlocked.Increment(ref tradeSequence));
         }
 
         private void StrategyLogInfo(string message)
@@ -1952,22 +1995,249 @@ namespace NinjaTrader.NinjaScript.Strategies
             Draw.Line(this, Tp2LineTag, false, left, st.Tp2Line, 0, st.Tp2Line, Brushes.LimeGreen, DashStyleHelper.Solid, 1);
             Draw.Line(this, Tp3LineTag, false, left, st.Tp3Line, 0, st.Tp3Line, Brushes.LimeGreen, DashStyleHelper.Solid, 1);
         }
-
         private void UpdateStatusOverlay(DateTime barTime)
         {
+            if (!ShowStatusPanel)
+            {
+                RemoveDrawObject(StatusTag);
+                RemoveDrawObject(StatusPnlTag);
+                RemoveDrawObject(StatusLimitsTag);
+                lastStatusText = string.Empty;
+                lastStatusHealthy = false;
+                lastStatusHasPnLLines = false;
+                lastStatusPnlNegative = false;
+                return;
+            }
+
+            string line1 = "AUTO: " + BuildStatusMessage();
+            string pnlLine;
+            string limitsLine;
+            bool pnlNegative;
+            bool hasPnLLines = TryBuildDailyPnlLines(barTime.Date, out pnlLine, out pnlNegative, out limitsLine);
+            bool healthy = !manualHaltActive && !dailyLimitHalted;
+            string composite = hasPnLLines ? line1 + "\n" + pnlLine + "\n" + limitsLine : line1;
+            if (string.Equals(composite, lastStatusText, StringComparison.Ordinal)
+                && healthy == lastStatusHealthy
+                && hasPnLLines == lastStatusHasPnLLines
+                && pnlNegative == lastStatusPnlNegative)
+            {
+                return;
+            }
+
+            lastStatusText = composite;
+            lastStatusHealthy = healthy;
+            lastStatusHasPnLLines = hasPnLLines;
+            lastStatusPnlNegative = pnlNegative;
+
+            var font = new SimpleFont("Arial", 13) { Bold = true };
+            var line1Brush = healthy ? Brushes.LimeGreen : Brushes.OrangeRed;
+            try
+            {
+                string line1Text = hasPnLLines ? line1 + "\n\n" : line1;
+                Draw.TextFixed(this, StatusTag, line1Text, TextPosition.BottomLeft, line1Brush, font, Brushes.Black, Brushes.Transparent, 45);
+
+                if (hasPnLLines)
+                {
+                    var pnlBrush = pnlNegative ? Brushes.Red : Brushes.LimeGreen;
+                    var limitsBrush = Brushes.LimeGreen;
+                    var transparent = Brushes.Transparent;
+                    Draw.TextFixed(this, StatusPnlTag, pnlLine + "\n", TextPosition.BottomLeft, pnlBrush, font, transparent, transparent, 0);
+                    Draw.TextFixed(this, StatusLimitsTag, limitsLine, TextPosition.BottomLeft, limitsBrush, font, transparent, transparent, 0);
+                }
+                else
+                {
+                    RemoveDrawObject(StatusPnlTag);
+                    RemoveDrawObject(StatusLimitsTag);
+                }
+            }
+            catch (Exception ex)
+            {
+                StrategyLogDebug("[UI] Status overlay failed: " + ex.Message);
+            }
+        }
+
+        private string BuildStatusMessage()
+        {
+            if (dailyLimitHalted)
+                return string.IsNullOrWhiteSpace(dailyLimitType) ? "HALTED: daily limit" : "HALTED: " + dailyLimitType + " reached";
+
+            if (manualHaltActive)
+                return "HALTED: manual flatten (awaiting resume)";
+
+            if (lastUiEvalState != null && lastUiEvalState.Valid)
+            {
+                if (lastUiEvalState.BuyEntry && lastUiEvalState.SellEntry)
+                    return "READY LONG/SHORT";
+                if (lastUiEvalState.BuyEntry)
+                    return "READY LONG";
+                if (lastUiEvalState.SellEntry)
+                    return "READY SHORT";
+            }
+
+            return "RUNNING";
+        }
+
+        private bool TryBuildDailyPnlLines(DateTime sessionDate, out string pnlLine, out bool pnlNegative, out string limitsLine)
+        {
             double dailyPnl;
-            TryGetStrategyDailyTotalPnl(barTime.Date, out dailyPnl);
-            string haltText = manualHaltActive ? "MANUAL HALT" : (dailyLimitHalted ? ("HALTED " + dailyLimitType) : "RUNNING");
-            string text = string.Format(CultureInfo.InvariantCulture,
-                "Pine79 NT\nMode={0} Setup={1}\nStatus={2}\nTrades/Entry={3}\nDLL={4:C2} DPL={5:C2}\nDailyPnL={6:C2}",
-                TPSType,
-                SetupType,
-                haltText,
-                GetEffectiveTradesPerEntry(),
-                Math.Abs(GetEffectiveDailyLossLimit()),
-                GetEffectiveDailyProfitLimit(),
-                dailyPnl);
-            Draw.TextFixed(this, StatusTag, text, TextPosition.BottomRight, Brushes.White, new SimpleFont("Segoe UI", 12), Brushes.Transparent, Brushes.DimGray, 30);
+            if (!TryGetStrategyDailyTotalPnl(sessionDate, out dailyPnl))
+                dailyPnl = 0.0;
+
+            pnlNegative = dailyPnl < -1e-9;
+            pnlLine = "TotalPnL: " + dailyPnl.ToString("C2");
+            limitsLine = "DLL: " + FormatLossLimitText(Math.Abs(GetEffectiveDailyLossLimit())) + " | DPL: " + GetEffectiveDailyProfitLimit().ToString("C2");
+            return true;
+        }
+
+        private string FormatLossLimitText(double absoluteLossLimit)
+        {
+            return "(" + absoluteLossLimit.ToString("C2") + ")";
+        }
+
+        private void AppendChecklistLine(List<string> lines, List<bool?> states, string label, bool? passed)
+        {
+            if (string.IsNullOrWhiteSpace(label))
+                return;
+
+            string text = passed.HasValue
+                ? string.Format("[{0}] {1}", passed.Value ? "x" : " ", label)
+                : label;
+            lines.Add(text);
+            states.Add(passed);
+        }
+
+        private void UpdateChecklistOverlay()
+        {
+            if (!ShowChecklistPanel || ChartControl == null || lastUiEvalState == null || !lastUiEvalState.Valid)
+            {
+                RemoveDrawObject(ChecklistGreenTag);
+                RemoveDrawObject(ChecklistRedTag);
+                RemoveDrawObject(ChecklistNeutralTag);
+                lastChecklistText = string.Empty;
+                lastChecklistReady = false;
+                return;
+            }
+
+            bool readyLong = lastUiEvalState.BuyEntry;
+            bool readyShort = lastUiEvalState.SellEntry;
+            string readiness = readyLong && readyShort
+                ? "READY LONG/SHORT"
+                : readyLong
+                    ? "READY LONG"
+                    : readyShort
+                        ? "READY SHORT"
+                        : "READY NO";
+
+            var lines = new List<string>();
+            var states = new List<bool?>();
+            AppendChecklistLine(lines, states, "CHECK: " + readiness, readyLong || readyShort);
+            AppendChecklistLine(lines, states, "TPS " + TPSType, null);
+            AppendChecklistLine(lines, states, "Setup " + SetupType + " x" + TimeframeMultiplier, null);
+            AppendChecklistLine(lines, states, "Lookahead " + (UseLookaheadApproximation ? "ON" : "OFF"), null);
+            AppendChecklistLine(lines, states, "Trend Filter " + (lastUiEvalState.TrendAllowed ? "OK" : "NO"), lastUiEvalState.TrendAllowed);
+            AppendChecklistLine(lines, states, "Raw Buy " + (lastUiEvalState.RawBuySignal ? "YES" : "NO"), lastUiEvalState.RawBuySignal);
+            AppendChecklistLine(lines, states, "Raw Sell " + (lastUiEvalState.RawSellSignal ? "YES" : "NO"), lastUiEvalState.RawSellSignal);
+            AppendChecklistLine(lines, states, "Entry Buy " + (lastUiEvalState.BuyEntry ? "READY" : "NO"), lastUiEvalState.BuyEntry);
+            AppendChecklistLine(lines, states, "Entry Sell " + (lastUiEvalState.SellEntry ? "READY" : "NO"), lastUiEvalState.SellEntry);
+            AppendChecklistLine(lines, states, "Ribbon " + (lastUiEvalState.BuyColor ? "LONG" : "SHORT"), null);
+            AppendChecklistLine(lines, states, "Condition " + DescribeCondition(lastUiEvalState.ConditionNow), null);
+            AppendChecklistLine(lines, states, string.Format("RSI {0:0.00}", lastUiEvalState.RsiValue), null);
+            AppendChecklistLine(lines, states, string.Format("ATR {0:0.00} MA {1:0.00}", lastUiEvalState.AtrFilterValue, lastUiEvalState.AtrMaValue), null);
+            AppendChecklistLine(lines, states, "Entry SL " + (EnableEntryStopLoss ? EntryStopLossType.ToString() : "OFF"), null);
+            AppendChecklistLine(lines, states, "Trail " + (EnableTrailingEngine ? TrailingMode.ToString() : "OFF"), null);
+            AppendChecklistLine(lines, states, "Pos " + FormatPositionSummary(), null);
+            AppendChecklistLine(lines, states, "Trades/Entry " + GetEffectiveTradesPerEntry(), null);
+            AppendChecklistLine(lines, states, "Daily Limits " + (EnableDailyPnLLimits ? "ON" : "OFF"), null);
+            if (manualHaltActive)
+                AppendChecklistLine(lines, states, "Manual Halt ACTIVE", false);
+            if (dailyLimitHalted)
+                AppendChecklistLine(lines, states, "Daily Limit Halt " + dailyLimitType, false);
+
+            string compositeKey = string.Join("\n", lines);
+            bool highlight = readyLong || readyShort;
+            if (string.Equals(compositeKey, lastChecklistText, StringComparison.Ordinal) && highlight == lastChecklistReady)
+                return;
+
+            lastChecklistText = compositeKey;
+            lastChecklistReady = highlight;
+
+            string pnlLine;
+            string limitsLine;
+            bool pnlNegative;
+            bool hasPnLLines = ShowStatusPanel && TryBuildDailyPnlLines(Time[0].Date, out pnlLine, out pnlNegative, out limitsLine);
+            int statusLines = hasPnLLines ? 3 : (ShowStatusPanel ? 1 : 0);
+            string padding = new string('\n', statusLines + 1);
+
+            var green = new System.Text.StringBuilder();
+            var red = new System.Text.StringBuilder();
+            var neutral = new System.Text.StringBuilder();
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = lines[i];
+                bool? passed = states[i];
+                if (!passed.HasValue)
+                {
+                    neutral.AppendLine(line);
+                    green.AppendLine(" ");
+                    red.AppendLine(" ");
+                }
+                else if (passed.Value)
+                {
+                    green.AppendLine(line);
+                    red.AppendLine(" ");
+                    neutral.AppendLine(" ");
+                }
+                else
+                {
+                    red.AppendLine(line);
+                    green.AppendLine(" ");
+                    neutral.AppendLine(" ");
+                }
+            }
+
+            green.Append(padding);
+            red.Append(padding);
+            neutral.Append(padding);
+
+            var font = new SimpleFont("Arial", 12) { Bold = true };
+            try
+            {
+                Draw.TextFixed(this, ChecklistGreenTag, green.ToString(), TextPosition.BottomLeft, Brushes.LimeGreen, font, Brushes.Transparent, Brushes.Transparent, 0);
+                Draw.TextFixed(this, ChecklistRedTag, red.ToString(), TextPosition.BottomLeft, Brushes.OrangeRed, font, Brushes.Transparent, Brushes.Transparent, 0);
+                Draw.TextFixed(this, ChecklistNeutralTag, neutral.ToString(), TextPosition.BottomLeft, Brushes.LightGray, font, Brushes.Transparent, Brushes.Transparent, 0);
+            }
+            catch (Exception ex)
+            {
+                StrategyLogDebug("[UI] Checklist overlay failed: " + ex.Message);
+            }
+        }
+
+        private string DescribeCondition(double condition)
+        {
+            if (condition >= 1.3)
+                return "LONG TP3";
+            if (condition >= 1.2)
+                return "LONG TP2";
+            if (condition >= 1.1)
+                return "LONG TP1";
+            if (condition >= 1.0)
+                return "LONG LIVE";
+            if (condition <= -1.3)
+                return "SHORT TP3";
+            if (condition <= -1.2)
+                return "SHORT TP2";
+            if (condition <= -1.1)
+                return "SHORT TP1";
+            if (condition <= -1.0)
+                return "SHORT LIVE";
+            return "FLAT";
+        }
+
+        private string FormatPositionSummary()
+        {
+            return Position.MarketPosition == MarketPosition.Flat
+                ? "FLAT"
+                : Position.MarketPosition + " x" + Math.Abs(Position.Quantity).ToString(CultureInfo.InvariantCulture);
         }
 
         private void TryInitializeChartTraderButtons()
@@ -2009,6 +2279,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     var buttonRow2 = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Stretch };
                     var inputRow1 = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 2, 0, 0) };
                     var inputRow2 = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 2, 0, 0) };
+                    var inputRow3 = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Stretch, Margin = new Thickness(0, 2, 0, 0) };
 
                     manualFlattenButton = new Button { Content = "Flatten + Halt", Margin = new Thickness(2), Padding = new Thickness(6, 2, 6, 2) };
                     manualResumeButton = new Button { Content = "Resume", Margin = new Thickness(2), Padding = new Thickness(6, 2, 6, 2) };
@@ -2020,23 +2291,26 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualBuyButton.Click += ManualBuyButton_Click;
                     manualSellButton.Click += ManualSellButton_Click;
 
-                    tradesPerEntryLabel = new TextBlock { Text = "Trades/Entry", Margin = new Thickness(2, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
+                    tradesPerEntryLabel = new TextBlock { Text = "Trades/Entry", Width = 78, Margin = new Thickness(2, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
                     tradesPerEntryTextBox = CreateRuntimeTextBox();
                     tradesPerEntryTextBox.ToolTip = "Overrides TradesPerEntry while strategy is running.";
-                    tradesPerEntryTextBox.LostFocus += TradesPerEntryTextBox_LostFocus;
+                    tradesPerEntryTextBox.PreviewMouseDown += TradesPerEntryTextBox_PreviewMouseDown;
                     tradesPerEntryTextBox.PreviewKeyDown += TradesPerEntryTextBox_PreviewKeyDown;
+                    tradesPerEntryTextBox.LostFocus += TradesPerEntryTextBox_LostFocus;
 
-                    dllLabel = new TextBlock { Text = "DLL", Margin = new Thickness(10, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
+                    dllLabel = new TextBlock { Text = "DLL", Width = 78, Margin = new Thickness(2, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
                     dllTextBox = CreateRuntimeTextBox();
                     dllTextBox.ToolTip = "Runtime daily loss limit override (positive dollars).";
-                    dllTextBox.LostFocus += DllTextBox_LostFocus;
+                    dllTextBox.PreviewMouseDown += DllTextBox_PreviewMouseDown;
                     dllTextBox.PreviewKeyDown += DllTextBox_PreviewKeyDown;
+                    dllTextBox.LostFocus += DllTextBox_LostFocus;
 
-                    dplLabel = new TextBlock { Text = "DPL", Margin = new Thickness(10, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
+                    dplLabel = new TextBlock { Text = "DPL", Width = 78, Margin = new Thickness(2, 4, 6, 2), VerticalAlignment = VerticalAlignment.Center, Foreground = Brushes.White };
                     dplTextBox = CreateRuntimeTextBox();
                     dplTextBox.ToolTip = "Runtime daily profit limit override (positive dollars).";
-                    dplTextBox.LostFocus += DplTextBox_LostFocus;
+                    dplTextBox.PreviewMouseDown += DplTextBox_PreviewMouseDown;
                     dplTextBox.PreviewKeyDown += DplTextBox_PreviewKeyDown;
+                    dplTextBox.LostFocus += DplTextBox_LostFocus;
 
                     buttonRow1.Children.Add(manualFlattenButton);
                     buttonRow1.Children.Add(manualResumeButton);
@@ -2044,15 +2318,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     buttonRow2.Children.Add(manualSellButton);
                     inputRow1.Children.Add(tradesPerEntryLabel);
                     inputRow1.Children.Add(tradesPerEntryTextBox);
-                    inputRow1.Children.Add(dllLabel);
-                    inputRow1.Children.Add(dllTextBox);
-                    inputRow2.Children.Add(dplLabel);
-                    inputRow2.Children.Add(dplTextBox);
+                    inputRow2.Children.Add(dllLabel);
+                    inputRow2.Children.Add(dllTextBox);
+                    inputRow3.Children.Add(dplLabel);
+                    inputRow3.Children.Add(dplTextBox);
 
                     chartTraderButtonPanel.Children.Add(buttonRow1);
                     chartTraderButtonPanel.Children.Add(buttonRow2);
                     chartTraderButtonPanel.Children.Add(inputRow1);
                     chartTraderButtonPanel.Children.Add(inputRow2);
+                    chartTraderButtonPanel.Children.Add(inputRow3);
                     Grid.SetRow(chartTraderButtonPanel, chartTraderGrid.RowDefinitions.Count - 1);
                     Grid.SetColumnSpan(chartTraderButtonPanel, Math.Max(1, chartTraderGrid.ColumnDefinitions.Count));
                     chartTraderGrid.Children.Add(chartTraderButtonPanel);
@@ -2072,10 +2347,13 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             return new TextBox
             {
-                Width = 60,
+                Width = 72,
                 Margin = new Thickness(2),
                 Padding = new Thickness(4, 1, 4, 1),
-                HorizontalContentAlignment = HorizontalAlignment.Center
+                HorizontalContentAlignment = HorizontalAlignment.Center,
+                VerticalContentAlignment = VerticalAlignment.Center,
+                Focusable = true,
+                IsTabStop = true
             };
         }
 
@@ -2109,16 +2387,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 manualSellButton.Click -= ManualSellButton_Click;
             if (tradesPerEntryTextBox != null)
             {
+                tradesPerEntryTextBox.PreviewMouseDown -= TradesPerEntryTextBox_PreviewMouseDown;
                 tradesPerEntryTextBox.LostFocus -= TradesPerEntryTextBox_LostFocus;
                 tradesPerEntryTextBox.PreviewKeyDown -= TradesPerEntryTextBox_PreviewKeyDown;
             }
             if (dllTextBox != null)
             {
+                dllTextBox.PreviewMouseDown -= DllTextBox_PreviewMouseDown;
                 dllTextBox.LostFocus -= DllTextBox_LostFocus;
                 dllTextBox.PreviewKeyDown -= DllTextBox_PreviewKeyDown;
             }
             if (dplTextBox != null)
             {
+                dplTextBox.PreviewMouseDown -= DplTextBox_PreviewMouseDown;
                 dplTextBox.LostFocus -= DplTextBox_LostFocus;
                 dplTextBox.PreviewKeyDown -= DplTextBox_PreviewKeyDown;
             }
@@ -2148,7 +2429,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!chartTraderButtonsAdded)
                 return;
 
-            bool manualEnabled = State == State.Realtime && manualHaltActive && !dailyLimitHalted;
+            bool manualEnabled = State == State.Realtime && !dailyLimitHalted;
             bool resumeEnabled = State == State.Realtime && manualHaltActive && !dailyLimitHalted;
             if (!force && manualEnabled == lastManualButtonsEnabled && resumeEnabled == lastResumeEnabled)
                 return;
@@ -2208,6 +2489,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnforceFlatWhenHalted("manual_halt");
                 UpdateManualTradeButtons(true);
                 UpdateStatusOverlay(Time[0]);
+                UpdateChecklistOverlay();
             }, null);
         }
 
@@ -2227,6 +2509,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 catch { }
                 UpdateManualTradeButtons(true);
                 UpdateStatusOverlay(Time[0]);
+                UpdateChecklistOverlay();
             }, null);
         }
 
@@ -2234,11 +2517,22 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             TriggerCustomEvent(o =>
             {
-                if (State != State.Realtime || !manualHaltActive || dailyLimitHalted)
+                if (State != State.Realtime)
+                {
+                    StrategyLogInfo("[MANUAL] Manual buy ignored (strategy not realtime).");
                     return;
+                }
+
+                if (dailyLimitHalted)
+                {
+                    StrategyLogInfo("[MANUAL] Manual buy ignored (daily limit halted).");
+                    return;
+                }
+
                 if (Position.MarketPosition == MarketPosition.Short)
                     SubmitExit(MarketPosition.Short, Position.Quantity, "MANUAL_REV");
                 SubmitEntryBatch(MarketPosition.Long, "MANBUY", null, true);
+                StrategyLogInfo("[MANUAL] Manual buy submitted.");
             }, null);
         }
 
@@ -2246,21 +2540,33 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             TriggerCustomEvent(o =>
             {
-                if (State != State.Realtime || !manualHaltActive || dailyLimitHalted)
+                if (State != State.Realtime)
+                {
+                    StrategyLogInfo("[MANUAL] Manual sell ignored (strategy not realtime).");
                     return;
+                }
+
+                if (dailyLimitHalted)
+                {
+                    StrategyLogInfo("[MANUAL] Manual sell ignored (daily limit halted).");
+                    return;
+                }
+
                 if (Position.MarketPosition == MarketPosition.Long)
                     SubmitExit(MarketPosition.Long, Position.Quantity, "MANUAL_REV");
                 SubmitEntryBatch(MarketPosition.Short, "MANSELL", null, true);
+                StrategyLogInfo("[MANUAL] Manual sell submitted.");
             }, null);
+        }
+
+        private void TradesPerEntryTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            FocusRuntimeTextBox(tradesPerEntryTextBox, e);
         }
 
         private void TradesPerEntryTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter || e.Key == Key.Return)
-            {
-                SubmitTradesPerEntryInput();
-                e.Handled = true;
-            }
+            HandleIntegerTextBoxKey(tradesPerEntryTextBox, e, SubmitTradesPerEntryInput);
         }
 
         private void TradesPerEntryTextBox_LostFocus(object sender, RoutedEventArgs e)
@@ -2276,13 +2582,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             TriggerCustomEvent(o => HandleTradesPerEntryOverrideRequest(o as string), text);
         }
 
+        private void DllTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            FocusRuntimeTextBox(dllTextBox, e);
+        }
+
         private void DllTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter || e.Key == Key.Return)
-            {
-                SubmitDllInput();
-                e.Handled = true;
-            }
+            HandleDecimalTextBoxKey(dllTextBox, e, SubmitDllInput);
         }
 
         private void DllTextBox_LostFocus(object sender, RoutedEventArgs e)
@@ -2298,13 +2605,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             TriggerCustomEvent(o => HandleDllOverrideRequest(o as string), text);
         }
 
+        private void DplTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            FocusRuntimeTextBox(dplTextBox, e);
+        }
+
         private void DplTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
         {
-            if (e.Key == Key.Enter || e.Key == Key.Return)
-            {
-                SubmitDplInput();
-                e.Handled = true;
-            }
+            HandleDecimalTextBoxKey(dplTextBox, e, SubmitDplInput);
         }
 
         private void DplTextBox_LostFocus(object sender, RoutedEventArgs e)
@@ -2320,6 +2628,191 @@ namespace NinjaTrader.NinjaScript.Strategies
             TriggerCustomEvent(o => HandleDplOverrideRequest(o as string), text);
         }
 
+        private void FocusRuntimeTextBox(TextBox textBox, MouseButtonEventArgs e)
+        {
+            if (textBox == null)
+                return;
+
+            textBox.Focus();
+            Keyboard.Focus(textBox);
+            textBox.SelectAll();
+            e.Handled = true;
+        }
+
+        private void HandleIntegerTextBoxKey(TextBox textBox, KeyEventArgs e, Action submitAction)
+        {
+            HandleRuntimeTextBoxKey(textBox, e, submitAction, false);
+        }
+
+        private void HandleDecimalTextBoxKey(TextBox textBox, KeyEventArgs e, Action submitAction)
+        {
+            HandleRuntimeTextBoxKey(textBox, e, submitAction, true);
+        }
+
+        private void HandleRuntimeTextBoxKey(TextBox textBox, KeyEventArgs e, Action submitAction, bool allowDecimal)
+        {
+            if (textBox == null)
+                return;
+
+            if (e.Key == Key.Enter || e.Key == Key.Return)
+            {
+                submitAction?.Invoke();
+                e.Handled = true;
+                return;
+            }
+
+            if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) != 0)
+                return;
+
+            if (e.Key == Key.Back)
+            {
+                ApplyTextBoxDeletion(textBox, true);
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Delete)
+            {
+                ApplyTextBoxDeletion(textBox, false);
+                e.Handled = true;
+                return;
+            }
+
+            if (IsNavigationKey(e.Key))
+                return;
+
+            string insertText;
+            if (TryGetTextInputFromKey(textBox, e.Key, allowDecimal, out insertText))
+            {
+                ApplyTextBoxEdit(textBox, insertText);
+                e.Handled = true;
+                return;
+            }
+
+            e.Handled = true;
+        }
+
+        private static bool IsNavigationKey(Key key)
+        {
+            return key == Key.Left
+                || key == Key.Right
+                || key == Key.Tab
+                || key == Key.Home
+                || key == Key.End;
+        }
+
+        private static bool TryGetTextInputFromKey(TextBox textBox, Key key, bool allowDecimal, out string insertText)
+        {
+            insertText = null;
+
+            char digit;
+            if (TryGetDigitFromKey(key, out digit))
+            {
+                insertText = digit.ToString();
+                return true;
+            }
+
+            if (!allowDecimal)
+                return false;
+
+            if (key != Key.Decimal && key != Key.OemPeriod)
+                return false;
+
+            if (textBox == null)
+            {
+                insertText = ".";
+                return true;
+            }
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, textBox.SelectionStart);
+            int length = Math.Max(0, textBox.SelectionLength);
+            if (start > current.Length)
+                start = current.Length;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            string remaining = current.Remove(start, length);
+            if (remaining.Contains("."))
+                return false;
+
+            insertText = ".";
+            return true;
+        }
+
+        private static bool TryGetDigitFromKey(Key key, out char digit)
+        {
+            digit = '\0';
+            if (key >= Key.D0 && key <= Key.D9)
+            {
+                digit = (char)('0' + (key - Key.D0));
+                return true;
+            }
+
+            if (key >= Key.NumPad0 && key <= Key.NumPad9)
+            {
+                digit = (char)('0' + (key - Key.NumPad0));
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ApplyTextBoxDeletion(TextBox textBox, bool backspace)
+        {
+            if (textBox == null)
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, textBox.SelectionStart);
+            int length = Math.Max(0, textBox.SelectionLength);
+            if (start > current.Length)
+                start = current.Length;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            if (length > 0)
+            {
+                current = current.Remove(start, length);
+            }
+            else if (backspace)
+            {
+                if (start <= 0 || current.Length == 0)
+                    return;
+                current = current.Remove(start - 1, 1);
+                start--;
+            }
+            else
+            {
+                if (start >= current.Length)
+                    return;
+                current = current.Remove(start, 1);
+            }
+
+            textBox.Text = current;
+            textBox.SelectionStart = Math.Max(0, Math.Min(start, current.Length));
+            textBox.SelectionLength = 0;
+        }
+
+        private void ApplyTextBoxEdit(TextBox textBox, string insertText)
+        {
+            if (textBox == null || string.IsNullOrEmpty(insertText))
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, textBox.SelectionStart);
+            int length = Math.Max(0, textBox.SelectionLength);
+            if (start > current.Length)
+                start = current.Length;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            string updated = current.Remove(start, length).Insert(start, insertText);
+            textBox.Text = updated;
+            textBox.SelectionStart = Math.Min(updated.Length, start + insertText.Length);
+            textBox.SelectionLength = 0;
+        }
+
         private void HandleTradesPerEntryOverrideRequest(string text)
         {
             int parsed;
@@ -2333,6 +2826,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             UpdateRuntimeInputBoxes(true);
             UpdateStatusOverlay(Time[0]);
+            UpdateChecklistOverlay();
         }
 
         private void HandleDllOverrideRequest(string text)
@@ -2344,6 +2838,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 runtimeDailyLossLimit = Math.Max(0.0, parsed);
             UpdateRuntimeInputBoxes(true);
             UpdateStatusOverlay(Time[0]);
+            UpdateChecklistOverlay();
         }
 
         private void HandleDplOverrideRequest(string text)
@@ -2355,6 +2850,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 runtimeDailyProfitLimit = Math.Max(0.0, parsed);
             UpdateRuntimeInputBoxes(true);
             UpdateStatusOverlay(Time[0]);
+            UpdateChecklistOverlay();
         }
 
         private static T FindFirstChild<T>(DependencyObject parent) where T : DependencyObject
@@ -2551,13 +3047,26 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Show Event Labels", GroupName = "08 - Visuals", Order = 2)]
         public bool ShowEventLabels { get; set; }
 
-        [NinjaScriptProperty, Range(1, 100), Display(Name = "Risk Line Right Bars", GroupName = "08 - Visuals", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Show Status Panel", GroupName = "08 - Visuals", Order = 3)]
+        public bool ShowStatusPanel { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Show Checklist Panel", GroupName = "08 - Visuals", Order = 4)]
+        public bool ShowChecklistPanel { get; set; }
+
+        [NinjaScriptProperty, Range(1, 100), Display(Name = "Risk Line Right Bars", GroupName = "08 - Visuals", Order = 5)]
         public int RiskLineRightBars { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Enable Debug Logging", GroupName = "09 - Diagnostics", Order = 0)]
         public bool EnableDebugLogging { get; set; }
     }
 }
+
+
+
+
+
+
+
 
 
 

@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 
 namespace NinjaTrader.NinjaScript.Shared
@@ -87,11 +87,17 @@ namespace NinjaTrader.NinjaScript.Shared
         public double BarLow;
         public double BarClose;
         public bool TradeDateAllowed;
+        public bool TrendAllowed;
+        public bool RawBuySignal;
+        public bool RawSellSignal;
         public bool BuyEntry;
         public bool SellEntry;
         public bool LeTrigger;
         public bool SeTrigger;
         public bool BuyColor;
+        public double RsiValue;
+        public double AtrFilterValue;
+        public double AtrMaValue;
         public bool RibbonValid;
         public double RibbonTop;
         public double RibbonBottom;
@@ -212,3 +218,4 @@ namespace NinjaTrader.NinjaScript.Shared
         }
     }
 }
+

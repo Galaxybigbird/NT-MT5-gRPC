@@ -1,6 +1,6 @@
-<#
+﻿<#
 .SYNOPSIS
-Deploy NinjaScript strategy sources and shared strategy helper files into the NinjaTrader 8 Strategies folder.
+Deploy NinjaScript strategy sources and shared strategy helper files into NinjaTrader 8 strategy folders.
 #>
 
 param(
@@ -24,6 +24,7 @@ if (-not $SourceRoot) {
 }
 
 $helperSourceRoot = Join-Path $SourceRoot 'SharedHelperFiles'
+function Test-PathSafe { param([string]$Path) try { Test-Path $Path } catch { $false } }
 
 function Write-Success { param($Message) Write-Host "[SUCCESS] $Message" -ForegroundColor Green }
 function Write-WarningLine { param($Message) Write-Host "[WARNING] $Message" -ForegroundColor Yellow }
@@ -35,7 +36,7 @@ Write-Host '================ NinjaScript Strategy Deployment ================' -
 Write-Host 'Deploying top-level strategy .cs files and SharedHelperFiles into NinjaTrader 8' -ForegroundColor Yellow
 Write-Host ("Start: {0:yyyy-MM-dd HH:mm:ss}" -f (Get-Date)) -ForegroundColor Gray
 
-if (!(Test-Path $SourceRoot)) {
+if (-not (Test-Path $SourceRoot)) {
     Write-ErrorLine "Source directory not found: $SourceRoot"
     exit 1
 }
@@ -44,26 +45,109 @@ Write-Info "Source directory: $SourceRoot"
 Write-Info "Helper directory: $helperSourceRoot"
 
 function Get-NinjaTraderInstallations {
-    $installations = @()
-    $targetPath = 'C:\Users\marth\OneDrive\Desktop\OneDrive\Old video editing files\NinjaTrader 8'
+    $candidateRoots = New-Object 'System.Collections.Generic.List[string]'
+    $profileRoots = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
 
-    if (Test-Path $targetPath) {
-        $strategyPath = Join-Path $targetPath 'bin\Custom\Strategies'
-        $installations += [PSCustomObject]@{
-            Path = $targetPath
-            Name = Split-Path $targetPath -Leaf
-            StrategiesPath = $strategyPath
-            Exists = Test-Path $strategyPath
+    $currentProfile = [Environment]::GetFolderPath('UserProfile')
+    if (-not [string]::IsNullOrWhiteSpace($currentProfile)) {
+        [void]$profileRoots.Add($currentProfile.TrimEnd('\'))
+    }
+
+    if (Test-PathSafe 'C:\Users') {
+        Get-ChildItem -Path 'C:\Users' -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -notin @('All Users', 'Default', 'Default User', 'Public', 'WDAGUtilityAccount') } |
+            ForEach-Object {
+                [void]$profileRoots.Add($_.FullName.TrimEnd('\'))
+            }
+    }
+
+    foreach ($profileRoot in $profileRoots) {
+        foreach ($candidate in @(
+            (Join-Path $profileRoot 'Documents\NinjaTrader 8'),
+            (Join-Path $profileRoot 'OneDrive\Documents\NinjaTrader 8'),
+            (Join-Path $profileRoot 'OneDrive\Old video editing files\NinjaTrader 8'),
+            (Join-Path $profileRoot 'OneDrive\Desktop\OneDrive\Old video editing files\NinjaTrader 8'),
+            (Join-Path $profileRoot 'Desktop\NinjaTrader 8')
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+                $candidateRoots.Add($candidate)
+            }
+        }
+
+        foreach ($scanRoot in @(
+            (Join-Path $profileRoot 'Documents'),
+            (Join-Path $profileRoot 'OneDrive'),
+            (Join-Path $profileRoot 'Desktop'),
+            (Join-Path $profileRoot 'OneDrive\Desktop')
+        )) {
+            if (-not (Test-PathSafe $scanRoot)) {
+                continue
+            }
+
+            try {
+                Get-ChildItem -Path $scanRoot -Directory -Recurse -Depth 4 -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq 'NinjaTrader 8' } |
+                    ForEach-Object {
+                        $candidateRoots.Add($_.FullName)
+                    }
+            }
+            catch {
+                Write-DebugLine "Skipping scan root ${scanRoot}: $($_.Exception.Message)"
+            }
         }
     }
 
-    return $installations
+    $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $installations = New-Object 'System.Collections.Generic.List[object]'
+
+    foreach ($candidateRoot in $candidateRoots) {
+        if ([string]::IsNullOrWhiteSpace($candidateRoot)) {
+            continue
+        }
+
+        $normalizedRoot = $candidateRoot.TrimEnd('\')
+        if (-not (Test-PathSafe $normalizedRoot)) {
+            continue
+        }
+
+        if (-not $seenPaths.Add($normalizedRoot)) {
+            continue
+        }
+
+        $customPath = Join-Path $normalizedRoot 'bin\Custom'
+        $strategyPath = Join-Path $customPath 'Strategies'
+        $score = 0
+
+        if (Test-PathSafe $strategyPath) {
+            $score += 4
+        }
+
+        if (Test-PathSafe $customPath) {
+            $score += 2
+        }
+
+        if ($normalizedRoot -like '*\\Documents\\NinjaTrader 8') {
+            $score += 1
+        }
+
+        $installations.Add([PSCustomObject]@{
+            Path = $normalizedRoot
+            Name = Split-Path $normalizedRoot -Leaf
+            CustomPath = $customPath
+            StrategiesPath = $strategyPath
+            Exists = Test-PathSafe $strategyPath
+            CustomExists = Test-PathSafe $customPath
+            Score = $score
+        })
+    }
+
+    return $installations | Sort-Object -Property @{ Expression = 'Score'; Descending = $true }, @{ Expression = 'Path'; Descending = $false }
 }
 
 $installations = Get-NinjaTraderInstallations
 if ($installations.Count -eq 0) {
-    Write-ErrorLine 'Target NinjaTrader 8 installation not found!'
-    Write-Info 'Expected location: C:\Users\marth\OneDrive\Desktop\OneDrive\Old video editing files\NinjaTrader 8'
+    Write-ErrorLine 'No NinjaTrader 8 roots were detected under C:\Users.'
+    Write-Info 'Checked common locations under each Windows user profile: Documents, OneDrive, Desktop, and OneDrive\\Desktop.'
     exit 1
 }
 
@@ -71,24 +155,42 @@ if ($ListInstallations) {
     Write-Info 'Detected NinjaTrader 8 installations:'
     for ($i = 0; $i -lt $installations.Count; $i++) {
         $inst = $installations[$i]
-        $status = if ($inst.Exists) { '[OK]' } else { '[MISSING]' }
-        Write-Host "  [$i] $status $($inst.StrategiesPath)" -ForegroundColor $(if ($inst.Exists) { 'Green' } else { 'Red' })
+        $status = if ($inst.Exists) { '[OK]' } elseif ($inst.CustomExists) { '[CREATE STRATEGIES]' } else { '[CREATE CUSTOM]' }
+        $color = if ($inst.Exists) { 'Green' } elseif ($inst.CustomExists) { 'Yellow' } else { 'DarkYellow' }
+        Write-Host "  [$i] $status $($inst.Path)" -ForegroundColor $color
     }
     exit 0
 }
 
 if ($TargetRoot) {
-    $installations = $installations | Where-Object { $_.Path -eq $TargetRoot }
+    $normalizedTargetRoot = $TargetRoot.TrimEnd('\')
+    $installations = @($installations | Where-Object { $_.Path -eq $normalizedTargetRoot })
+
     if ($installations.Count -eq 0) {
-        Write-ErrorLine "Specified target root not found or not valid: $TargetRoot"
-        exit 1
+        if (-not (Test-Path $normalizedTargetRoot)) {
+            Write-ErrorLine "Specified target root not found or not valid: $TargetRoot"
+            exit 1
+        }
+
+        $customPath = Join-Path $normalizedTargetRoot 'bin\Custom'
+        $strategyPath = Join-Path $customPath 'Strategies'
+        $installations = @([PSCustomObject]@{
+            Path = $normalizedTargetRoot
+            Name = Split-Path $normalizedTargetRoot -Leaf
+            CustomPath = $customPath
+            StrategiesPath = $strategyPath
+            Exists = Test-PathSafe $strategyPath
+            CustomExists = Test-PathSafe $customPath
+            Score = 999
+        })
     }
 }
 
 Write-Info 'Target installation(s):'
 $installations | ForEach-Object {
-    $status = if ($_.Exists) { '[OK]' } else { '[MISSING]' }
-    Write-Host "  $status $($_.StrategiesPath)" -ForegroundColor $(if ($_.Exists) { 'Green' } else { 'Red' })
+    $status = if ($_.Exists) { '[OK]' } elseif ($_.CustomExists) { '[CREATE STRATEGIES]' } else { '[CREATE CUSTOM]' }
+    $color = if ($_.Exists) { 'Green' } elseif ($_.CustomExists) { 'Yellow' } else { 'DarkYellow' }
+    Write-Host "  $status $($_.Path)" -ForegroundColor $color
 }
 
 $strategyFiles = Get-ChildItem -Path $SourceRoot -Filter '*.cs' -File | Where-Object {
@@ -129,7 +231,7 @@ function Get-FileFingerprint {
         [string]$Path
     )
 
-    if (!(Test-Path $Path)) {
+    if (-not (Test-Path $Path)) {
         return $null
     }
 
@@ -152,7 +254,7 @@ function Copy-IfNeeded {
     )
 
     $destinationDir = Split-Path -Path $DestinationPath -Parent
-    if (!(Test-Path $destinationDir)) {
+    if (-not (Test-Path $destinationDir)) {
         if ($DryRunCopy) {
             Write-Host "  [DRYRUN] Would create directory $destinationDir" -ForegroundColor Cyan
         }
@@ -201,6 +303,17 @@ function Copy-IfNeeded {
 }
 
 foreach ($installation in $installations) {
+    if (-not $installation.CustomExists) {
+        if ($DryRun) {
+            Write-WarningLine "DRYRUN: Custom directory missing at $($installation.CustomPath)"
+        }
+        else {
+            Write-Info "Custom directory missing; creating $($installation.CustomPath)"
+            New-Item -ItemType Directory -Path $installation.CustomPath -Force | Out-Null
+            $installation.CustomExists = $true
+        }
+    }
+
     if (-not $installation.Exists) {
         if ($DryRun) {
             Write-WarningLine "DRYRUN: Strategy directory missing at $($installation.StrategiesPath)"
@@ -213,7 +326,7 @@ foreach ($installation in $installations) {
     }
 
     if (-not $installation.Exists) {
-        Write-WarningLine "Skipping invalid installation: $($installation.StrategiesPath)"
+        Write-WarningLine "Skipping invalid installation: $($installation.Path)"
         continue
     }
 
@@ -267,8 +380,5 @@ foreach ($installation in $installations) {
 
 Write-Host ("Completed: {0:yyyy-MM-dd HH:mm:ss}" -f (Get-Date)) -ForegroundColor Gray
 Write-Host '================ Deployment Finished ================' -ForegroundColor Cyan
-
-
-
 
 
