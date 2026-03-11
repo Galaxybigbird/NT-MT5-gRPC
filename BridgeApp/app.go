@@ -1722,6 +1722,38 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 		}
 	}
 
+	enqueueBaseIDOnlyClose := func(useBase string, qtyForMsg int, context string) error {
+		if qtyForMsg <= 0 {
+			return nil
+		}
+
+		inst := strings.TrimSpace(getInstrumentFromRequest(request))
+		acct := strings.TrimSpace(getAccountFromRequest(request))
+
+		a.mt5TicketMux.Lock()
+		if inst != "" {
+			a.baseIdToInstrument[useBase] = inst
+		}
+		if acct != "" {
+			a.baseIdToAccount[useBase] = acct
+		}
+		a.mt5TicketMux.Unlock()
+
+		ct := makeCloseTrade(qtyForMsg, 0)
+		ct.BaseID = useBase
+
+		if !a.IsHedgebotActive() {
+			log.Printf("WARN: BaseID-only CLOSE_HEDGE fallback for BaseID %s queued while MT5 stream inactive. Will deliver when stream reconnects.", useBase)
+		}
+		if err := a.AddToTradeQueue(ct); err != nil {
+			log.Printf("gRPC: Failed to add base_id-only CLOSE_HEDGE fallback for BaseID %s (qty=%d, context=%s): %v", useBase, qtyForMsg, context, err)
+			return fmt.Errorf("failed to add base_id-only CLOSE_HEDGE fallback for BaseID %s (qty=%d, context=%s): %v", useBase, qtyForMsg, context, err)
+		}
+
+		log.Printf("gRPC: Queued base_id-only CLOSE_HEDGE fallback for BaseID %s (qty=%d, context=%s)", useBase, qtyForMsg, context)
+		return nil
+	}
+
 	// Decide how many close trades to enqueue
 	if len(tickets) > 0 {
 		reqQty := int(getQuantityFromRequest(request))
@@ -1776,28 +1808,12 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 
 		remaining := reqQty - toAllocate
 		if remaining > 0 {
-			// Ticket-only policy: do not enqueue base_id-only remainder. Record pending and wait for tickets.
-			inst := strings.TrimSpace(getInstrumentFromRequest(request))
-			acct := strings.TrimSpace(getAccountFromRequest(request))
-			useBase := actualBaseID // No alignment; keep original base strictly
-			a.mt5TicketMux.Lock()
-			// Persist instrument/account metadata for better reconciliation later
-			if inst != "" {
-				a.baseIdToInstrument[useBase] = inst
+			if err := enqueueBaseIDOnlyClose(actualBaseID, remaining, "ticket_remainder"); err != nil {
+				return err
 			}
-			if acct != "" {
-				a.baseIdToAccount[useBase] = acct
-			}
-			pcList := a.pendingCloses[useBase]
-			pcList = append(pcList, pendingClose{qty: remaining, instrument: inst, account: acct})
-			a.pendingCloses[useBase] = pcList
-			a.mt5TicketMux.Unlock()
-			log.Printf("gRPC: Ticket-only policy: recorded pending remainder CLOSE_HEDGE (qty=%d) for BaseID: %s; will dispatch by ticket when available.", remaining, useBase)
-			// Event-driven: kick reconciler to try dispatching from any available pools immediately
-			go a.reconcilePendingCloses()
 		}
 
-		log.Printf("gRPC: Successfully queued CLOSE_HEDGE for BaseID: %s (ticketed=%d, base_id_only=%d)", baseID, toAllocate, 0)
+		log.Printf("gRPC: Successfully queued CLOSE_HEDGE for BaseID: %s (ticketed=%d, base_id_only=%d)", baseID, toAllocate, remaining)
 		return nil
 	}
 
@@ -1852,28 +1868,12 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 
 		remaining := reqQty - toAllocate
 		if remaining > 0 {
-			// Ticket-only policy: do not enqueue base_id-only remainder. Record pending and wait for tickets.
-			inst := strings.TrimSpace(getInstrumentFromRequest(request))
-			acct := strings.TrimSpace(getAccountFromRequest(request))
-			useBase := baseID // No alignment; keep original base strictly
-			a.mt5TicketMux.Lock()
-			// Persist instrument/account metadata for better reconciliation later
-			if inst != "" {
-				a.baseIdToInstrument[useBase] = inst
+			if err := enqueueBaseIDOnlyClose(baseID, remaining, "post_wait_remainder"); err != nil {
+				return err
 			}
-			if acct != "" {
-				a.baseIdToAccount[useBase] = acct
-			}
-			pcList := a.pendingCloses[useBase]
-			pcList = append(pcList, pendingClose{qty: remaining, instrument: inst, account: acct})
-			a.pendingCloses[useBase] = pcList
-			a.mt5TicketMux.Unlock()
-			log.Printf("gRPC: Ticket-only policy: recorded pending remainder CLOSE_HEDGE (qty=%d) for BaseID: %s (post-wait); will dispatch by ticket when available.", remaining, useBase)
-			// Event-driven: kick reconciler to try dispatching from any available pools immediately
-			go a.reconcilePendingCloses()
 		}
 
-		log.Printf("gRPC: Successfully queued CLOSE_HEDGE (post-wait) for BaseID: %s (ticketed=%d, base_id_only=%d)", baseID, toAllocate, 0)
+		log.Printf("gRPC: Successfully queued CLOSE_HEDGE (post-wait) for BaseID: %s (ticketed=%d, base_id_only=%d)", baseID, toAllocate, remaining)
 		return nil
 	}
 
@@ -1903,31 +1903,9 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 		return nil
 	}
 
-	// No tickets known — alignment is disabled to avoid mis-routing closures; keep original base strictly
-
-	// intentionally no alignment here
-
-	// Ticket-only policy: do not enqueue base_id-only CLOSE_HEDGE at all. Record pending and return.
-	instFinal := strings.TrimSpace(getInstrumentFromRequest(request))
-	acctFinal := strings.TrimSpace(getAccountFromRequest(request))
-	a.mt5TicketMux.Lock()
-	if reqQty > 0 {
-		// Persist instrument/account metadata for better reconciliation later
-		if instFinal != "" {
-			a.baseIdToInstrument[baseID] = instFinal
-		}
-		if acctFinal != "" {
-			a.baseIdToAccount[baseID] = acctFinal
-		}
-		pcList := a.pendingCloses[baseID]
-		pcList = append(pcList, pendingClose{qty: reqQty, instrument: instFinal, account: acctFinal})
-		a.pendingCloses[baseID] = pcList
-		log.Printf("gRPC: Ticket-only policy: recorded pending CLOSE_HEDGE (qty=%d) for BaseID: %s; will dispatch by ticket when available.", reqQty, baseID)
-	}
-	a.mt5TicketMux.Unlock()
-	// Event-driven: kick reconciler after unlocking to avoid deadlock
-	go a.reconcilePendingCloses()
-	return nil
+	// No tickets known. Fall back to base_id-only CLOSE_HEDGE so MT5 can still flatten
+	// by comment/base_id matching instead of stranding the hedge behind missing ticket state.
+	return enqueueBaseIDOnlyClose(baseID, reqQty, "no_ticket_mapping")
 }
 
 // reconcilePendingCloses attempts to match and dispatch pending closes ONLY from the exact BaseID's own ticket pool.

@@ -63,6 +63,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             public bool ManualStopOverride;
             public bool ManualTargetOverride;
             public bool AggregateEntry;
+            public bool IsScaleInTrade;
         }
 
         private readonly MultiStratManager owner;
@@ -187,7 +188,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             owner?.ClearExposureForStrategy(strategy);
         }
 
-        public void PublishOpen(StrategyBase strategy, string tradeId, string instrument, MarketPosition side, int quantity, string accountName, double pointsPer1kLoss, double entryPrice, bool aggregateEntry = false)
+        public void PublishOpen(StrategyBase strategy, string tradeId, string instrument, MarketPosition side, int quantity, string accountName, double pointsPer1kLoss, double entryPrice, bool aggregateEntry = false, bool isScaleInTrade = false)
         {
             if (strategy == null || string.IsNullOrWhiteSpace(tradeId) || quantity <= 0)
                 return;
@@ -207,7 +208,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 Epoch = epoch,
                 NtPointsPer1kLoss = pointsPer1kLoss,
                 EntryPrice = entryPrice,
-                AggregateEntry = aggregateEntry
+                AggregateEntry = aggregateEntry,
+                IsScaleInTrade = isScaleInTrade
             };
 
             TradeRecord snapshot;
@@ -396,7 +398,10 @@ namespace NinjaTrader.NinjaScript.AddOns
                 NtPointsPer1kLoss = source.NtPointsPer1kLoss,
                 EntryPrice = source.EntryPrice,
                 LastDeltaQuantity = source.LastDeltaQuantity,
-                AggregateEntry = source.AggregateEntry
+                ManualStopOverride = source.ManualStopOverride,
+                ManualTargetOverride = source.ManualTargetOverride,
+                AggregateEntry = source.AggregateEntry,
+                IsScaleInTrade = source.IsScaleInTrade
             };
         }
 

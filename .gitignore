@@ -148,6 +148,7 @@ nul
 # Logs
 *.log
 logs/
+/logs.txt
 
 # Environment files
 .env

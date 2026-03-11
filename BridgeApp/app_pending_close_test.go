@@ -14,7 +14,7 @@ func drainOne(a *App) (Trade, bool) {
 	return tr, ok
 }
 
-func TestPendingOnlyWhenNoTickets(t *testing.T) {
+func TestBaseIdOnlyFallbackWhenNoTickets(t *testing.T) {
 	a := NewApp()
 
 	baseID := "TEST_BASE_1"
@@ -30,17 +30,19 @@ func TestPendingOnlyWhenNoTickets(t *testing.T) {
 		t.Fatalf("HandleNTCloseHedgeRequest error: %v", err)
 	}
 
-	// Ticket-only policy: no trade enqueued, just pending recorded
-	if _, ok := drainOne(a); ok {
-		t.Fatalf("expected no CLOSE_HEDGE enqueued when no tickets known (pending-only)")
+	tr, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected base_id-only CLOSE_HEDGE fallback when no tickets are known")
+	}
+	if tr.Action != "CLOSE_HEDGE" || tr.BaseID != baseID || tr.MT5Ticket != 0 || tr.TotalQuantity != 2 {
+		t.Fatalf("unexpected base_id-only fallback trade: %+v", tr)
 	}
 
-	// Pending should be recorded so that later-arriving tickets can complete the close
 	a.mt5TicketMux.RLock()
 	pend := a.pendingCloses[baseID]
 	a.mt5TicketMux.RUnlock()
-	if len(pend) != 1 || pend[0].qty != 2 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected one pending close intent (qty=2, NQ/Sim101); got: %+v", pend)
+	if len(pend) != 0 {
+		t.Fatalf("expected no pending close intents after base_id-only fallback; got: %+v", pend)
 	}
 }
 
@@ -72,7 +74,7 @@ func TestTargetedCloseEnqueuesImmediately(t *testing.T) {
 	}
 }
 
-func TestRemainderBecomesPendingOnly(t *testing.T) {
+func TestRemainderFallsBackToBaseIdOnly(t *testing.T) {
 	a := NewApp()
 	baseID := "TEST_BASE_4"
 
@@ -81,7 +83,7 @@ func TestRemainderBecomesPendingOnly(t *testing.T) {
 	a.baseIdToTickets[baseID] = []uint64{4444}
 	a.mt5TicketMux.Unlock()
 
-	// Ask to close 2 -> one allocated by known ticket, one pending remainder
+	// Ask to close 2 -> one allocated by known ticket, one base_id-only fallback remainder
 	req := map[string]interface{}{
 		"BaseID":              baseID,
 		"ClosedHedgeQuantity": 2.0,
@@ -101,20 +103,22 @@ func TestRemainderBecomesPendingOnly(t *testing.T) {
 		t.Fatalf("unexpected allocated trade: %+v", tr)
 	}
 
-	// verify remainder is pending-only (no additional trade enqueued)
-	if _, ok := drainOne(a); ok {
-		t.Fatalf("expected no base_id-only remainder enqueued; should be pending-only")
+	remainder, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected base_id-only CLOSE_HEDGE remainder fallback")
+	}
+	if remainder.Action != "CLOSE_HEDGE" || remainder.BaseID != baseID || remainder.MT5Ticket != 0 || remainder.TotalQuantity != 1 {
+		t.Fatalf("unexpected base_id-only remainder trade: %+v", remainder)
 	}
 	a.mt5TicketMux.RLock()
 	pend := a.pendingCloses[baseID]
 	a.mt5TicketMux.RUnlock()
-	if len(pend) != 1 || pend[0].qty != 1 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected one pending remainder (qty=1, NQ/Sim101); got: %+v", pend)
+	if len(pend) != 0 {
+		t.Fatalf("expected no pending remainder after base_id-only fallback; got: %+v", pend)
 	}
 }
 
-// New tests to validate BaseID alignment for base_id-only CLOSE_HEDGE
-func TestBaseIdAlignmentAffectsPending_CrossRef(t *testing.T) {
+func TestBaseIdOnlyFallbackUsesRequestedBaseIDWhenCrossRefExists(t *testing.T) {
 	a := NewApp()
 
 	// Prepopulate cross-reference: requested -> related
@@ -134,19 +138,22 @@ func TestBaseIdAlignmentAffectsPending_CrossRef(t *testing.T) {
 		t.Fatalf("HandleNTCloseHedgeRequest error: %v", err)
 	}
 
-	// No trade enqueued; pending should be recorded under aligned BaseID (TRD_B)
-	if _, ok := drainOne(a); ok {
-		t.Fatalf("expected no base_id-only trade enqueued; pending-only policy")
+	tr, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected base_id-only fallback trade for requested BaseID")
+	}
+	if tr.BaseID != "TRD_A" || tr.MT5Ticket != 0 || tr.TotalQuantity != 1 {
+		t.Fatalf("expected fallback to use requested BaseID TRD_A; got: %+v", tr)
 	}
 	a.mt5TicketMux.RLock()
 	pend := a.pendingCloses["TRD_A"]
 	a.mt5TicketMux.RUnlock()
-	if len(pend) != 1 || pend[0].qty != 1 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected pending recorded under TRD_A with qty=1; got: %+v", pend)
+	if len(pend) != 0 {
+		t.Fatalf("expected no pending close after requested-base fallback; got: %+v", pend)
 	}
 }
 
-func TestBaseIdAlignmentAffectsPending_ByInstrumentAccount(t *testing.T) {
+func TestBaseIdOnlyFallbackUsesRequestedBaseIDWhenMetadataMatchesOtherTrade(t *testing.T) {
 	a := NewApp()
 
 	// Prepopulate instrument/account metadata under a different BaseID
@@ -155,7 +162,7 @@ func TestBaseIdAlignmentAffectsPending_ByInstrumentAccount(t *testing.T) {
 	a.baseIdToAccount["TRD_B"] = "Sim101"
 	a.mt5TicketMux.Unlock()
 
-	// No tickets known anywhere forces pending-only path
+	// No tickets known anywhere forces base_id-only fallback using the requested BaseID.
 	req := map[string]interface{}{
 		"BaseID":              "TRD_A",
 		"ClosedHedgeQuantity": 1.0,
@@ -168,14 +175,17 @@ func TestBaseIdAlignmentAffectsPending_ByInstrumentAccount(t *testing.T) {
 		t.Fatalf("HandleNTCloseHedgeRequest error: %v", err)
 	}
 
-	// No trade enqueued; pending should be recorded under aligned BaseID (TRD_B)
-	if _, ok := drainOne(a); ok {
-		t.Fatalf("expected no base_id-only trade enqueued; pending-only policy")
+	tr, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected base_id-only fallback trade for requested BaseID")
+	}
+	if tr.BaseID != "TRD_A" || tr.MT5Ticket != 0 || tr.TotalQuantity != 1 {
+		t.Fatalf("expected fallback to use requested BaseID TRD_A; got: %+v", tr)
 	}
 	a.mt5TicketMux.RLock()
 	pend := a.pendingCloses["TRD_A"]
 	a.mt5TicketMux.RUnlock()
-	if len(pend) != 1 || pend[0].qty != 1 || pend[0].instrument != "NQ" || pend[0].account != "Sim101" {
-		t.Fatalf("expected pending recorded under TRD_A with qty=1; got: %+v", pend)
+	if len(pend) != 0 {
+		t.Fatalf("expected no pending close after requested-base fallback; got: %+v", pend)
 	}
 }

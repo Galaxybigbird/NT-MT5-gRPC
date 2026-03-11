@@ -25,6 +25,11 @@ input double DefaultLot = 1.0;       // Default lot size if not specified
 input int    Slippage = 200;         // Slippage
 input int    MagicNumber = 12345;    // MagicNumber for trades
 
+enum MARTINGALE_MODE { Martingale_Multiplier = 0, Martingale_Addition = 1 };
+input group "===== Martingale Settings =====";
+input MARTINGALE_MODE MartingaleMode = Martingale_Multiplier; // Fixed_Lot_Size only: use multiplier or addition for next lot
+input double MartingaleValue = 1.5;  // Multiplier value or lot addition value for martingale mode
+
 input double SimpleStopLoss_Points            = 4000;       // Static SL distance (points), 0 = off
 input bool   AllowManualStopAdjustments       = true;     // Allow manual SL edits without snapback (simple SL mode)
 
@@ -91,6 +96,7 @@ input int StatusLabelYPos_EA    = 50;  // Y distance for status label position
 CTrade trade;
 
 const string CandleCountdownObjName = "ACHM_CandleCountdown";
+const string MartingaleButtonObjName = "ACHM_MartingaleToggle";
 datetime g_last_candle_countdown_update = 0;
 
 struct HedgeRunUpState
@@ -164,6 +170,14 @@ double DollarsToPriceDistance(double dollars, double volume);
 double GetPositionCommissionTotal(ulong ticket);
 bool HandleTier1DollarTrailingForPosition(ulong ticket, ENUM_POSITION_TYPE posType, double entryPrice, double currentPrice, double volume);
 void UpdateCandleCountdown();
+string GetMartingaleStateGlobalKey();
+void LoadMartingaleToggleState();
+void SaveMartingaleToggleState();
+void EnsureMartingaleToggleButton();
+void UpdateMartingaleToggleButton();
+bool GetLastOpenedEaPositionLot(double &outLot);
+double NormalizeLotDownToStep(double lot, double step);
+double CalculateFixedLotSize();
 
 // Map trade mode integer to readable string (MQL5 requires top-level, cannot nest functions)
 string TradeModeName(const long mode)
@@ -426,6 +440,7 @@ int grpc_connection_retry_interval = 5; // seconds
 int grpc_max_retries = 3;
 // Track parameter-change restarts to avoid unnecessary re-initialization
 bool g_param_change_restart = false;
+bool g_martingale_enabled = false;
 
 // Instead of struct array, use separate arrays for each field
 string g_baseIds[];           // Array of base trade IDs
@@ -628,7 +643,8 @@ bool ParseNTPerformanceData(string json_str, double &nt_balance, double &nt_dail
 
 void ApplySimpleStopLossIfNeeded(ulong positionTicket,
                                  ENUM_POSITION_TYPE posType,
-                                 double entryPrice)
+                                 double entryPrice,
+                                 bool forceAlignToEntry = false)
 {
     if(SimpleStopLoss_Points <= 0.0)
     {
@@ -746,7 +762,7 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
         return;
     }
 
-    if(!inverseMode && AllowManualStopAdjustments && existingSL > 0.0 && slPrice > 0.0 &&
+    if(!inverseMode && !forceAlignToEntry && AllowManualStopAdjustments && existingSL > 0.0 && slPrice > 0.0 &&
        MathAbs(existingSL - slPrice) > _Point * 5.0)
     {
         return;
@@ -754,7 +770,25 @@ void ApplySimpleStopLossIfNeeded(ulong positionTicket,
 
     // If already set and roughly same, skip
     if(existingSL > 0.0 && MathAbs(existingSL - slPrice) <= _Point * 0.5)
+    {
+        if(g_simple_sl_tickets != NULL)
+        {
+            g_simple_sl_tickets.Remove((long)positionTicket);
+            g_simple_sl_tickets.Add((long)positionTicket, 1);
+        }
         return;
+    }
+
+    if(forceAlignToEntry && existingSL > 0.0 && slPrice > 0.0 &&
+       MathAbs(existingSL - slPrice) > _Point * 5.0)
+    {
+        { string __log=""; StringConcatenate(__log,
+            "SIMPLE_SL_REALIGN: ticket=", (long)positionTicket,
+            " existing=", DoubleToString(existingSL, _Digits),
+            " desired=", DoubleToString(slPrice, _Digits),
+            " entry=", DoubleToString(entryPrice, _Digits));
+          Print(__log); ULogInfoPrint(__log); }
+    }
 
     trade.SetExpertMagicNumber(MagicNumber);
     trade.SetDeviationInPoints(Slippage);
@@ -1330,6 +1364,7 @@ int OnInit()
 
     // Reset trade groups on startup
     ResetTradeGroups();
+    LoadMartingaleToggleState();
 
     // Initialize position tracking map
     if(g_map_position_id_to_base_id == NULL) {
@@ -1393,6 +1428,7 @@ int OnInit()
     // Initialize UI elements (before gRPC to ensure they work regardless)
     InitStatusIndicator();
     InitStatusOverlay();
+    UpdateMartingaleToggleButton();
 
     // Initialize or reuse gRPC connection (NON-BLOCKING)
     { string __log="Attempting gRPC connection (EA will work without bridge)..."; Print(__log); ULogInfoPrint(__log); }
@@ -1473,6 +1509,7 @@ void OnTimer()
     // Periodic unified logging auto-flush (throttled in helper)
     ULogAutoFlush();
     UpdateCandleCountdown();
+    UpdateMartingaleToggleButton();
 }
 
 // Periodic maintenance checks handled in OnTick
@@ -2574,13 +2611,170 @@ double CalculateInversePnLLot(ENUM_ORDER_TYPE orderType)
     return lotChoice;
 }
 
+string GetMartingaleStateGlobalKey()
+{
+    return StringFormat("ACHM_MG_%I64d", ChartID());
+}
+
+void LoadMartingaleToggleState()
+{
+    string key = GetMartingaleStateGlobalKey();
+    if(GlobalVariableCheck(key))
+        g_martingale_enabled = (GlobalVariableGet(key) > 0.5);
+    else
+        g_martingale_enabled = false;
+}
+
+void SaveMartingaleToggleState()
+{
+    string key = GetMartingaleStateGlobalKey();
+    GlobalVariableSet(key, g_martingale_enabled ? 1.0 : 0.0);
+}
+
+void EnsureMartingaleToggleButton()
+{
+    string name = MartingaleButtonObjName;
+    if(ObjectFind(0, name) < 0)
+    {
+        if(!ObjectCreate(0, name, OBJ_BUTTON, 0, 0, 0))
+            return;
+
+        ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+        ObjectSetInteger(0, name, OBJPROP_XSIZE, 160);
+        ObjectSetInteger(0, name, OBJPROP_YSIZE, 22);
+        ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+        ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+        ObjectSetInteger(0, name, OBJPROP_BACK, false);
+        ObjectSetInteger(0, name, OBJPROP_ZORDER, 100);
+        ObjectSetString(0, name, OBJPROP_FONT, "Arial");
+        ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
+    }
+
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_LOWER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, 10);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, 28);
+}
+
+void UpdateMartingaleToggleButton()
+{
+    EnsureMartingaleToggleButton();
+    if(ObjectFind(0, MartingaleButtonObjName) < 0)
+        return;
+
+    bool fixedMode = (LotSizingMode == Fixed_Lot_Size);
+    string text = g_martingale_enabled ? "Martingale: ON" : "Martingale: OFF";
+    color bgColor = clrRed;
+    color textColor = clrWhite;
+    color borderColor = clrBlack;
+
+    if(g_martingale_enabled && fixedMode)
+    {
+        bgColor = clrLime;
+        textColor = clrBlack;
+    }
+    else if(g_martingale_enabled && !fixedMode)
+    {
+        text = "Martingale: ON (Fixed only)";
+        bgColor = clrDarkOrange;
+    }
+    else if(!fixedMode)
+    {
+        bgColor = clrDimGray;
+    }
+
+    ObjectSetInteger(0, MartingaleButtonObjName, OBJPROP_STATE, g_martingale_enabled);
+    ObjectSetInteger(0, MartingaleButtonObjName, OBJPROP_BGCOLOR, bgColor);
+    ObjectSetInteger(0, MartingaleButtonObjName, OBJPROP_COLOR, textColor);
+    ObjectSetInteger(0, MartingaleButtonObjName, OBJPROP_BORDER_COLOR, borderColor);
+    ObjectSetString(0, MartingaleButtonObjName, OBJPROP_TEXT, text);
+}
+
+double NormalizeLotDownToStep(double lot, double step)
+{
+    if(lot <= 0.0)
+        return 0.0;
+    if(step <= 0.0)
+        return NormalizeDouble(lot, 8);
+
+    double units = MathFloor((lot / step) + 1e-8);
+    if(units < 0.0)
+        units = 0.0;
+    return NormalizeDouble(units * step, 8);
+}
+
+bool GetLastOpenedEaPositionLot(double &outLot)
+{
+    outLot = 0.0;
+    long latestTimeMsc = -1;
+    long latestTicket = -1;
+
+    int total = PositionsTotal();
+    for(int i = 0; i < total; i++)
+    {
+        ulong ticket = PositionGetTicket(i);
+        if(ticket == 0 || !PositionSelectByTicket(ticket))
+            continue;
+        if(PositionGetString(POSITION_SYMBOL) != _Symbol)
+            continue;
+        if(PositionGetInteger(POSITION_MAGIC) != MagicNumber)
+            continue;
+
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        if(volume <= 0.0)
+            continue;
+
+        long openTimeMsc = PositionGetInteger(POSITION_TIME_MSC);
+        if(openTimeMsc > latestTimeMsc || (openTimeMsc == latestTimeMsc && (long)ticket > latestTicket))
+        {
+            latestTimeMsc = openTimeMsc;
+            latestTicket = (long)ticket;
+            outLot = volume;
+        }
+    }
+
+    return (outLot > 0.0);
+}
+
+double CalculateFixedLotSize()
+{
+    double lotSize = DefaultLot;
+    if(LotSizingMode != Fixed_Lot_Size || !g_martingale_enabled)
+        return lotSize;
+
+    double previousLot = 0.0;
+    if(!GetLastOpenedEaPositionLot(previousLot) || previousLot <= 0.0)
+        return lotSize;
+
+    if(MartingaleMode == Martingale_Multiplier)
+        lotSize = previousLot * MartingaleValue;
+    else
+        lotSize = previousLot + MartingaleValue;
+
+    if(lotSize < 0.0)
+        lotSize = 0.0;
+
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+    if(lotStep <= 0.0)
+        lotStep = 0.01;
+    lotSize = NormalizeLotDownToStep(lotSize, lotStep);
+
+    { string __log=""; StringConcatenate(__log,
+        "MARTINGALE_LOT: prev=", DoubleToString(previousLot, 4),
+        " mode=", (MartingaleMode == Martingale_Multiplier ? "Multiplier" : "Addition"),
+        " value=", DoubleToString(MartingaleValue, 4),
+        " next=", DoubleToString(lotSize, 4));
+      Print(__log); ULogInfoPrint(__log); }
+
+    return lotSize;
+}
+
 double CalculateLotSize(double ntQuantity, const string& baseId, const string& trade_json, ENUM_ORDER_TYPE orderType)
 {
     double lotSize = DefaultLot;
 
     switch(LotSizingMode) {
         case Fixed_Lot_Size:
-            lotSize = DefaultLot;
+            lotSize = CalculateFixedLotSize();
             break;
 
         case LOTS_INVERSE_PNL:
@@ -2691,6 +2885,7 @@ void OnDeinit(const int reason)
 {
     Print("OnDeinit: Starting graceful cleanup... Reason: ", reason);
     Print("OnDeinit: Deinit reason codes: 0=Program, 1=Remove, 2=Recompile, 3=ChartClose, 4=Parameters, 5=Account, 6=Template, 7=Initfailed, 8=Close");
+    SaveMartingaleToggleState();
 
     // CRITICAL FIX: Handle parameter changes without full shutdown
     if(reason == 4) { // REASON_PARAMETERS
@@ -2752,6 +2947,7 @@ void OnDeinit(const int reason)
     RemoveStatusIndicator();
     RemoveStatusOverlay();
     ObjectDelete(0, CandleCountdownObjName);
+    ObjectDelete(0, MartingaleButtonObjName);
     Comment("");
     Print("OnDeinit: UI elements cleaned up");
 
@@ -2814,15 +3010,20 @@ void OnTick()
         string ea_name = MQLInfoString(MQL_PROGRAM_NAME);
         string ea_version = "3.00"; // gRPC version
         string connection_status = current_connection_status ? "Connected" : "Disconnected";
+        string martingale_status = g_martingale_enabled
+            ? (LotSizingMode == Fixed_Lot_Size ? "ON" : "ON*")
+            : "OFF";
 
-        string stats_comment = StringFormat("%s v%s | %s | Balance: %.2f | Positions: %d | gRPC: %s",
+        string stats_comment = StringFormat("%s v%s | %s | Balance: %.2f | Positions: %d | gRPC: %s | MG: %s",
                                             ea_name,
                                             ea_version,
                                             _Symbol,
                                             AccountInfoDouble(ACCOUNT_BALANCE),
                                             PositionsTotal(),
-                                            connection_status);
+                                            connection_status,
+                                            martingale_status);
         Comment(stats_comment);
+        UpdateMartingaleToggleButton();
 
         // Update status indicator only when connection status changes
         if(current_connection_status) {
@@ -2917,6 +3118,27 @@ void OnTick()
         CleanupNotificationTracking();
         CleanupClosedBaseIdTracking();
     }
+}
+
+void OnChartEvent(const int id,
+                  const long &lparam,
+                  const double &dparam,
+                  const string &sparam)
+{
+    if(id != CHARTEVENT_OBJECT_CLICK || sparam != MartingaleButtonObjName)
+        return;
+
+    g_martingale_enabled = !g_martingale_enabled;
+    SaveMartingaleToggleState();
+    UpdateMartingaleToggleButton();
+    ChartRedraw(0);
+
+    { string __log=""; StringConcatenate(__log,
+        "MARTINGALE_TOGGLE: ",
+        (g_martingale_enabled ? "ON" : "OFF"),
+        " lotMode=",
+        (LotSizingMode == Fixed_Lot_Size ? "Fixed_Lot_Size" : "LOTS_INVERSE_PNL"));
+      Print(__log); ULogInfoPrint(__log); }
 }
 
 //+------------------------------------------------------------------+
@@ -4296,7 +4518,7 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
     }
     else
     {
-        volume = DefaultLot;
+        volume = CalculateFixedLotSize();
     }
 
     if(volume <= 0.0)
@@ -4502,7 +4724,7 @@ bool OpenNewHedgeOrder(string hedgeOrigin, string tradeId, string nt_instrument_
                 {
                     ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
                     double posEntry = PositionGetDouble(POSITION_PRICE_OPEN);
-                    ApplySimpleStopLossIfNeeded(new_mt5_position_id, posType, posEntry);
+                    ApplySimpleStopLossIfNeeded(new_mt5_position_id, posType, posEntry, true);
                 }
 
                 // Final validation after position addition

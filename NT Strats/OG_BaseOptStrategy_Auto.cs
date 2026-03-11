@@ -733,6 +733,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 StraddleTrailActivationDollars = 500;
                 StraddleMinProfitHoldSeconds = 10;
                 EnableScaleInTrades = true;
+                PublishScaleInTradesToBridge = false;
                 EnableScaleInTrailing = true;
                 ScaleInDrawdownTicks = 30;
                 ScaleInTradesToAdd = 1;
@@ -843,7 +844,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // optional: log parameters once per iteration for diagnostics
                 if (Debug)
                 {
-                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, EnableRegimeSwitching={EnableRegimeSwitching}, EnableCandleConviction={EnableCandleConviction}, RsiChopLong={RsiChopLongThreshold}, RsiChopShort={RsiChopShortThreshold}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ScaleInTradesToAdd={ScaleInTradesToAdd}, ScaleInMaxTrades={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationValue={ScaleInTrailActivationValue}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockValue={ScaleInProfitLockValue}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementValue={ScaleInTrailIncrementValue}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, EnableGlobalTrailing={EnableGlobalTrailing}, GlobalTrailActivationMode={GlobalTrailActivationMode}, GlobalTrailActivationValue={GlobalTrailActivationValue}, GlobalProfitLockMode={GlobalProfitLockMode}, GlobalProfitLockValue={GlobalProfitLockValue}, GlobalTrailIncrementMode={GlobalTrailIncrementMode}, GlobalTrailIncrementValue={GlobalTrailIncrementValue}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
+                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, EnableRegimeSwitching={EnableRegimeSwitching}, EnableCandleConviction={EnableCandleConviction}, RsiChopLong={RsiChopLongThreshold}, RsiChopShort={RsiChopShortThreshold}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, PublishScaleInTradesToBridge={PublishScaleInTradesToBridge}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ScaleInTradesToAdd={ScaleInTradesToAdd}, ScaleInMaxTrades={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationValue={ScaleInTrailActivationValue}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockValue={ScaleInProfitLockValue}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementValue={ScaleInTrailIncrementValue}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, EnableGlobalTrailing={EnableGlobalTrailing}, GlobalTrailActivationMode={GlobalTrailActivationMode}, GlobalTrailActivationValue={GlobalTrailActivationValue}, GlobalProfitLockMode={GlobalProfitLockMode}, GlobalProfitLockValue={GlobalProfitLockValue}, GlobalTrailIncrementMode={GlobalTrailIncrementMode}, GlobalTrailIncrementValue={GlobalTrailIncrementValue}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
                 }
 
                 if (tradeStates == null)
@@ -1950,7 +1951,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!TryGetTradeState(activeTradeId, out activeState))
                 return;
 
-            if (!activeState.OpenPublished && !activeState.IsSynthetic)
+            if (ShouldPublishTradeLifecycle(activeState) && !activeState.OpenPublished && !activeState.IsSynthetic)
             {
                 if (PublishOpenEvent(activeState))
                     activeState.OpenPublished = true;
@@ -9734,6 +9735,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             get { return TreatMultiEntryAsSingleTrade && GetEffectiveTradesPerEntry() > 1; }
         }
 
+        private bool ShouldPublishTradeLifecycle(TradeRuntimeState state)
+        {
+            if (state == null)
+                return false;
+
+            if (!state.IsScaleInEntry)
+                return true;
+
+            return state.AllowOpenPublish || state.OpenPublished;
+        }
+
         private bool HasActiveStatesForSyncGroup(string syncTradeId)
         {
             if (string.IsNullOrEmpty(syncTradeId) || tradeStates == null || tradeStates.Count == 0)
@@ -9937,7 +9949,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     continue;
                 if (state.IsSynthetic)
                     continue;
-                if (state.IsScaleInEntry)
+                if (!ShouldPublishTradeLifecycle(state))
                     continue;
                 if (state.IsChopEntry && (state.EntryOrderPending || (state.EntryOrder != null && !IsTerminalState(state.EntryOrder.OrderState))))
                     continue;
@@ -9980,7 +9992,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     continue;
                 if (state.IsManualEntry)
                     continue;
-                if (state.IsScaleInEntry)
+                if (!ShouldPublishTradeLifecycle(state))
                     continue;
                 if (!state.OpenPublished)
                     continue;
@@ -10521,9 +10533,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (Instrument != null && position.Instrument != null && !string.Equals(Instrument.FullName, position.Instrument.FullName, StringComparison.OrdinalIgnoreCase))
                 return;
 
+            bool isFlatPosition = marketPosition == MarketPosition.Flat || quantity == 0;
+
             if (State == State.Realtime && manualHaltActive)
             {
                 TryEnforceManualHaltFlat();
+                if (isFlatPosition)
+                    CleanupFlatPositionState(false);
                 return;
             }
 
@@ -10548,38 +10564,45 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             // If the platform reports flat but we still have runtime state, clear it to avoid ghost trades.
-            if (marketPosition == MarketPosition.Flat || quantity == 0)
+            if (isFlatPosition)
             {
-                bool pending = false;
-                if (tradeStates != null && tradeStates.Count > 0)
-                {
-                    bool hasWorkingEntry = HasWorkingEntryOrders();
-                    if (!hasWorkingEntry)
-                    {
-                        CancelWorkingEntryOrders("position_flat");
-                        foreach (var st in tradeStates.Values.ToList())
-                            CancelProtectiveOrders(st);
-                        pending = PublishPendingCloses();
-                        if (!pending)
-                        {
-                            ResetTradeState();
-                            UpdateStatusLabel("Active: scanning (position flat)", true);
-                        }
-                    }
-                    else
-                    {
-                        // Preserve runtime state for pending entries (manual or auto).
-                        pending = PublishPendingCloses();
-                    }
-                }
-
-                if (scaleInActive || scaleInTriggered || scaleInHoldUntil != DateTime.MinValue)
-                    ResetScaleInState();
+                bool pending = CleanupFlatPositionState(true);
 
                 // Even if pending closes remain, do not block signal processing.
                 if (!pending)
                     return;
             }
+        }
+
+        private bool CleanupFlatPositionState(bool updateScanningStatus)
+        {
+            bool pending = false;
+
+            if (tradeStates != null && tradeStates.Count > 0)
+            {
+                bool hasWorkingEntry = HasWorkingEntryOrders();
+                if (!hasWorkingEntry)
+                {
+                    CancelWorkingEntryOrders("position_flat");
+                    foreach (var st in tradeStates.Values.ToList())
+                        CancelProtectiveOrders(st);
+                    pending = PublishPendingCloses();
+                    if (!pending)
+                    {
+                        ResetTradeState();
+                        if (updateScanningStatus)
+                            UpdateStatusLabel("Active: scanning (position flat)", true);
+                    }
+                }
+                else
+                {
+                    // Preserve runtime state for pending entries (manual or auto).
+                    pending = PublishPendingCloses();
+                }
+            }
+
+            ResetScaleInState();
+            return pending;
         }
 
         private void HandleEntryExecution(Execution execution, TradeRuntimeState state, bool isSyncEntryFill = false, bool allowHistorical = false)
@@ -10589,8 +10612,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 state.IsSynthetic = false;
                 state.SyntheticLogEmitted = false;
                 // Only arm publish on real-time sync fills or executions flagged live.
-                if (!state.IsScaleInEntry && (isSyncEntryFill || IsLiveExecutionContext(execution)))
-                    state.AllowOpenPublish = true;
+                if (isSyncEntryFill || IsLiveExecutionContext(execution))
+                {
+                    if (!state.IsScaleInEntry || PublishScaleInTradesToBridge)
+                        state.AllowOpenPublish = true;
+                }
                 state.EntryOrder = execution != null ? execution.Order : state.EntryOrder;
                 state.EntryOrderPending = false;
                 state.EntryCancelRequested = false;
@@ -10661,7 +10687,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             // Publish open for all live entries (including sync-behavior fills).
-            if (!state.IsScaleInEntry && !state.OpenPublished && !state.IsSynthetic && state.AllowOpenPublish)
+            if (ShouldPublishTradeLifecycle(state) && !state.OpenPublished && !state.IsSynthetic && state.AllowOpenPublish)
             {
                 if (PublishOpenEvent(state))
                     state.OpenPublished = true;
@@ -10733,6 +10759,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             string suffix = GetExitSignalSuffixForExecution(execution, triggerState);
             if (string.IsNullOrWhiteSpace(suffix))
                 suffix = "CLS";
+            bool stopExitAll = string.Equals(suffix, "BS", StringComparison.OrdinalIgnoreCase);
 
             CancelWorkingEntryOrders("partial_exit_all");
 
@@ -10746,6 +10773,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     continue;
 
                 state.ExitAllTriggered = true;
+                if (stopExitAll)
+                    RegisterStopLossCloseOverride(state.TradeId);
                 CancelProtectiveOrders(state);
 
                 int qty = Math.Max(1, state.RemainingQuantity);
@@ -10781,7 +10810,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (!state.ExitAllTriggered)
                 {
-                    if (State == State.Realtime && !state.IsSynthetic && !state.IsScaleInEntry && IsStopLossExecution(execution))
+                    if (State == State.Realtime && !state.IsSynthetic && ShouldPublishTradeLifecycle(state) && IsStopLossExecution(execution))
                         RegisterStopLossCloseOverride(state.TradeId);
 
                     state.ExitAllTriggered = true;
@@ -10791,8 +10820,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else
             {
-                if (State == State.Realtime && !state.IsSynthetic && !state.IsScaleInEntry && IsStopLossExecution(execution))
+                bool stopLossExecution = State == State.Realtime && !state.IsSynthetic && ShouldPublishTradeLifecycle(state) && IsStopLossExecution(execution);
+                if (stopLossExecution)
                     RegisterStopLossCloseOverride(state.TradeId);
+
+                if (stopLossExecution && !state.IsScaleInEntry && tradeStates != null)
+                {
+                    foreach (var candidate in tradeStates.Values.ToList())
+                    {
+                        if (candidate == null || !candidate.IsScaleInEntry || candidate.RemainingQuantity <= 0)
+                            continue;
+                        if (string.Equals(candidate.TradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        RegisterStopLossCloseOverride(candidate.TradeId);
+                    }
+                }
 
                 CancelProtectiveOrders(state, execution != null ? execution.Order : null);
                 if (execution != null)
@@ -10823,7 +10866,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     LogTradeOutcomeStory(execution, state, entryPrice, qty, execPnl);
                 }
 
-                if (!state.IsSynthetic && !state.IsScaleInEntry)
+                if (!state.IsSynthetic && ShouldPublishTradeLifecycle(state))
                 {
                     if (!PublishClosedEvent(state.TradeId))
                     {
@@ -10835,7 +10878,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         return; // keep state so we can retry close publish later
                     }
                 }
-                if (!state.IsScaleInEntry && (state.ManualStopOverride || state.ManualTargetOverride))
+                if (ShouldPublishTradeLifecycle(state) && (state.ManualStopOverride || state.ManualTargetOverride))
                     NotifyAddonManualOverride(state.TradeId,
                         state.ManualStopOverride ? false : (bool?)null,
                         state.ManualTargetOverride ? false : (bool?)null);
@@ -10907,6 +10950,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (string.IsNullOrWhiteSpace(tradeId))
                 return;
+
+            TradeRuntimeState state;
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out state) &&
+                state != null &&
+                !ShouldPublishTradeLifecycle(state))
+            {
+                return;
+            }
 
             string syncTradeId = ResolveSyncTradeId(tradeId);
             MultiStratManager.Instance?.RegisterManualCloseOverride(syncTradeId, StopLossCloseReason, TimeSpan.FromSeconds(20));
@@ -11182,10 +11234,11 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (state == null)
                 return false;
-            if (state.IsScaleInEntry)
-                return true;
+            if (!ShouldPublishTradeLifecycle(state))
+                return false;
 
-            EnsureMultiEntrySyncAssignment(state);
+            if (!state.IsScaleInEntry)
+                EnsureMultiEntrySyncAssignment(state);
 
             if (state.EntryOrderPending)
             {
@@ -11230,7 +11283,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 try
                 {
-                    manager.TradeSync.PublishOpen(this, group.TradeId, state.InstrumentName, state.EntrySide, totalQty, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, true);
+                    manager.TradeSync.PublishOpen(this, group.TradeId, state.InstrumentName, state.EntrySide, totalQty, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, true, false);
                     if (Debug)
                         StrategyLogDebug(string.Format("[AUTO][SYNC] Published OPEN for {0} qty={1} side={2} price={3:F2} (grouped)", group.TradeId, totalQty, state.EntrySide, state.EntryPrice));
                     tradeSyncWarned = false;
@@ -11248,8 +11301,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             try
             {
-                bool aggregateEntry = TreatMultiEntryAsSingleTrade && state.OriginalQuantity > 1;
-                manager.TradeSync.PublishOpen(this, state.TradeId, state.InstrumentName, state.EntrySide, state.OriginalQuantity, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, aggregateEntry);
+                bool aggregateEntry = !state.IsScaleInEntry && TreatMultiEntryAsSingleTrade && state.OriginalQuantity > 1;
+                manager.TradeSync.PublishOpen(this, state.TradeId, state.InstrumentName, state.EntrySide, state.OriginalQuantity, state.AccountName, state.NtPointsPer1kLoss, state.EntryPrice, aggregateEntry, state.IsScaleInEntry);
                 if (Debug)
                     StrategyLogDebug(string.Format("[AUTO][SYNC] Published OPEN for {0} qty={1} side={2} price={3:F2}{4}", state.TradeId, state.OriginalQuantity, state.EntrySide, state.EntryPrice, aggregateEntry ? " (aggregated)" : string.Empty));
                 tradeSyncWarned = false;
@@ -11304,9 +11357,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State != State.Realtime)
                 return;
-            TradeRuntimeState scaleState;
-            if (tradeStates != null && tradeStates.TryGetValue(tradeId, out scaleState) && scaleState != null && scaleState.IsScaleInEntry)
+            TradeRuntimeState state;
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out state) &&
+                state != null &&
+                !ShouldPublishTradeLifecycle(state))
+            {
                 return;
+            }
 
             MultiStratManager manager = MultiStratManager.Instance;
             if (manager == null || manager.TradeSync == null)
@@ -11359,9 +11417,14 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State != State.Realtime)
                 return true;
-            TradeRuntimeState scaleState;
-            if (tradeStates != null && tradeStates.TryGetValue(tradeId, out scaleState) && scaleState != null && scaleState.IsScaleInEntry)
+            TradeRuntimeState state;
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out state) &&
+                state != null &&
+                !ShouldPublishTradeLifecycle(state))
+            {
                 return true;
+            }
 
             MultiStratManager manager = MultiStratManager.Instance;
             if (manager == null || manager.TradeSync == null)
@@ -13254,8 +13317,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (string.IsNullOrEmpty(tradeId))
                 return;
             TradeRuntimeState state;
-            if (tradeStates != null && tradeStates.TryGetValue(tradeId, out state) && state != null && state.IsScaleInEntry)
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out state) &&
+                state != null &&
+                !ShouldPublishTradeLifecycle(state))
+            {
                 return;
+            }
 
             var manager = MultiStratManager.Instance;
             if (!IsTradeSyncReady(manager))
@@ -14804,57 +14872,32 @@ namespace NinjaTrader.NinjaScript.Strategies
             BootstrapExistingPositionState(true);
         }
 
-        private bool TryRestoreTradeStateFromTradeSync()
+        private TradeRuntimeState CreateRestoredTradeStateFromTradeSyncRecord(TradeSyncService.TradeRecord record, string accountName, string instrumentName, int fallbackQuantity, double fallbackEntryPrice)
         {
-            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
-                return false;
-
-            var manager = MultiStratManager.Instance;
-            var tradeSync = manager != null ? manager.TradeSync : null;
-            if (tradeSync == null || Account == null || Instrument == null)
-                return false;
-
-            string acct = Account.Name ?? string.Empty;
-            string inst = Instrument.FullName ?? string.Empty;
-            MarketPosition side = Position.MarketPosition;
-
-            List<TradeSyncService.TradeRecord> openTrades = tradeSync.GetOpenTradesSnapshot();
-            if (openTrades == null || openTrades.Count == 0)
-                return false;
-
-            TradeSyncService.TradeRecord record = openTrades.FirstOrDefault(r =>
-                r != null &&
-                r.Side == side &&
-                string.Equals((r.AccountName ?? string.Empty).Trim(), acct.Trim(), StringComparison.OrdinalIgnoreCase) &&
-                string.Equals((r.Instrument ?? string.Empty).Trim(), inst.Trim(), StringComparison.OrdinalIgnoreCase));
-
             if (record == null || string.IsNullOrWhiteSpace(record.TradeId))
-                return false;
+                return null;
 
-            if (tradeStates == null)
-                tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
-            if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
-                return false;
-
-            int posQty = Math.Abs(Position.Quantity);
-            int qty = record.RemainingQuantity > 0 ? record.RemainingQuantity : Math.Max(1, posQty);
-            int originalQty = record.NtQuantity > 0 ? record.NtQuantity : Math.Max(1, posQty);
-            double entryPrice = record.EntryPrice > 0 ? record.EntryPrice : Position.AveragePrice;
+            int qty = record.RemainingQuantity > 0
+                ? record.RemainingQuantity
+                : Math.Max(1, record.NtQuantity > 0 ? record.NtQuantity : fallbackQuantity);
+            int originalQty = record.NtQuantity > 0 ? record.NtQuantity : qty;
+            double entryPrice = record.EntryPrice > 0 ? record.EntryPrice : fallbackEntryPrice;
 
             var state = new TradeRuntimeState
             {
                 TradeId = record.TradeId,
-                SyncTradeId = record.AggregateEntry ? record.TradeId : null,
+                SyncTradeId = record.AggregateEntry && !record.IsScaleInTrade ? record.TradeId : null,
                 EntrySide = record.Side,
                 OriginalQuantity = originalQty,
                 RemainingQuantity = qty,
-                InstrumentName = string.IsNullOrWhiteSpace(record.Instrument) ? inst : record.Instrument,
-                AccountName = string.IsNullOrWhiteSpace(record.AccountName) ? acct : record.AccountName,
+                InstrumentName = string.IsNullOrWhiteSpace(record.Instrument) ? instrumentName : record.Instrument,
+                AccountName = string.IsNullOrWhiteSpace(record.AccountName) ? accountName : record.AccountName,
                 EntryPrice = entryPrice,
                 OpenPublished = true,
                 IsSynthetic = false,
-                ManualStopOverride = false,
-                ManualTargetOverride = false,
+                IsScaleInEntry = record.IsScaleInTrade,
+                ManualStopOverride = record.ManualStopOverride,
+                ManualTargetOverride = record.ManualTargetOverride,
                 ManualStopPending = false,
                 ManualTargetPending = false,
                 ManualStopPendingUntil = DateTime.MinValue,
@@ -14894,8 +14937,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 Bootstrapped = true,
                 IsManualEntry = false,
                 ExitAllTriggered = false,
-                AllowOpenPublish = false,
+                AllowOpenPublish = true,
                 PendingClosePublish = false,
+                ClosePublished = false,
                 EntryOrder = null,
                 StopOrder = null,
                 TargetOrder = null,
@@ -14934,14 +14978,89 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
-            tradeStates[record.TradeId] = state;
-            openTradeOrder.Add(record.TradeId);
-            activeTradeId = record.TradeId;
+            return state;
+        }
+
+        private bool TryRestoreTradeStateFromTradeSync()
+        {
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return false;
+
+            var manager = MultiStratManager.Instance;
+            var tradeSync = manager != null ? manager.TradeSync : null;
+            if (tradeSync == null || Account == null || Instrument == null)
+                return false;
+
+            string acct = Account.Name ?? string.Empty;
+            string inst = Instrument.FullName ?? string.Empty;
+            MarketPosition side = Position.MarketPosition;
+
+            List<TradeSyncService.TradeRecord> openTrades = tradeSync.GetOpenTradesSnapshot();
+            if (openTrades == null || openTrades.Count == 0)
+                return false;
+
+            var matchingRecords = openTrades
+                .Where(r =>
+                    r != null &&
+                    !string.IsNullOrWhiteSpace(r.TradeId) &&
+                    r.Side == side &&
+                    string.Equals((r.AccountName ?? string.Empty).Trim(), acct.Trim(), StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals((r.Instrument ?? string.Empty).Trim(), inst.Trim(), StringComparison.OrdinalIgnoreCase))
+                .OrderBy(r => r.OpenedAtUtc)
+                .ThenBy(r => r.TradeId)
+                .ToList();
+
+            if (matchingRecords.Count == 0)
+                return false;
+
+            if (tradeStates == null)
+                tradeStates = new Dictionary<string, TradeRuntimeState>(StringComparer.OrdinalIgnoreCase);
+            if (tradeStates.Count > 0 || openTradeOrder.Count > 0)
+                return false;
+
+            int posQty = Math.Max(1, Math.Abs(Position.Quantity));
+            string restoredPrimaryTradeId = null;
+            int restoredScaleInCount = 0;
+
+            foreach (var record in matchingRecords)
+            {
+                var state = CreateRestoredTradeStateFromTradeSyncRecord(record, acct, inst, posQty, Position.AveragePrice);
+                if (state == null)
+                    continue;
+
+                tradeStates[state.TradeId] = state;
+                openTradeOrder.Add(state.TradeId);
+                if (!state.IsScaleInEntry)
+                    restoredPrimaryTradeId = state.TradeId;
+                else if (state.RemainingQuantity > 0)
+                    restoredScaleInCount++;
+            }
+
+            if (tradeStates.Count == 0 || openTradeOrder.Count == 0)
+                return false;
+
+            activeTradeId = !string.IsNullOrEmpty(restoredPrimaryTradeId)
+                ? restoredPrimaryTradeId
+                : openTradeOrder[openTradeOrder.Count - 1];
             stopSet = false;
             targetSet = false;
 
+            ResetScaleInState();
+            if (restoredScaleInCount > 0)
+            {
+                scaleInTradesExecuted = restoredScaleInCount;
+                scaleInActive = true;
+                scaleInSide = side;
+
+                TradeRuntimeState referenceState = tradeStates.Values.FirstOrDefault(s => s != null && !s.IsScaleInEntry && s.EntryPrice > 0);
+                if (referenceState == null)
+                    referenceState = tradeStates.Values.FirstOrDefault(s => s != null && s.IsScaleInEntry && s.EntryPrice > 0);
+                if (referenceState != null && referenceState.EntryPrice > 0)
+                    scaleInInitialEntryPrice = referenceState.EntryPrice;
+            }
+
             if (Debug)
-                StrategyLogDebug($"[MANUAL][SYNC] Rehydrated trade state from TradeSync for {record.TradeId}.");
+                StrategyLogDebug($"[MANUAL][SYNC] Rehydrated {tradeStates.Count} trade state(s) from TradeSync.");
 
             return true;
         }
@@ -15293,8 +15412,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (string.IsNullOrWhiteSpace(tradeId))
                 return;
             TradeRuntimeState state;
-            if (tradeStates != null && tradeStates.TryGetValue(tradeId, out state) && state != null && state.IsScaleInEntry)
+            if (tradeStates != null &&
+                tradeStates.TryGetValue(tradeId, out state) &&
+                state != null &&
+                !ShouldPublishTradeLifecycle(state))
+            {
                 return;
+            }
 
             string syncTradeId = ResolveSyncTradeId(tradeId);
             MultiStratManager.Instance?.RegisterManualCloseOverride(syncTradeId, ManualCloseReason);
@@ -16926,34 +17050,37 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Enable Scale-In Trades", GroupName = "10 - Scale-In", Order = 0)]
         public bool EnableScaleInTrades { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trailing", GroupName = "10 - Scale-In", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "Publish Scale-In Trades To Bridge", GroupName = "10 - Scale-In", Order = 1)]
+        public bool PublishScaleInTradesToBridge { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trailing", GroupName = "10 - Scale-In", Order = 2)]
         public bool EnableScaleInTrailing { get; set; }
 
-        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Drawdown Step (ticks)", GroupName = "10 - Scale-In", Order = 2)]
+        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Drawdown Step (ticks)", GroupName = "10 - Scale-In", Order = 3)]
         public int ScaleInDrawdownTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "10 - Scale-In", Order = 3)]
+        [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "10 - Scale-In", Order = 4)]
         public int ScaleInTradesToAdd { get; set; }
 
-        [NinjaScriptProperty, Range(0, 50), Display(Name = "Scale-In Max Trades", GroupName = "10 - Scale-In", Order = 4)]
+        [NinjaScriptProperty, Range(0, 50), Display(Name = "Scale-In Max Trades", GroupName = "10 - Scale-In", Order = 5)]
         public int ScaleInMaxTrades { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "10 - Scale-In", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "10 - Scale-In", Order = 6)]
         public BreakEvenTriggerModeOption ScaleInTrailActivationMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Value", GroupName = "10 - Scale-In", Order = 6)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Value", GroupName = "10 - Scale-In", Order = 7)]
         public double ScaleInTrailActivationValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "10 - Scale-In", Order = 7)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "10 - Scale-In", Order = 8)]
         public BreakEvenTriggerModeOption ScaleInProfitLockMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Value", GroupName = "10 - Scale-In", Order = 8)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Value", GroupName = "10 - Scale-In", Order = 9)]
         public double ScaleInProfitLockValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "10 - Scale-In", Order = 9)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "10 - Scale-In", Order = 10)]
         public BreakEvenTriggerModeOption ScaleInTrailIncrementMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "10 - Scale-In", Order = 10)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "10 - Scale-In", Order = 11)]
         public double ScaleInTrailIncrementValue { get; set; }
 
         #endregion

@@ -28,7 +28,6 @@ namespace NinjaTrader.NinjaScript.Strategies
     {
         private const int MaxTradesPerEntry = 10;
         private const int TickSeriesIndex = 1;
-        private const int SyntheticSignalSeriesIndex = -1;
         private const double DailyProfitConfirmSeconds = 0.75;
         private const string StatusTag = "PINE79_STATUS";
         private const string StatusPnlTag = "PINE79_STATUS_PNL";
@@ -67,8 +66,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private BarsPeriodType signalBarsType;
         private int signalBarsValue;
         private bool signalSeriesUsesPrimary;
-        private readonly List<PinePriceBar> syntheticSignalBars = new List<PinePriceBar>();
-        private int syntheticSignalLastPrimaryBarIndex = -1;
 
         private int tradesPerEntryOverride;
         private double? runtimeDailyLossLimit;
@@ -105,7 +102,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private TextBlock dplLabel;
         private TextBox dplTextBox;
         private TextBlock trailingStatusTextBlock;
-        private Border trailingStatusBorder;
         private bool chartTraderButtonsAdded;
         private bool lastManualButtonsEnabled;
         private bool lastResumeEnabled;
@@ -214,8 +210,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                 AddDataSeries(BarsPeriodType.Tick, 1);
 
                 ResolveSignalSeriesSpecification(out signalBarsType, out signalBarsValue, out signalSeriesUsesPrimary);
-                signalSeriesIndex = signalSeriesUsesPrimary ? 0 : SyntheticSignalSeriesIndex;
-                ResetSyntheticSignalSeriesCache();
+                if (!signalSeriesUsesPrimary)
+                    AddDataSeries(signalBarsType, signalBarsValue);
+
+                signalSeriesIndex = signalSeriesUsesPrimary ? 0 : 2;
 
                 if (Debug)
                 {
@@ -236,8 +234,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                         EntryStopLossType,
                         EnableTrailingEngine,
                         TrailingMode));
-                    if (!signalSeriesUsesPrimary)
-                        StrategyLogDebug(string.Format(CultureInfo.InvariantCulture, "SIGNAL_SERIES: synthetic {0} x {1}", signalBarsType, signalBarsValue));
                 }
             }
             else if (State == State.DataLoaded)
@@ -305,9 +301,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (BarsInProgress != 0)
                 return;
 
-            if (IsFirstTickOfBar)
-                UpdateSyntheticSignalSeriesCache();
-
             if (CurrentBar < BarsRequiredToTrade)
                 return;
 
@@ -363,13 +356,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                         break;
                 }
             }
-            else if (dailyLimitHalted)
+            else
             {
                 EnforceFlatWhenHalted(haltReason);
-            }
-            else if (manualHaltActive)
-            {
-                EnforceManualHaltState();
             }
 
             if (ShouldUseMarketStructureStopUpdater())
@@ -412,8 +401,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     error,
                     string.IsNullOrEmpty(nativeError) ? "<none>" : nativeError));
             }
-
-            SyncStopStateFromOrder(order, stopPrice, orderState);
 
             if (string.IsNullOrEmpty(order.Name) || workingEntryOrders == null)
                 return;
@@ -473,9 +460,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     state.MaxFavorablePrice = execution.Price;
                 if (state.MaxAdversePrice <= 0.0)
                     state.MaxAdversePrice = execution.Price;
-
-                state.LastExitReason = string.Empty;
-                EnsureEntryStopAnchoredToFill(state);
 
                 if (Debug || EnableSignalDiagnostics || state.IsManualEntry)
                 {
@@ -1125,142 +1109,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             return price > 0.0 ? price.ToString("F2", CultureInfo.InvariantCulture) : "OFF";
         }
 
-        private bool TryResolveTradeStateByEntrySignal(string entrySignal, out PineTradeRuntimeState state)
-        {
-            state = null;
-            if (string.IsNullOrWhiteSpace(entrySignal) || entrySignalToTradeId == null || tradeStates == null)
-                return false;
-
-            string tradeId;
-            if (!entrySignalToTradeId.TryGetValue(entrySignal, out tradeId) || string.IsNullOrWhiteSpace(tradeId))
-                return false;
-
-            return tradeStates.TryGetValue(tradeId, out state) && state != null;
-        }
-
-        private static bool IsStopOrderName(string orderName)
-        {
-            return !string.IsNullOrWhiteSpace(orderName)
-                && orderName.IndexOf("Stop loss", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static bool IsWorkingStopOrderState(OrderState orderState)
-        {
-            switch (orderState)
-            {
-                case OrderState.Submitted:
-                case OrderState.Accepted:
-                case OrderState.Working:
-                case OrderState.PartFilled:
-                case OrderState.ChangePending:
-                case OrderState.ChangeSubmitted:
-                case OrderState.CancelPending:
-                case OrderState.CancelSubmitted:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        private static bool IsTerminalStopOrderState(OrderState orderState)
-        {
-            switch (orderState)
-            {
-                case OrderState.Cancelled:
-                case OrderState.Filled:
-                case OrderState.Rejected:
-                    return true;
-                default:
-                    return false;
-            }
-        }
-
-        private void SyncStopStateFromOrder(Order order, double stopPrice, OrderState orderState)
-        {
-            if (order == null || !IsStopOrderName(order.Name))
-                return;
-
-            PineTradeRuntimeState state;
-            if (!TryResolveTradeStateByEntrySignal(order.FromEntrySignal, out state))
-                return;
-
-            double liveStop = stopPrice > 0.0 ? RoundToTickSize(stopPrice) : state.ActiveStopPrice;
-            if (liveStop > 0.0)
-            {
-                state.InitialStopPrice = state.InitialStopPrice > 0.0 ? state.InitialStopPrice : liveStop;
-                state.ActiveStopPrice = liveStop;
-                state.LastStopPrice = liveStop;
-                if (state.TrailingActive)
-                    state.LastTrailingStopPrice = liveStop;
-            }
-
-            bool working = IsWorkingStopOrderState(orderState);
-            bool terminal = IsTerminalStopOrderState(orderState);
-            if (working)
-                state.HasWorkingStop = true;
-            else if (terminal)
-                state.HasWorkingStop = false;
-
-            if (orderState == OrderState.Filled)
-                state.HasWorkingStop = false;
-
-            if (terminal && orderState != OrderState.Filled && !string.Equals(state.LastStopSource, "STOP_ORDER", StringComparison.OrdinalIgnoreCase))
-                state.TrailingActive = false;
-
-            if (string.IsNullOrWhiteSpace(state.LastStopSource))
-                state.LastStopSource = "STOP_ORDER";
-            state.LastStopUpdatedUtc = DateTime.UtcNow;
-
-            if (Debug || EnableSignalDiagnostics || state.IsManualEntry)
-            {
-                StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
-                    "[STOP_ORDER] trade={0} fromEntry={1} state={2} stop={3} working={4} trailing={5} source={6}",
-                    state.TradeId,
-                    order.FromEntrySignal ?? "<null>",
-                    orderState,
-                    FormatOptionalPrice(liveStop),
-                    state.HasWorkingStop ? "YES" : "NO",
-                    state.TrailingActive ? "ON" : "OFF",
-                    string.IsNullOrWhiteSpace(state.LastStopSource) ? "UNKNOWN" : state.LastStopSource));
-            }
-        }
-
-        private void EnsureEntryStopAnchoredToFill(PineTradeRuntimeState state)
-        {
-            if (state == null || state.EntryPrice <= 0.0 || !ShouldApplyEntryStopLoss())
-                return;
-
-            double anchoredStop;
-            if (!ComputeEntryStopLossPrice(state.EntrySide == MarketPosition.Long ? 1 : -1, state.EntryPrice, out anchoredStop))
-                return;
-
-            anchoredStop = RoundToTickSize(anchoredStop);
-            if (anchoredStop <= 0.0)
-                return;
-
-            bool changed = state.ActiveStopPrice <= 0.0 || Math.Abs(state.ActiveStopPrice - anchoredStop) > TickSize * 0.5;
-            if (!changed)
-            {
-                if (!state.HasWorkingStop)
-                    RegisterRequestedStop(state, anchoredStop, "FILL_" + EntryStopLossType, false);
-                return;
-            }
-
-            SetStopLoss(state.EntrySignal, CalculationMode.Price, anchoredStop, false);
-            RegisterRequestedStop(state, anchoredStop, "FILL_" + EntryStopLossType, false);
-
-            if (Debug || EnableSignalDiagnostics || state.IsManualEntry)
-            {
-                StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
-                    "[STOP_REBASE] trade={0} side={1} fill={2:F2} stop={3:F2} source={4}",
-                    state.TradeId,
-                    state.EntrySide,
-                    state.EntryPrice,
-                    anchoredStop,
-                    "FILL_" + EntryStopLossType));
-            }
-        }
-
         private void CancelWorkingEntryOrders(string reason)
         {
             if (workingEntryOrders == null || workingEntryOrders.Count == 0)
@@ -1280,26 +1128,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private void CancelWorkingAutoEntryOrders(string reason)
-        {
-            if (workingEntryOrders == null || workingEntryOrders.Count == 0)
-                return;
-
-            foreach (var order in workingEntryOrders.Values.ToList())
-            {
-                try
-                {
-                    if (order == null || IsManualEntryOrder(order))
-                        continue;
-                    CancelOrder(order);
-                }
-                catch (Exception ex)
-                {
-                    StrategyLogDebug($"[ORDERS] Auto cancel failed ({reason}): {ex.Message}");
-                }
-            }
-        }
-
         private void EnforceFlatWhenHalted(string reason)
         {
             CancelWorkingEntryOrders(reason);
@@ -1307,89 +1135,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitLong(Position.Quantity, BuildExitSignalName(reason), string.Empty);
             else if (Position.MarketPosition == MarketPosition.Short && Position.Quantity > 0)
                 ExitShort(Position.Quantity, BuildExitSignalName(reason), string.Empty);
-        }
-
-        private void EnforceManualHaltState()
-        {
-            CancelWorkingAutoEntryOrders("manual_halt");
-
-            if (HasManualTradesOpenOrPending())
-                return;
-
-            if (Position.MarketPosition == MarketPosition.Long && Position.Quantity > 0)
-                ExitLong(Position.Quantity, BuildExitSignalName("manual_halt_enforce"), string.Empty);
-            else if (Position.MarketPosition == MarketPosition.Short && Position.Quantity > 0)
-                ExitShort(Position.Quantity, BuildExitSignalName("manual_halt_enforce"), string.Empty);
-        }
-
-        private bool HasManualTradesOpenOrPending()
-        {
-            if (tradeStates != null)
-            {
-                foreach (var state in tradeStates.Values)
-                {
-                    if (state == null || !IsManualTradeState(state))
-                        continue;
-
-                    if (state.RemainingQuantity > 0)
-                        return true;
-
-                    if (state.EntryPrice <= 0.0)
-                        return true;
-                }
-            }
-
-            if (workingEntryOrders != null)
-            {
-                foreach (var order in workingEntryOrders.Values)
-                {
-                    if (order == null || !IsManualEntryOrder(order))
-                        continue;
-
-                    switch (order.OrderState)
-                    {
-                        case OrderState.Submitted:
-                        case OrderState.Accepted:
-                        case OrderState.Working:
-                        case OrderState.PartFilled:
-                        case OrderState.ChangePending:
-                        case OrderState.ChangeSubmitted:
-                        case OrderState.CancelPending:
-                        case OrderState.CancelSubmitted:
-                            return true;
-                    }
-                }
-            }
-
-            return false;
-        }
-
-        private bool IsManualEntryOrder(Order order)
-        {
-            if (order == null)
-                return false;
-
-            string signalName = order.Name ?? string.Empty;
-            if (signalName.IndexOf("MANBUY", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                signalName.IndexOf("MANSELL", StringComparison.OrdinalIgnoreCase) >= 0)
-            {
-                return true;
-            }
-
-            PineTradeRuntimeState state;
-            return TryResolveTradeStateByEntrySignal(signalName, out state) && IsManualTradeState(state);
-        }
-
-        private static bool IsManualTradeState(PineTradeRuntimeState state)
-        {
-            if (state == null)
-                return false;
-
-            if (state.IsManualEntry)
-                return true;
-
-            return !string.IsNullOrWhiteSpace(state.EntryContext)
-                && state.EntryContext.StartsWith("MANUAL", StringComparison.OrdinalIgnoreCase);
         }
 
         private void RunTrailingEngine(bool intrabarPass)
@@ -1415,9 +1160,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             foreach (var state in tradeStates.Values.Where(x => x != null && x.RemainingQuantity > 0).ToList())
             {
-                if (state.EntryPrice <= 0.0)
-                    continue;
-
                 double activationMetric = 0.0;
                 double activationThreshold = 0.0;
                 double stepUnits = 0.0;
@@ -1500,9 +1242,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             foreach (var state in tradeStates.Values.Where(x => x != null && x.RemainingQuantity > 0).ToList())
             {
-                if (state.EntryPrice <= 0.0)
-                    continue;
-
                 double stopPrice;
                 if (!ComputeEntryStopLossPrice(state.EntrySide == MarketPosition.Long ? 1 : -1, state.EntryPrice, out stopPrice))
                     continue;
@@ -1631,7 +1370,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!ResolveSignalShifts(signalBarTime, out curBarsAgo, out prevBarsAgo))
                 return false;
 
-            var bars = BuildBarsOldestFirst(signalSeriesIndex, curBarsAgo, Math.Min(GetSeriesCurrentBars(signalSeriesIndex) - curBarsAgo + 1, 2000));
+            var bars = BuildBarsOldestFirst(signalSeriesIndex, curBarsAgo, Math.Min(CurrentBars[signalSeriesIndex] - curBarsAgo + 1, 2000));
             if (bars.Count < 2)
                 return false;
 
@@ -1732,21 +1471,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             curBarsAgo = baseBarsAgo + (UseLookaheadApproximation ? 0 : 1);
             prevBarsAgo = curBarsAgo + 1;
-            return GetSeriesCurrentBars(signalSeriesIndex) >= prevBarsAgo;
+            return CurrentBars[signalSeriesIndex] >= prevBarsAgo;
         }
 
         private int FindBarsAgoContainingTime(int seriesIndex, DateTime targetTime)
         {
-            if (IsSyntheticSignalSeries(seriesIndex))
-            {
-                for (int idx = syntheticSignalBars.Count - 1; idx >= 0; idx--)
-                {
-                    if (syntheticSignalBars[idx].Time <= targetTime)
-                        return syntheticSignalBars.Count - 1 - idx;
-                }
-                return -1;
-            }
-
             int maxBarsAgo = Math.Min(CurrentBars[seriesIndex], 5000);
             for (int barsAgo = 0; barsAgo <= maxBarsAgo; barsAgo++)
             {
@@ -1759,18 +1488,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private List<PinePriceBar> BuildBarsOldestFirst(int seriesIndex, int startBarsAgo, int count)
         {
             var bars = new List<PinePriceBar>();
-            if (IsSyntheticSignalSeries(seriesIndex))
-            {
-                if (count <= 0 || syntheticSignalBars.Count <= startBarsAgo)
-                    return bars;
-
-                int newestIndex = syntheticSignalBars.Count - 1 - startBarsAgo;
-                int oldestIndex = Math.Max(0, newestIndex - count + 1);
-                for (int idx = oldestIndex; idx <= newestIndex; idx++)
-                    bars.Add(ClonePriceBar(syntheticSignalBars[idx]));
-                return bars;
-            }
-
             if (count <= 0 || CurrentBars[seriesIndex] < startBarsAgo)
                 return bars;
 
@@ -1793,17 +1510,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private List<PinePriceBar> BuildBarsNewestFirst(int seriesIndex, int count)
         {
             var bars = new List<PinePriceBar>();
-            if (IsSyntheticSignalSeries(seriesIndex))
-            {
-                int syntheticMaxBarsAgo = Math.Min(GetSeriesCurrentBars(seriesIndex), Math.Max(0, count - 1));
-                for (int barsAgo = 0; barsAgo <= syntheticMaxBarsAgo; barsAgo++)
-                {
-                    int idx = syntheticSignalBars.Count - 1 - barsAgo;
-                    bars.Add(ClonePriceBar(syntheticSignalBars[idx]));
-                }
-                return bars;
-            }
-
             int maxBarsAgo = Math.Min(CurrentBars[seriesIndex], Math.Max(0, count - 1));
             for (int barsAgo = 0; barsAgo <= maxBarsAgo; barsAgo++)
             {
@@ -1818,132 +1524,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 });
             }
             return bars;
-        }
-
-        private bool IsSyntheticSignalSeries(int seriesIndex)
-        {
-            return !signalSeriesUsesPrimary && seriesIndex == SyntheticSignalSeriesIndex;
-        }
-
-        private int GetSeriesCurrentBars(int seriesIndex)
-        {
-            return IsSyntheticSignalSeries(seriesIndex)
-                ? syntheticSignalBars.Count - 1
-                : CurrentBars[seriesIndex];
-        }
-
-        private static PinePriceBar ClonePriceBar(PinePriceBar source)
-        {
-            return new PinePriceBar
-            {
-                Time = source.Time,
-                Open = source.Open,
-                High = source.High,
-                Low = source.Low,
-                Close = source.Close,
-                Volume = source.Volume
-            };
-        }
-
-        private void ResetSyntheticSignalSeriesCache()
-        {
-            syntheticSignalBars.Clear();
-            syntheticSignalLastPrimaryBarIndex = -1;
-        }
-
-        private void UpdateSyntheticSignalSeriesCache()
-        {
-            if (!IsSyntheticSignalSeries(signalSeriesIndex) || signalBarsValue <= 0)
-                return;
-
-            int targetPrimaryBarIndex = CurrentBar - 1;
-            if (targetPrimaryBarIndex < 0)
-                return;
-
-            for (int primaryBarIndex = syntheticSignalLastPrimaryBarIndex + 1; primaryBarIndex <= targetPrimaryBarIndex; primaryBarIndex++)
-            {
-                int barsAgo = CurrentBar - primaryBarIndex;
-                if (barsAgo < 0 || barsAgo > CurrentBar)
-                    continue;
-
-                AppendPrimaryBarToSyntheticSignalSeries(new PinePriceBar
-                {
-                    Time = Times[0][barsAgo],
-                    Open = Opens[0][barsAgo],
-                    High = Highs[0][barsAgo],
-                    Low = Lows[0][barsAgo],
-                    Close = Closes[0][barsAgo],
-                    Volume = Volumes[0][barsAgo]
-                });
-
-                syntheticSignalLastPrimaryBarIndex = primaryBarIndex;
-            }
-        }
-
-        private void AppendPrimaryBarToSyntheticSignalSeries(PinePriceBar primaryBar)
-        {
-            if (primaryBar == null)
-                return;
-
-            DateTime bucketStart = ResolveSignalBucketStart(primaryBar.Time);
-            int lastIndex = syntheticSignalBars.Count - 1;
-            if (lastIndex < 0 || syntheticSignalBars[lastIndex].Time != bucketStart)
-            {
-                syntheticSignalBars.Add(new PinePriceBar
-                {
-                    Time = bucketStart,
-                    Open = primaryBar.Open,
-                    High = primaryBar.High,
-                    Low = primaryBar.Low,
-                    Close = primaryBar.Close,
-                    Volume = primaryBar.Volume
-                });
-                return;
-            }
-
-            PinePriceBar current = syntheticSignalBars[lastIndex];
-            current.High = Math.Max(current.High, primaryBar.High);
-            current.Low = Math.Min(current.Low, primaryBar.Low);
-            current.Close = primaryBar.Close;
-            current.Volume += primaryBar.Volume;
-            syntheticSignalBars[lastIndex] = current;
-        }
-
-        private DateTime ResolveSignalBucketStart(DateTime time)
-        {
-            DateTime date = time.Date;
-            DateTime dateOnly = DateTime.SpecifyKind(new DateTime(date.Year, date.Month, date.Day), time.Kind);
-            switch (signalBarsType)
-            {
-                case BarsPeriodType.Minute:
-                    int totalMinutes = time.Hour * 60 + time.Minute;
-                    int bucketMinutes = Math.Max(1, signalBarsValue);
-                    int minuteFloor = (totalMinutes / bucketMinutes) * bucketMinutes;
-                    return dateOnly.AddMinutes(minuteFloor);
-                case BarsPeriodType.Day:
-                    DateTime dayEpoch = DateTime.SpecifyKind(new DateTime(2000, 1, 1), time.Kind);
-                    int totalDays = Math.Max(0, (int)(dateOnly - dayEpoch).TotalDays);
-                    int dayFloor = (totalDays / Math.Max(1, signalBarsValue)) * Math.Max(1, signalBarsValue);
-                    return dayEpoch.AddDays(dayFloor);
-                case BarsPeriodType.Week:
-                    DateTime weekEpoch = DateTime.SpecifyKind(new DateTime(2000, 1, 3), time.Kind); // Monday
-                    DateTime weekStart = StartOfWeek(dateOnly, DayOfWeek.Monday);
-                    int totalWeeks = Math.Max(0, (int)((weekStart - weekEpoch).TotalDays / 7.0));
-                    int weekFloor = (totalWeeks / Math.Max(1, signalBarsValue)) * Math.Max(1, signalBarsValue);
-                    return weekEpoch.AddDays(weekFloor * 7);
-                case BarsPeriodType.Month:
-                    int totalMonths = Math.Max(0, ((time.Year - 2000) * 12) + (time.Month - 1));
-                    int monthFloor = (totalMonths / Math.Max(1, signalBarsValue)) * Math.Max(1, signalBarsValue);
-                    return DateTime.SpecifyKind(new DateTime(2000 + (monthFloor / 12), (monthFloor % 12) + 1, 1), time.Kind);
-                default:
-                    return dateOnly;
-            }
-        }
-
-        private static DateTime StartOfWeek(DateTime value, DayOfWeek startOfWeek)
-        {
-            int diff = (7 + (value.DayOfWeek - startOfWeek)) % 7;
-            return value.AddDays(-diff).Date;
         }
 
         private List<double> ComputeAtrSeriesOldestFirst(IList<PinePriceBar> bars, int length)
@@ -2487,6 +2067,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             int baseMinutes = GetPrimaryFrameMinutes();
             int targetMinutes = Math.Max(1, baseMinutes * Math.Max(1, TimeframeMultiplier));
 
+            if (BarsPeriod.BarsPeriodType == BarsPeriodType.Minute && BarsPeriod.Value == targetMinutes)
+            {
+                barsType = BarsPeriod.BarsPeriodType;
+                barsValue = BarsPeriod.Value;
+                usePrimary = true;
+                return;
+            }
+
             if (targetMinutes < 1440)
             {
                 barsType = BarsPeriodType.Minute;
@@ -2507,9 +2095,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 barsType = BarsPeriodType.Month;
                 barsValue = Math.Max(1, targetMinutes / 43200);
             }
-
-            if (BarsPeriod.BarsPeriodType == barsType && BarsPeriod.Value == barsValue)
-                usePrimary = true;
         }
 
         private int GetPrimaryFrameMinutes()
@@ -2670,13 +2255,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             lastSignalDiagnosticsBarTime = diagTime;
 
-            PineTradeRuntimeState protectionState = GetLeadOpenTradeState();
-            string activeStop = protectionState != null ? FormatOptionalPrice(protectionState.ActiveStopPrice) : "OFF";
-            string stopSource = protectionState != null && !string.IsNullOrWhiteSpace(protectionState.LastStopSource) ? protectionState.LastStopSource : "OFF";
-            string trailingState = protectionState != null && protectionState.TrailingActive ? "ON" : "OFF";
-
             StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
-                "[SIGNAL] time={0:yyyy-MM-dd HH:mm:ss} tp={1} setup={2} tfx={3} filter={4} rawBuy={5} rawSell={6} trend={7} buyEntry={8} sellEntry={9} cond={10}->{11} pos={12} halted={13} decision={14} rsi={15:F2} atr={16:F2} atrMa={17:F2} entry={18:F2} sl={19:F2} tp1={20:F2} tp2={21:F2} tp3={22:F2} flags={23} activeStop={24} stopSrc={25} trailing={26}",
+                "[SIGNAL] time={0:yyyy-MM-dd HH:mm:ss} tp={1} setup={2} tfx={3} filter={4} rawBuy={5} rawSell={6} trend={7} buyEntry={8} sellEntry={9} cond={10}->{11} pos={12} halted={13} decision={14} rsi={15:F2} atr={16:F2} atrMa={17:F2} entry={18:F2} sl={19:F2} tp1={20:F2} tp2={21:F2} tp3={22:F2} flags={23}",
                 diagTime,
                 TPSType,
                 SetupType,
@@ -2700,10 +2280,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 st.Tp1Line,
                 st.Tp2Line,
                 st.Tp3Line,
-                FormatSignalFlags(st),
-                activeStop,
-                stopSource,
-                trailingState));
+                FormatSignalFlags(st)));
         }
 
         private string ComputeDiagnosticDecision(PineEvalState st)
@@ -2817,35 +2394,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             return points * pointValue * Math.Max(1, quantity);
         }
 
-        private static bool IsImmediateExitReason(string reason)
-        {
-            return !string.IsNullOrWhiteSpace(reason)
-                && (reason.IndexOf("REV", StringComparison.OrdinalIgnoreCase) >= 0
-                    || reason.IndexOf("HALT", StringComparison.OrdinalIgnoreCase) >= 0
-                    || reason.IndexOf("MANUAL", StringComparison.OrdinalIgnoreCase) >= 0
-                    || reason.IndexOf("OPT_CLOSE", StringComparison.OrdinalIgnoreCase) >= 0);
-        }
-
         private string ResolveExitReason(Execution execution, PineTradeRuntimeState state)
         {
-            string explicitReason = state != null ? state.LastExitReason : string.Empty;
-            string orderName = execution != null && execution.Order != null ? execution.Order.Name ?? string.Empty : string.Empty;
-
-            if (!string.IsNullOrWhiteSpace(explicitReason) && (IsImmediateExitReason(explicitReason) || !IsStopOrderName(orderName)))
-                return explicitReason;
-
-            if (IsStopOrderName(orderName))
-            {
-                string stopSource = state != null && !string.IsNullOrWhiteSpace(state.LastStopSource)
-                    ? state.LastStopSource
-                    : orderName;
-                return "STOP_FILL:" + stopSource;
-            }
-
-            if (!string.IsNullOrWhiteSpace(orderName))
-                return orderName;
-            if (!string.IsNullOrWhiteSpace(explicitReason))
-                return explicitReason;
+            if (state != null && !string.IsNullOrWhiteSpace(state.LastExitReason))
+                return state.LastExitReason;
+            if (execution != null && execution.Order != null && !string.IsNullOrWhiteSpace(execution.Order.Name))
+                return execution.Order.Name;
             return "EXIT";
         }
 
@@ -2879,7 +2433,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             StrategyLogInfo(string.Format(CultureInfo.InvariantCulture,
-                "[TRADE_STORY] trade={0} side={1} qty={2} entry={3:F2} exit={4:F2} pnl={5:C2} {6} reason={7} exitOrder={8} ctx={9} entryReason={10} rawBuy={11} rawSell={12} trend={13} cond={14}->{15} rsi={16:F2} atr={17:F2} atrMa={18:F2} entryLine={19:F2} pineSl={20:F2} activeStop={21} initialStop={22} stopSrc={23} trailing={24} tp1={25:F2} tp2={26:F2} tp3={27:F2} mfe={28} mae={29} entryTime={30:yyyy-MM-dd HH:mm:ss} exitTime={31:yyyy-MM-dd HH:mm:ss}",
+                "[TRADE_STORY] trade={0} side={1} qty={2} entry={3:F2} exit={4:F2} pnl={5:C2} {6} reason={7} ctx={8} entryReason={9} rawBuy={10} rawSell={11} trend={12} cond={13}->{14} rsi={15:F2} atr={16:F2} atrMa={17:F2} entryLine={18:F2} sl={19:F2} tp1={20:F2} tp2={21:F2} tp3={22:F2} mfe={23} mae={24} entryTime={25:yyyy-MM-dd HH:mm:ss} exitTime={26:yyyy-MM-dd HH:mm:ss}",
                 state.TradeId,
                 state.EntrySide,
                 Math.Max(1, quantity),
@@ -2888,7 +2442,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 execPnl,
                 outcome,
                 string.IsNullOrWhiteSpace(exitReason) ? "EXIT" : exitReason,
-                execution.Order != null && !string.IsNullOrWhiteSpace(execution.Order.Name) ? execution.Order.Name : "<none>",
                 string.IsNullOrWhiteSpace(state.EntryContext) ? "AUTO" : state.EntryContext,
                 string.IsNullOrWhiteSpace(state.EntryReason) ? "n/a" : state.EntryReason,
                 state.EntryRawBuySignal,
@@ -2901,10 +2454,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 state.EntryAtrMaValue,
                 state.EntryLine,
                 state.EntrySlLine,
-                FormatOptionalPrice(state.ActiveStopPrice),
-                FormatOptionalPrice(state.InitialStopPrice),
-                string.IsNullOrWhiteSpace(state.LastStopSource) ? "OFF" : state.LastStopSource,
-                state.TrailingActive ? "ON" : "OFF",
                 state.EntryTp1Line,
                 state.EntryTp2Line,
                 state.EntryTp3Line,
@@ -2940,66 +2489,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private PineTradeRuntimeState GetLeadOpenTradeState()
-        {
-            if (tradeStates == null || tradeStates.Count == 0)
-                return null;
-
-            return tradeStates.Values
-                .Where(x => x != null && x.RemainingQuantity > 0)
-                .OrderBy(x => x.EntryTimeUtc == DateTime.MinValue ? DateTime.MaxValue : x.EntryTimeUtc)
-                .FirstOrDefault();
-        }
-
-        private bool TryBuildProtectionStatusLine(out string protectionLine, out bool trailingActive)
-        {
-            protectionLine = string.Empty;
-            trailingActive = false;
-
-            PineTradeRuntimeState state = GetLeadOpenTradeState();
-            if (state == null || !state.HasWorkingStop || state.ActiveStopPrice <= 0.0)
-                return false;
-
-            trailingActive = state.TrailingActive
-                || (!string.IsNullOrWhiteSpace(state.LastStopSource)
-                    && state.LastStopSource.StartsWith("TRAIL_", StringComparison.OrdinalIgnoreCase));
-
-            string prefix = trailingActive ? "TRAIL: ACTIVE" : "STOP: ARMED";
-            protectionLine = string.Format(CultureInfo.InvariantCulture,
-                "{0} | Stop {1} | Src {2}",
-                prefix,
-                FormatOptionalPrice(state.ActiveStopPrice),
-                string.IsNullOrWhiteSpace(state.LastStopSource) ? "UNKNOWN" : state.LastStopSource);
-            return true;
-        }
-
         private void UpdateSignalDrawings(PineEvalState st)
         {
-            PineTradeRuntimeState openState = GetLeadOpenTradeState();
-            bool showActiveStop = openState != null && openState.HasWorkingStop && openState.ActiveStopPrice > 0.0;
-            if (showActiveStop)
-            {
-                int stopLeft = Math.Min(CurrentBar, Math.Max(1, RiskLineRightBars));
-                Brush activeStopBrush = openState.TrailingActive ? Brushes.Gold : Brushes.OrangeRed;
-                Draw.Line(this, ActiveStopLineTag, false, stopLeft, openState.ActiveStopPrice, 0, openState.ActiveStopPrice, activeStopBrush, DashStyleHelper.Solid, 2);
-            }
-            else
-            {
-                RemoveDrawObject(ActiveStopLineTag);
-            }
-
-            if (st == null)
-            {
-                RemoveDrawObject(RibbonTopTag);
-                RemoveDrawObject(RibbonBottomTag);
-                RemoveDrawObject(EntryLineTag);
-                RemoveDrawObject(StopLineTag);
-                RemoveDrawObject(Tp1LineTag);
-                RemoveDrawObject(Tp2LineTag);
-                RemoveDrawObject(Tp3LineTag);
-                return;
-            }
-
             if (ShowRibbon && st.RibbonValid)
             {
                 int leftBarsAgo = Math.Min(CurrentBar, 20);
@@ -3030,7 +2521,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             Draw.Line(this, Tp2LineTag, false, left, st.Tp2Line, 0, st.Tp2Line, Brushes.LimeGreen, DashStyleHelper.Solid, 1);
             Draw.Line(this, Tp3LineTag, false, left, st.Tp3Line, 0, st.Tp3Line, Brushes.LimeGreen, DashStyleHelper.Solid, 1);
         }
-
         private void UpdateStatusOverlay(DateTime barTime)
         {
             if (!ShowStatusPanel)
@@ -3046,21 +2536,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             string line1 = "AUTO: " + BuildStatusMessage();
-            string protectionLine;
-            bool trailingActive;
-            bool hasProtectionLine = TryBuildProtectionStatusLine(out protectionLine, out trailingActive);
             string pnlLine;
             string limitsLine;
             bool pnlNegative;
             bool hasPnLLines = TryBuildDailyPnlLines(barTime.Date, out pnlLine, out pnlNegative, out limitsLine);
             bool healthy = !manualHaltActive && !dailyLimitHalted;
-
-            string composite = line1;
-            if (hasProtectionLine)
-                composite += "\n" + protectionLine;
-            if (hasPnLLines)
-                composite += "\n" + pnlLine + "\n" + limitsLine;
-
+            string composite = hasPnLLines ? line1 + "\n" + pnlLine + "\n" + limitsLine : line1;
             if (string.Equals(composite, lastStatusText, StringComparison.Ordinal)
                 && healthy == lastStatusHealthy
                 && hasPnLLines == lastStatusHasPnLLines
@@ -3078,11 +2559,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             var line1Brush = healthy ? Brushes.LimeGreen : Brushes.OrangeRed;
             try
             {
-                string line1Text = line1;
-                if (hasProtectionLine)
-                    line1Text += "\n" + protectionLine;
-                if (hasPnLLines)
-                    line1Text += "\n\n";
+                string line1Text = hasPnLLines ? line1 + "\n\n" : line1;
                 Draw.TextFixed(this, StatusTag, line1Text, TextPosition.BottomLeft, line1Brush, font, Brushes.Black, Brushes.Transparent, 45);
 
                 if (hasPnLLines)
@@ -3179,10 +2656,6 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             var lines = new List<string>();
             var states = new List<bool?>();
-            string protectionLine;
-            bool protectionTrailingActive;
-            bool hasProtectionLine = TryBuildProtectionStatusLine(out protectionLine, out protectionTrailingActive);
-
             AppendChecklistLine(lines, states, "CHECK: " + readiness, readyLong || readyShort);
             AppendChecklistLine(lines, states, "TPS " + TPSType, null);
             AppendChecklistLine(lines, states, "Setup " + SetupType + " x" + TimeframeMultiplier, null);
@@ -3198,7 +2671,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             AppendChecklistLine(lines, states, string.Format("ATR {0:0.00} MA {1:0.00}", lastUiEvalState.AtrFilterValue, lastUiEvalState.AtrMaValue), null);
             AppendChecklistLine(lines, states, "Entry SL " + (EnableEntryStopLoss ? EntryStopLossType.ToString() : "OFF"), null);
             AppendChecklistLine(lines, states, "Trail " + (EnableTrailingEngine ? TrailingMode.ToString() : "OFF"), null);
-            AppendChecklistLine(lines, states, hasProtectionLine ? protectionLine : "Protection OFF", hasProtectionLine && protectionTrailingActive ? (bool?)true : null);
             AppendChecklistLine(lines, states, "Pos " + FormatPositionSummary(), null);
             AppendChecklistLine(lines, states, "Trades/Entry " + GetEffectiveTradesPerEntry(), null);
             AppendChecklistLine(lines, states, "Daily Limits " + (EnableDailyPnLLimits ? "ON" : "OFF"), null);
@@ -3219,7 +2691,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             string limitsLine;
             bool pnlNegative;
             bool hasPnLLines = ShowStatusPanel && TryBuildDailyPnlLines(Time[0].Date, out pnlLine, out pnlNegative, out limitsLine);
-            int statusLines = ShowStatusPanel ? (hasPnLLines ? (hasProtectionLine ? 4 : 3) : (hasProtectionLine ? 2 : 1)) : 0;
+            int statusLines = hasPnLLines ? 3 : (ShowStatusPanel ? 1 : 0);
             string padding = new string('\n', statusLines + 1);
 
             var green = new System.Text.StringBuilder();
@@ -3366,23 +2838,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     dplTextBox.PreviewKeyDown += DplTextBox_PreviewKeyDown;
                     dplTextBox.LostFocus += DplTextBox_LostFocus;
 
-                    trailingStatusTextBlock = new TextBlock
-                    {
-                        Text = "Protection: OFF",
-                        Foreground = Brushes.LightGray,
-                        TextWrapping = TextWrapping.Wrap,
-                        FontWeight = FontWeights.Bold
-                    };
-                    trailingStatusBorder = new Border
-                    {
-                        Margin = new Thickness(2, 4, 2, 2),
-                        Padding = new Thickness(6, 4, 6, 4),
-                        Background = Brushes.DimGray,
-                        BorderBrush = Brushes.Gray,
-                        BorderThickness = new Thickness(1),
-                        Child = trailingStatusTextBlock
-                    };
-
                     buttonRow1.Children.Add(manualFlattenButton);
                     buttonRow1.Children.Add(manualResumeButton);
                     buttonRow2.Children.Add(manualBuyButton);
@@ -3399,7 +2854,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                     chartTraderButtonPanel.Children.Add(inputRow1);
                     chartTraderButtonPanel.Children.Add(inputRow2);
                     chartTraderButtonPanel.Children.Add(inputRow3);
-                    chartTraderButtonPanel.Children.Add(trailingStatusBorder);
                     Grid.SetRow(chartTraderButtonPanel, chartTraderGrid.RowDefinitions.Count - 1);
                     Grid.SetColumnSpan(chartTraderButtonPanel, Math.Max(1, chartTraderGrid.ColumnDefinitions.Count));
                     chartTraderGrid.Children.Add(chartTraderButtonPanel);
@@ -3481,9 +2935,6 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (chartTraderGrid != null && chartTraderButtonsRow != null)
                 chartTraderGrid.RowDefinitions.Remove(chartTraderButtonsRow);
 
-            trailingStatusBorder = null;
-            trailingStatusTextBlock = null;
-            lastTrailingStatusDisplay = string.Empty;
             chartTraderButtonsAdded = false;
             chartTraderButtonPanel = null;
             chartTraderButtonsRow = null;
@@ -3573,43 +3024,6 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     dplTextBox.Text = dplValue.ToString("0.##", CultureInfo.InvariantCulture);
                     lastDplDisplay = dplValue;
-                }
-            };
-
-            if (ChartControl.Dispatcher.CheckAccess())
-                apply();
-            else
-                ChartControl.Dispatcher.InvokeAsync(apply);
-
-            UpdateTrailingStatusBlock(force);
-        }
-
-        private void UpdateTrailingStatusBlock(bool force)
-        {
-            if (trailingStatusTextBlock == null || ChartControl == null)
-                return;
-
-            string protectionLine;
-            bool trailingActive;
-            bool hasProtection = TryBuildProtectionStatusLine(out protectionLine, out trailingActive);
-            string display = hasProtection ? protectionLine : "Protection: OFF";
-            if (!force && string.Equals(display, lastTrailingStatusDisplay, StringComparison.Ordinal))
-                return;
-
-            lastTrailingStatusDisplay = display;
-
-            Action apply = () =>
-            {
-                if (trailingStatusTextBlock == null)
-                    return;
-
-                trailingStatusTextBlock.Text = display;
-                trailingStatusTextBlock.Foreground = hasProtection ? Brushes.White : Brushes.LightGray;
-                if (trailingStatusBorder != null)
-                {
-                    trailingStatusBorder.Background = trailingActive ? Brushes.DarkGreen : (hasProtection ? Brushes.DarkOrange : Brushes.DimGray);
-                    trailingStatusBorder.BorderBrush = trailingActive ? Brushes.LimeGreen : (hasProtection ? Brushes.Gold : Brushes.Gray);
-                    trailingStatusBorder.Opacity = hasProtection ? 1.0 : 0.8;
                 }
             };
 

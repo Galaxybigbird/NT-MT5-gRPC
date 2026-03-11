@@ -20,7 +20,14 @@ namespace NinjaTrader.NinjaScript.Shared
         public double NtPointsPer1kLoss;
         public double EntryPrice;
         public double LastStopPrice;
+        public double InitialStopPrice;
+        public double ActiveStopPrice;
+        public double LastTrailingStopPrice;
         public double LastTargetPrice;
+        public bool HasWorkingStop;
+        public bool TrailingActive;
+        public string LastStopSource;
+        public DateTime LastStopUpdatedUtc;
         public bool PendingClosePublish;
         public DateTime EntryTimeUtc;
         public string EntryContext;
@@ -56,3 +63,4 @@ namespace NinjaTrader.NinjaScript.Shared
         public readonly List<string> MemberTradeIds = new List<string>();
     }
 }
+
