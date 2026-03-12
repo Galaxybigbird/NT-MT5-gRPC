@@ -304,9 +304,9 @@ public TrailingActivationType TrailingStopType
         
         public double TrailingActivationValue 
         { 
-            get => trailingAndElasticManager?.TrailingActivationValue ?? 1.0; 
+            get => trailingAndElasticManager?.TrailingActivationValue ?? 25.0; 
             set { if (trailingAndElasticManager != null) { trailingAndElasticManager.TrailingActivationValue = value; OnPropertyChanged(nameof(TrailingActivationValue)); } } 
-        }
+        } 
         
         // Elastic hedging properties (actively used by Elastic monitor and Alternative Trailing activation)
         // Keep these in sync with the unified UI fields as well as the trailing equivalents.
@@ -487,7 +487,7 @@ public TrailingActivationType TrailingStopType
             set { if (_ntRunUpDistanceUnits != value) { _ntRunUpDistanceUnits = value; OnPropertyChanged(nameof(NtRunUpDistanceUnits)); } }
         }
 
-        private double _ntRunUpDistanceValue = 16;
+        private double _ntRunUpDistanceValue = 6;
         public double NtRunUpDistanceValue
         {
             get => _ntRunUpDistanceValue;

@@ -52,6 +52,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private Dictionary<string, PineTradeSyncGroup> syncGroups;
         private Dictionary<string, Order> workingEntryOrders;
         private readonly List<string> openTradeOrder = new List<string>();
+        private bool intrabarTickSeriesEnabled;
 
         private double pineCondition;
         private double pineEntryLine;
@@ -68,6 +69,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int signalBarsValue;
         private bool signalSeriesUsesPrimary;
         private readonly List<PinePriceBar> syntheticSignalBars = new List<PinePriceBar>();
+        private readonly List<double> syntheticSignalHaOpen = new List<double>();
+        private readonly List<double> syntheticSignalHaClose = new List<double>();
         private int syntheticSignalLastPrimaryBarIndex = -1;
 
         private int tradesPerEntryOverride;
@@ -162,6 +165,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 AtrQtyTp3 = 20;
 
                 EnableTrailingEngine = true;
+                UseTickSeriesForIntrabarTrailing = false;
                 TrailingMode = PineTrailingMode.Ticks;
                 AtrTrailBehavior = PineAtrTrailBehavior.Intrabar;
                 AtrTrailSource = PineAtrTrailSource.Traditional;
@@ -211,7 +215,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.Configure)
             {
                 EntriesPerDirection = MaxTradesPerEntry;
-                AddDataSeries(BarsPeriodType.Tick, 1);
+                intrabarTickSeriesEnabled = ShouldConfigureIntrabarTickSeries();
+                if (intrabarTickSeriesEnabled)
+                    AddDataSeries(BarsPeriodType.Tick, 1);
 
                 ResolveSignalSeriesSpecification(out signalBarsType, out signalBarsValue, out signalSeriesUsesPrimary);
                 signalSeriesIndex = signalSeriesUsesPrimary ? 0 : SyntheticSignalSeriesIndex;
@@ -238,6 +244,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         TrailingMode));
                     if (!signalSeriesUsesPrimary)
                         StrategyLogDebug(string.Format(CultureInfo.InvariantCulture, "SIGNAL_SERIES: synthetic {0} x {1}", signalBarsType, signalBarsValue));
+                    StrategyLogDebug("TICK_SERIES: " + (intrabarTickSeriesEnabled ? "enabled" : "disabled (bar-close trailing fallback)"));
                 }
             }
             else if (State == State.DataLoaded)
@@ -1581,6 +1588,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ? atrWindow.Average()
                 : (AtrMaUseEmaWhenTypoDisabled ? ComputeEmaTailOldestFirst(atrWindow, AtrMaLength) : atrWindow.Average());
 
+            trendType = ResolveTrendType(rsiValue, atrNow, atrMa);
+            return true;
+        }
+
+        private bool ResolveTrendType(double rsiValue, double atrNow, double atrMa)
+        {
             bool cndSidwayss1 = atrNow >= atrMa;
             bool cndSidwayss2 = rsiValue > TopLimitRsi || rsiValue < BottomLimitRsi;
             bool cndSidways = cndSidwayss1 || cndSidwayss2;
@@ -1593,29 +1606,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             switch (SidewaysFilterType)
             {
                 case PineSidewaysFilterType.Atr:
-                    trendType = cndSidwayss1;
-                    break;
+                    return cndSidwayss1;
                 case PineSidewaysFilterType.Rsi:
-                    trendType = cndSidwayss2;
-                    break;
+                    return cndSidwayss2;
                 case PineSidewaysFilterType.AtrOrRsi:
-                    trendType = cndSidways;
-                    break;
+                    return cndSidways;
                 case PineSidewaysFilterType.AtrAndRsi:
-                    trendType = cndSidways1;
-                    break;
+                    return cndSidways1;
                 case PineSidewaysFilterType.NoFilter:
-                    trendType = rsiValue > 0.0;
-                    break;
+                    return rsiValue > 0.0;
                 case PineSidewaysFilterType.SidewaysAtrOrRsi:
-                    trendType = sideways;
-                    break;
+                    return sideways;
                 case PineSidewaysFilterType.SidewaysAtrAndRsi:
-                    trendType = sidewaysAnd;
-                    break;
+                    return sidewaysAnd;
+                default:
+                    return true;
             }
-
-            return true;
         }
 
         private bool ComputeOpenCloseSignal(DateTime signalBarTime, out bool buyOc, out bool sellOc, out bool buyColor, out double lineTop, out double lineBottom)
@@ -1630,6 +1636,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             int prevBarsAgo;
             if (!ResolveSignalShifts(signalBarTime, out curBarsAgo, out prevBarsAgo))
                 return false;
+
+            if (TryResolveSyntheticOpenCloseSignal(curBarsAgo, prevBarsAgo, out buyOc, out sellOc, out buyColor, out lineTop, out lineBottom))
+                return true;
 
             var bars = BuildBarsOldestFirst(signalSeriesIndex, curBarsAgo, Math.Min(GetSeriesCurrentBars(signalSeriesIndex) - curBarsAgo + 1, 2000));
             if (bars.Count < 2)
@@ -1825,6 +1834,39 @@ namespace NinjaTrader.NinjaScript.Strategies
             return !signalSeriesUsesPrimary && seriesIndex == SyntheticSignalSeriesIndex;
         }
 
+        private bool TryResolveSyntheticOpenCloseSignal(int curBarsAgo, int prevBarsAgo, out bool buyOc, out bool sellOc, out bool buyColor, out double lineTop, out double lineBottom)
+        {
+            buyOc = false;
+            sellOc = false;
+            buyColor = false;
+            lineTop = 0.0;
+            lineBottom = 0.0;
+
+            if (!IsSyntheticSignalSeries(signalSeriesIndex))
+                return false;
+            if (curBarsAgo < 0 || prevBarsAgo < 0)
+                return false;
+            if (syntheticSignalHaOpen.Count <= curBarsAgo || syntheticSignalHaOpen.Count <= prevBarsAgo)
+                return false;
+
+            int curIndex = syntheticSignalHaOpen.Count - 1 - curBarsAgo;
+            int prevIndex = syntheticSignalHaOpen.Count - 1 - prevBarsAgo;
+            if (curIndex < 0 || prevIndex < 0 || curIndex >= syntheticSignalHaOpen.Count || prevIndex >= syntheticSignalHaOpen.Count)
+                return false;
+
+            double openCur = syntheticSignalHaOpen[curIndex];
+            double openPrev = syntheticSignalHaOpen[prevIndex];
+            double closeCur = syntheticSignalHaClose[curIndex];
+            double closePrev = syntheticSignalHaClose[prevIndex];
+
+            buyOc = closeCur > openCur && closePrev <= openPrev;
+            sellOc = closeCur < openCur && closePrev >= openPrev;
+            buyColor = closeCur > openCur;
+            lineTop = closeCur;
+            lineBottom = openCur;
+            return true;
+        }
+
         private int GetSeriesCurrentBars(int seriesIndex)
         {
             return IsSyntheticSignalSeries(seriesIndex)
@@ -1848,6 +1890,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void ResetSyntheticSignalSeriesCache()
         {
             syntheticSignalBars.Clear();
+            syntheticSignalHaOpen.Clear();
+            syntheticSignalHaClose.Clear();
             syntheticSignalLastPrimaryBarIndex = -1;
         }
 
@@ -1898,6 +1942,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Close = primaryBar.Close,
                     Volume = primaryBar.Volume
                 });
+                double haClose = ComputeHeikinAshiClose(primaryBar.Open, primaryBar.High, primaryBar.Low, primaryBar.Close);
+                double haOpen = syntheticSignalHaOpen.Count == 0
+                    ? (primaryBar.Open + primaryBar.Close) / 2.0
+                    : (syntheticSignalHaOpen[syntheticSignalHaOpen.Count - 1] + syntheticSignalHaClose[syntheticSignalHaClose.Count - 1]) / 2.0;
+                syntheticSignalHaOpen.Add(haOpen);
+                syntheticSignalHaClose.Add(haClose);
                 return;
             }
 
@@ -1907,6 +1957,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             current.Close = primaryBar.Close;
             current.Volume += primaryBar.Volume;
             syntheticSignalBars[lastIndex] = current;
+            syntheticSignalHaClose[lastIndex] = ComputeHeikinAshiClose(current.Open, current.High, current.Low, current.Close);
+        }
+
+        private static double ComputeHeikinAshiClose(double open, double high, double low, double close)
+        {
+            return (open + high + low + close) / 4.0;
         }
 
         private DateTime ResolveSignalBucketStart(DateTime time)
@@ -2092,6 +2148,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!EnableTrailingEngine)
                 return false;
+            if (!intrabarTickSeriesEnabled)
+                return false;
             if (TrailingMode == PineTrailingMode.Atr)
                 return AtrTrailBehavior == PineAtrTrailBehavior.Intrabar;
             return true;
@@ -2099,7 +2157,20 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool ShouldRunTrailingBarClose()
         {
-            return EnableTrailingEngine && TrailingMode == PineTrailingMode.Atr && AtrTrailBehavior == PineAtrTrailBehavior.BarClose;
+            if (!EnableTrailingEngine)
+                return false;
+            if (!intrabarTickSeriesEnabled)
+                return true;
+            return TrailingMode == PineTrailingMode.Atr && AtrTrailBehavior == PineAtrTrailBehavior.BarClose;
+        }
+
+        private bool ShouldConfigureIntrabarTickSeries()
+        {
+            if (!UseTickSeriesForIntrabarTrailing || !EnableTrailingEngine)
+                return false;
+            if (TrailingMode == PineTrailingMode.Atr)
+                return AtrTrailBehavior == PineAtrTrailBehavior.Intrabar;
+            return true;
         }
 
         private bool ShouldApplyEntryStopLoss()
@@ -2975,6 +3046,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateSignalDrawings(PineEvalState st)
         {
+            if (ChartControl == null)
+                return;
+
             PineTradeRuntimeState openState = GetLeadOpenTradeState();
             bool showActiveStop = openState != null && openState.HasWorkingStop && openState.ActiveStopPrice > 0.0;
             if (showActiveStop)
@@ -3033,7 +3107,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateStatusOverlay(DateTime barTime)
         {
-            if (!ShowStatusPanel)
+            if (!ShowStatusPanel || ChartControl == null)
             {
                 RemoveDrawObject(StatusTag);
                 RemoveDrawObject(StatusPnlTag);
@@ -4346,49 +4420,52 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Trailing Mode", GroupName = "05 - Trailing", Order = 1)]
         public PineTrailingMode TrailingMode { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Trail Behavior", GroupName = "05 - Trailing", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Use Tick Series For Intrabar Trailing", GroupName = "05 - Trailing", Order = 2)]
+        public bool UseTickSeriesForIntrabarTrailing { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "ATR Trail Behavior", GroupName = "05 - Trailing", Order = 3)]
         public PineAtrTrailBehavior AtrTrailBehavior { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Trail Source", GroupName = "05 - Trailing", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "ATR Trail Source", GroupName = "05 - Trailing", Order = 4)]
         public PineAtrTrailSource AtrTrailSource { get; set; }
 
-        [NinjaScriptProperty, Range(1, 200), Display(Name = "Trailing ATR Period", GroupName = "05 - Trailing", Order = 4)]
+        [NinjaScriptProperty, Range(1, 200), Display(Name = "Trailing ATR Period", GroupName = "05 - Trailing", Order = 5)]
         public int TrailingAtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(1, 200), Display(Name = "Trailing DEMA Length", GroupName = "05 - Trailing", Order = 5)]
+        [NinjaScriptProperty, Range(1, 200), Display(Name = "Trailing DEMA Length", GroupName = "05 - Trailing", Order = 6)]
         public int TrailingDemaLength { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Use External Activation", GroupName = "05 - Trailing", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "ATR Use External Activation", GroupName = "05 - Trailing", Order = 7)]
         public bool AtrUseExternalActivationThreshold { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR External Activation Type", GroupName = "05 - Trailing", Order = 7)]
+        [NinjaScriptProperty, Display(Name = "ATR External Activation Type", GroupName = "05 - Trailing", Order = 8)]
         public PineExternalActivationType AtrExternalActivationType { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Trail Activation", GroupName = "05 - Trailing", Order = 8)]
+        [NinjaScriptProperty, Display(Name = "ATR Trail Activation", GroupName = "05 - Trailing", Order = 9)]
         public double AtrTrailActivation { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Trail Step", GroupName = "05 - Trailing", Order = 9)]
+        [NinjaScriptProperty, Display(Name = "ATR Trail Step", GroupName = "05 - Trailing", Order = 10)]
         public double AtrTrailStep { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "ATR Trail Stop", GroupName = "05 - Trailing", Order = 10)]
+        [NinjaScriptProperty, Display(Name = "ATR Trail Stop", GroupName = "05 - Trailing", Order = 11)]
         public double AtrTrailStop { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Ticks Trail Activation", GroupName = "05 - Trailing", Order = 11)]
+        [NinjaScriptProperty, Display(Name = "Ticks Trail Activation", GroupName = "05 - Trailing", Order = 12)]
         public double TicksTrailActivation { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Ticks Trail Step", GroupName = "05 - Trailing", Order = 12)]
+        [NinjaScriptProperty, Display(Name = "Ticks Trail Step", GroupName = "05 - Trailing", Order = 13)]
         public double TicksTrailStep { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Ticks Trail Stop", GroupName = "05 - Trailing", Order = 13)]
+        [NinjaScriptProperty, Display(Name = "Ticks Trail Stop", GroupName = "05 - Trailing", Order = 14)]
         public double TicksTrailStop { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Dollars Trail Activation", GroupName = "05 - Trailing", Order = 14)]
+        [NinjaScriptProperty, Display(Name = "Dollars Trail Activation", GroupName = "05 - Trailing", Order = 15)]
         public double DollarsTrailActivation { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Dollars Trail Step", GroupName = "05 - Trailing", Order = 15)]
+        [NinjaScriptProperty, Display(Name = "Dollars Trail Step", GroupName = "05 - Trailing", Order = 16)]
         public double DollarsTrailStep { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Dollars Trail Stop", GroupName = "05 - Trailing", Order = 16)]
+        [NinjaScriptProperty, Display(Name = "Dollars Trail Stop", GroupName = "05 - Trailing", Order = 17)]
         public double DollarsTrailStop { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Enable Entry Stop Loss", GroupName = "06 - Entry Stops", Order = 0)]
