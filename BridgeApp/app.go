@@ -55,8 +55,9 @@ type App struct {
 	pendingCloses map[string][]pendingClose // BaseID -> queued close intents
 
 	// Track NT-initiated close requests by MT5 ticket to tag subsequent MT5 close results as acks
-	ntCloseMux         sync.Mutex
-	ntInitiatedTickets map[uint64]time.Time // ticket -> time marked
+	ntCloseMux            sync.Mutex
+	ntInitiatedTickets    map[uint64]time.Time // ticket -> time marked
+	ntInitiatedBaseCloses map[string]time.Time // base_id -> time marked when NT closed before ticket mapping existed
 
 	// Cache NT sizing hints per BaseID so elastic events can carry them
 	baseIdToNtPoints map[string]float64 // BaseID -> nt_points_per_1k_loss
@@ -257,6 +258,52 @@ type pendingClose struct {
 	account    string
 }
 
+func (a *App) markNTCloseIntent(baseID string, ticket uint64) {
+	baseID = strings.TrimSpace(baseID)
+	now := time.Now()
+
+	a.ntCloseMux.Lock()
+	defer a.ntCloseMux.Unlock()
+
+	if ticket != 0 {
+		a.ntInitiatedTickets[ticket] = now
+	}
+	if baseID != "" {
+		a.ntInitiatedBaseCloses[baseID] = now
+	}
+}
+
+func (a *App) consumeNTCloseOrigin(baseID string, ticket uint64, ttl time.Duration) string {
+	baseID = strings.TrimSpace(baseID)
+	now := time.Now()
+
+	a.ntCloseMux.Lock()
+	defer a.ntCloseMux.Unlock()
+
+	if ticket != 0 {
+		if markedAt, ok := a.ntInitiatedTickets[ticket]; ok {
+			delete(a.ntInitiatedTickets, ticket)
+			if now.Sub(markedAt) <= ttl {
+				if baseID != "" {
+					delete(a.ntInitiatedBaseCloses, baseID)
+				}
+				return "NT_CLOSE_ACK"
+			}
+		}
+	}
+
+	if baseID != "" {
+		if markedAt, ok := a.ntInitiatedBaseCloses[baseID]; ok {
+			delete(a.ntInitiatedBaseCloses, baseID)
+			if now.Sub(markedAt) <= ttl {
+				return "NT_CLOSE_ACK"
+			}
+		}
+	}
+
+	return "MT5_CLOSE"
+}
+
 // addCrossRef safely records a bidirectional BaseID cross-reference.
 // It is tolerant to empty/identical inputs and preserves existing mappings.
 func (a *App) addCrossRef(aBase, bBase string) {
@@ -330,17 +377,18 @@ func NewApp() *App {
 		// gRPC configuration from environment
 		grpcPort: grpcPort,
 		// Initialize MT5 ticket mappings
-		mt5TicketToBaseId:  make(map[uint64]string),
-		baseIdToMT5Ticket:  make(map[string]uint64),
-		baseIdToTickets:    make(map[string][]uint64),
-		baseIdCrossRef:     make(map[string]string),
-		baseIdToInstrument: make(map[string]string),
-		baseIdToAccount:    make(map[string]string),
-		pendingCloses:      make(map[string][]pendingClose),
-		ntInitiatedTickets: make(map[uint64]time.Time),
-		baseIdToNtPoints:   make(map[string]float64),
-		instrumentToNtPts:  make(map[string]float64),
-		tradeSyncByBase:    make(map[string]*tradeSyncState),
+		mt5TicketToBaseId:     make(map[uint64]string),
+		baseIdToMT5Ticket:     make(map[string]uint64),
+		baseIdToTickets:       make(map[string][]uint64),
+		baseIdCrossRef:        make(map[string]string),
+		baseIdToInstrument:    make(map[string]string),
+		baseIdToAccount:       make(map[string]string),
+		pendingCloses:         make(map[string][]pendingClose),
+		ntInitiatedTickets:    make(map[uint64]time.Time),
+		ntInitiatedBaseCloses: make(map[string]time.Time),
+		baseIdToNtPoints:      make(map[string]float64),
+		instrumentToNtPts:     make(map[string]float64),
+		tradeSyncByBase:       make(map[string]*tradeSyncState),
 	}
 
 	// Initialize gRPC server
@@ -1062,17 +1110,8 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 				}
 				a.mt5TicketMux.Unlock()
 
-				// Determine origin for tagging: if NT recently requested this ticket to close, mark as NT ack
-				orderType := "MT5_CLOSE"
-				a.ntCloseMux.Lock()
-				if t, ok := a.ntInitiatedTickets[ticket]; ok {
-					if time.Since(t) <= 5*time.Second { // within TTL
-						orderType = "NT_CLOSE_ACK"
-					}
-					// Clean up tracked ticket regardless (one-shot)
-					delete(a.ntInitiatedTickets, ticket)
-				}
-				a.ntCloseMux.Unlock()
+				// Determine origin for tagging, including base-id-only NT closes issued before ticket mapping existed.
+				orderType := a.consumeNTCloseOrigin(base, ticket, 5*time.Second)
 
 				// Decide closure reason and whether to suppress based on recent elastic context
 				closureReason := "MT5_position_closed"
@@ -1341,16 +1380,8 @@ func (a *App) HandleMT5TradeResult(result interface{}) error {
 					}
 					a.mt5TicketMux.Unlock()
 
-					// Determine origin for tagging
-					orderType := "MT5_CLOSE"
-					a.ntCloseMux.Lock()
-					if t, ok := a.ntInitiatedTickets[ticket]; ok {
-						if time.Since(t) <= 5*time.Second {
-							orderType = "NT_CLOSE_ACK"
-						}
-						delete(a.ntInitiatedTickets, ticket)
-					}
-					a.ntCloseMux.Unlock()
+					// Determine origin for tagging, including base-id-only NT closes issued before ticket mapping existed.
+					orderType := a.consumeNTCloseOrigin(baseId, ticket, 5*time.Second)
 
 					closureReason := "MT5_position_closed"
 					suppress := false
@@ -1656,10 +1687,8 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 		if acct != "" {
 			a.baseIdToAccount[baseID] = acct
 		}
-		// Track NT-initiated close for origin tagging
-		a.ntCloseMux.Lock()
-		a.ntInitiatedTickets[provided] = time.Now()
-		a.ntCloseMux.Unlock()
+		// Track NT-initiated close for origin tagging.
+		a.markNTCloseIntent(baseID, provided)
 		// Remove ticket from pools to prevent double-use
 		a.mt5TicketMux.Lock()
 		if bid, ok := a.mt5TicketToBaseId[provided]; ok {
@@ -1750,6 +1779,7 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			return fmt.Errorf("failed to add base_id-only CLOSE_HEDGE fallback for BaseID %s (qty=%d, context=%s): %v", useBase, qtyForMsg, context, err)
 		}
 
+		a.markNTCloseIntent(useBase, 0)
 		log.Printf("gRPC: Queued base_id-only CLOSE_HEDGE fallback for BaseID %s (qty=%d, context=%s)", useBase, qtyForMsg, context)
 		return nil
 	}
@@ -1793,10 +1823,8 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 				log.Printf("gRPC: Failed to add CLOSE_HEDGE (ticket %d) to trade queue: %v", t, err)
 				return fmt.Errorf("failed to add CLOSE_HEDGE (ticket %d) to trade queue: %v", t, err)
 			}
-			// Track NT-initiated close for origin tagging
-			a.ntCloseMux.Lock()
-			a.ntInitiatedTickets[t] = time.Now()
-			a.ntCloseMux.Unlock()
+			// Track NT-initiated close for origin tagging.
+			a.markNTCloseIntent(actualBaseID, t)
 			log.Printf("gRPC: Allocated ticket %d for CLOSE_HEDGE (%d remaining for BaseID: %s)", t, len(availableTickets), actualBaseID)
 		}
 
@@ -1853,10 +1881,8 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 				log.Printf("gRPC: Failed to add CLOSE_HEDGE (ticket %d) to trade queue: %v", t, err)
 				return fmt.Errorf("failed to add CLOSE_HEDGE (ticket %d) to trade queue: %v", t, err)
 			}
-			// Track NT-initiated close for origin tagging
-			a.ntCloseMux.Lock()
-			a.ntInitiatedTickets[t] = time.Now()
-			a.ntCloseMux.Unlock()
+			// Track NT-initiated close for origin tagging.
+			a.markNTCloseIntent(baseID, t)
 			log.Printf("gRPC: Allocated ticket %d for CLOSE_HEDGE after wait (%d remaining for BaseID: %s)", t, len(availableWaitedTickets), baseID)
 		}
 
@@ -1895,10 +1921,8 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			log.Printf("gRPC: Failed to add CLOSE_HEDGE to trade queue: %v", err)
 			return fmt.Errorf("failed to add CLOSE_HEDGE to trade queue: %v", err)
 		}
-		// Track NT-initiated close for origin tagging
-		a.ntCloseMux.Lock()
-		a.ntInitiatedTickets[ticket] = time.Now()
-		a.ntCloseMux.Unlock()
+		// Track NT-initiated close for origin tagging.
+		a.markNTCloseIntent(baseID, ticket)
 		log.Printf("gRPC: Successfully queued CLOSE_HEDGE for BaseID: %s", baseID)
 		return nil
 	}
@@ -1971,10 +1995,8 @@ func (a *App) reconcilePendingCloses() {
 			if acct := strings.TrimSpace(pc.account); acct != "" {
 				a.baseIdToAccount[poolBase] = acct
 			}
-			// Track NT-initiated close for origin tagging
-			a.ntCloseMux.Lock()
-			a.ntInitiatedTickets[tk] = time.Now()
-			a.ntCloseMux.Unlock()
+			// Track NT-initiated close for origin tagging.
+			a.markNTCloseIntent(poolBase, tk)
 			allocated++
 			remNow := limit - allocated
 			log.Printf("gRPC: Pending reconciler dispatched CLOSE_HEDGE using ticket %d for BaseID %s (remaining in this pending now=%d)", tk, poolBase, remNow)

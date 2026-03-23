@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-Deploy NinjaScript strategy sources and shared strategy helper files into NinjaTrader 8 strategy folders.
+Deploy NinjaScript strategy and indicator sources, plus shared strategy helper files, into NinjaTrader 8 custom folders.
 #>
 
 param(
@@ -24,6 +24,7 @@ if (-not $SourceRoot) {
 }
 
 $helperSourceRoot = Join-Path $SourceRoot 'SharedHelperFiles'
+$indicatorSourceRoot = Join-Path $SourceRoot 'Indicators'
 function Test-PathSafe { param([string]$Path) try { Test-Path $Path } catch { $false } }
 
 function Write-Success { param($Message) Write-Host "[SUCCESS] $Message" -ForegroundColor Green }
@@ -32,8 +33,8 @@ function Write-ErrorLine { param($Message) Write-Host "[ERROR] $Message" -Foregr
 function Write-Info { param($Message) Write-Host "[INFO] $Message" -ForegroundColor Cyan }
 function Write-DebugLine { param($Message) if ($Verbose) { Write-Host "[DEBUG] $Message" -ForegroundColor Gray } }
 
-Write-Host '================ NinjaScript Strategy Deployment ================' -ForegroundColor Cyan
-Write-Host 'Deploying top-level strategy .cs files and SharedHelperFiles into NinjaTrader 8' -ForegroundColor Yellow
+Write-Host '================ NinjaScript Deployment ================' -ForegroundColor Cyan
+Write-Host 'Deploying strategy files, indicator files, and SharedHelperFiles into NinjaTrader 8' -ForegroundColor Yellow
 Write-Host ("Start: {0:yyyy-MM-dd HH:mm:ss}" -f (Get-Date)) -ForegroundColor Gray
 
 if (-not (Test-Path $SourceRoot)) {
@@ -43,6 +44,7 @@ if (-not (Test-Path $SourceRoot)) {
 
 Write-Info "Source directory: $SourceRoot"
 Write-Info "Helper directory: $helperSourceRoot"
+Write-Info "Indicator directory: $indicatorSourceRoot"
 
 function Get-NinjaTraderInstallations {
     $candidateRoots = New-Object 'System.Collections.Generic.List[string]'
@@ -116,6 +118,7 @@ function Get-NinjaTraderInstallations {
 
         $customPath = Join-Path $normalizedRoot 'bin\Custom'
         $strategyPath = Join-Path $customPath 'Strategies'
+        $indicatorPath = Join-Path $customPath 'Indicators'
         $score = 0
 
         if (Test-PathSafe $strategyPath) {
@@ -124,6 +127,10 @@ function Get-NinjaTraderInstallations {
 
         if (Test-PathSafe $customPath) {
             $score += 2
+        }
+
+        if (Test-PathSafe $indicatorPath) {
+            $score += 1
         }
 
         if ($normalizedRoot -like '*\\Documents\\NinjaTrader 8') {
@@ -135,7 +142,9 @@ function Get-NinjaTraderInstallations {
             Name = Split-Path $normalizedRoot -Leaf
             CustomPath = $customPath
             StrategiesPath = $strategyPath
+            IndicatorsPath = $indicatorPath
             Exists = Test-PathSafe $strategyPath
+            IndicatorExists = Test-PathSafe $indicatorPath
             CustomExists = Test-PathSafe $customPath
             Score = $score
         })
@@ -174,12 +183,15 @@ if ($TargetRoot) {
 
         $customPath = Join-Path $normalizedTargetRoot 'bin\Custom'
         $strategyPath = Join-Path $customPath 'Strategies'
+        $indicatorPath = Join-Path $customPath 'Indicators'
         $installations = @([PSCustomObject]@{
             Path = $normalizedTargetRoot
             Name = Split-Path $normalizedTargetRoot -Leaf
             CustomPath = $customPath
             StrategiesPath = $strategyPath
+            IndicatorsPath = $indicatorPath
             Exists = Test-PathSafe $strategyPath
+            IndicatorExists = Test-PathSafe $indicatorPath
             CustomExists = Test-PathSafe $customPath
             Score = 999
         })
@@ -197,6 +209,13 @@ $strategyFiles = Get-ChildItem -Path $SourceRoot -Filter '*.cs' -File | Where-Ob
     $_.DirectoryName -eq $SourceRoot
 }
 
+$indicatorFiles = @()
+if (Test-Path $indicatorSourceRoot) {
+    $indicatorFiles = Get-ChildItem -Path $indicatorSourceRoot -Filter '*.cs' -File | Where-Object {
+        $_.DirectoryName -eq $indicatorSourceRoot
+    }
+}
+
 $excludedHelperNames = @(
     'SharedDemaAtrTrailing.cs'
 )
@@ -210,14 +229,19 @@ if (Test-Path $helperSourceRoot) {
     }
 }
 
-if ($strategyFiles.Count -eq 0 -and $helperFiles.Count -eq 0) {
-    Write-ErrorLine 'No deployable strategy/helper .cs files found.'
+if ($strategyFiles.Count -eq 0 -and $indicatorFiles.Count -eq 0 -and $helperFiles.Count -eq 0) {
+    Write-ErrorLine 'No deployable strategy/helper/indicator .cs files found.'
     exit 1
 }
 
 Write-Info "Top-level strategy files to deploy ($($strategyFiles.Count)):"
 $strategyFiles | ForEach-Object {
     Write-Host "  [STRAT] $($_.Name) -> Strategies\$($_.Name)" -ForegroundColor White
+}
+
+Write-Info "Top-level indicator files to deploy ($($indicatorFiles.Count)):"
+$indicatorFiles | ForEach-Object {
+    Write-Host "  [IND] $($_.Name) -> Indicators\$($_.Name)" -ForegroundColor White
 }
 
 Write-Info "Shared helper files to deploy ($($helperFiles.Count)):"
@@ -325,15 +349,33 @@ foreach ($installation in $installations) {
         }
     }
 
+    if (-not $installation.IndicatorExists) {
+        if ($DryRun) {
+            Write-WarningLine "DRYRUN: Indicator directory missing at $($installation.IndicatorsPath)"
+        }
+        else {
+            Write-Info "Indicator directory missing; creating $($installation.IndicatorsPath)"
+            New-Item -ItemType Directory -Path $installation.IndicatorsPath -Force | Out-Null
+            $installation.IndicatorExists = $true
+        }
+    }
+
     if (-not $installation.Exists) {
         Write-WarningLine "Skipping invalid installation: $($installation.Path)"
         continue
     }
 
-    Write-Info "Deploying to $($installation.StrategiesPath)"
-    $copiedFiles = 0
-    $skippedFiles = 0
-    $errorFiles = 0
+    Write-Info "Deploying strategies to $($installation.StrategiesPath)"
+    Write-Info "Deploying indicators to $($installation.IndicatorsPath)"
+    $strategyCopiedFiles = 0
+    $strategySkippedFiles = 0
+    $strategyErrorFiles = 0
+    $indicatorCopiedFiles = 0
+    $indicatorSkippedFiles = 0
+    $indicatorErrorFiles = 0
+    $helperCopiedFiles = 0
+    $helperSkippedFiles = 0
+    $helperErrorFiles = 0
 
     foreach ($excludedHelperName in $excludedHelperNames) {
         $legacyTargetPath = Join-Path $installation.StrategiesPath (Join-Path 'SharedHelperFiles' $excludedHelperName)
@@ -352,12 +394,25 @@ foreach ($installation in $installations) {
         $targetPath = Join-Path $installation.StrategiesPath $strategyFile.Name
         try {
             $result = Copy-IfNeeded -SourceFile $strategyFile -DestinationPath $targetPath -DryRunCopy:$DryRun -ForceCopy:$Force
-            if ($result -eq 'Copied') { $copiedFiles++ }
-            elseif ($result -eq 'Skipped') { $skippedFiles++ }
+            if ($result -eq 'Copied') { $strategyCopiedFiles++ }
+            elseif ($result -eq 'Skipped') { $strategySkippedFiles++ }
         }
         catch {
             Write-ErrorLine "Failed to copy strategy $($strategyFile.Name): $($_.Exception.Message)"
-            $errorFiles++
+            $strategyErrorFiles++
+        }
+    }
+
+    foreach ($indicatorFile in $indicatorFiles) {
+        $targetPath = Join-Path $installation.IndicatorsPath $indicatorFile.Name
+        try {
+            $result = Copy-IfNeeded -SourceFile $indicatorFile -DestinationPath $targetPath -DryRunCopy:$DryRun -ForceCopy:$Force
+            if ($result -eq 'Copied') { $indicatorCopiedFiles++ }
+            elseif ($result -eq 'Skipped') { $indicatorSkippedFiles++ }
+        }
+        catch {
+            Write-ErrorLine "Failed to copy indicator $($indicatorFile.Name): $($_.Exception.Message)"
+            $indicatorErrorFiles++
         }
     }
 
@@ -366,16 +421,18 @@ foreach ($installation in $installations) {
         $targetPath = Join-Path $installation.StrategiesPath (Join-Path 'SharedHelperFiles' $relativePath)
         try {
             $result = Copy-IfNeeded -SourceFile $helperFile -DestinationPath $targetPath -DryRunCopy:$DryRun -ForceCopy:$Force
-            if ($result -eq 'Copied') { $copiedFiles++ }
-            elseif ($result -eq 'Skipped') { $skippedFiles++ }
+            if ($result -eq 'Copied') { $helperCopiedFiles++ }
+            elseif ($result -eq 'Skipped') { $helperSkippedFiles++ }
         }
         catch {
             Write-ErrorLine "Failed to copy helper ${relativePath}: $($_.Exception.Message)"
-            $errorFiles++
+            $helperErrorFiles++
         }
     }
 
-    Write-Info "Summary for $($installation.StrategiesPath): Copied=$copiedFiles Skipped=$skippedFiles Errors=$errorFiles"
+    Write-Info "Strategy summary for $($installation.StrategiesPath): Copied=$strategyCopiedFiles Skipped=$strategySkippedFiles Errors=$strategyErrorFiles"
+    Write-Info "Indicator summary for $($installation.IndicatorsPath): Copied=$indicatorCopiedFiles Skipped=$indicatorSkippedFiles Errors=$indicatorErrorFiles"
+    Write-Info "Helper summary for $($installation.StrategiesPath)\SharedHelperFiles: Copied=$helperCopiedFiles Skipped=$helperSkippedFiles Errors=$helperErrorFiles"
 }
 
 Write-Host ("Completed: {0:yyyy-MM-dd HH:mm:ss}" -f (Get-Date)) -ForegroundColor Gray

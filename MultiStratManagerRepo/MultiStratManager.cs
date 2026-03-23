@@ -3725,6 +3725,7 @@ public TrailingActivationType TrailingStopType
 
             string manualOverrideReason;
             bool manualOverrideApplied = TryGetManualCloseOverride(baseId, out manualOverrideReason);
+            bool explicitPerTradeOverride = manualOverrideApplied;
 
             // If this NT close is a loss, emit a distinct closure_reason so MT5 can trigger run-up.
             string closureReasonField = manualOverrideApplied ? manualOverrideReason : reason;
@@ -3733,7 +3734,7 @@ public TrailingActivationType TrailingStopType
             bool manualOverrideIsManual = closureReasonField.StartsWith("NT_MANUAL_", StringComparison.OrdinalIgnoreCase);
 
             // Daily-limit override: force in-sync close even if this would normally be a loss-close/run-up.
-            if (!manualOverrideIsManual && dailyLimitOverrideActive)
+            if (!explicitPerTradeOverride && !manualOverrideIsManual && dailyLimitOverrideActive)
             {
                 string acct = (record.AccountName ?? string.Empty).Trim();
                 string overrideAcct = (dailyLimitOverrideAccount ?? string.Empty).Trim();
@@ -3745,7 +3746,7 @@ public TrailingActivationType TrailingStopType
                     closureReasonField = "NT_DAILY_LIMIT" + suffix;
                 }
             }
-            else if (!manualOverrideIsManual && manualHaltOverrideActive)
+            else if (!explicitPerTradeOverride && !manualOverrideIsManual && manualHaltOverrideActive)
             {
                 string acct = (record.AccountName ?? string.Empty).Trim();
                 string overrideAcct = (manualHaltOverrideAccount ?? string.Empty).Trim();

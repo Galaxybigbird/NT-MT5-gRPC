@@ -122,13 +122,15 @@ namespace NinjaTrader.NinjaScript.AddOns
 
                 foreach (var tradeId in idsToRemove)
                 {
-                    if (!tradesById.TryGetValue(tradeId, out var record))
+                    TradeRecord record;
+                    if (!tradesById.TryGetValue(tradeId, out record))
                         continue;
 
                     removed.Add(CloneRecord(record));
                     tradesById.Remove(tradeId);
 
-                    if (record.Strategy != null && tradesByStrategy.TryGetValue(record.Strategy, out var ids))
+                    HashSet<string> ids;
+                    if (record.Strategy != null && tradesByStrategy.TryGetValue(record.Strategy, out ids))
                     {
                         ids.Remove(tradeId);
                         if (ids.Count == 0)

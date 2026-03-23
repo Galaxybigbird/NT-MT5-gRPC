@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 )
 
 // helper to drain a trade from the queue quickly
@@ -187,5 +188,37 @@ func TestBaseIdOnlyFallbackUsesRequestedBaseIDWhenMetadataMatchesOtherTrade(t *t
 	a.mt5TicketMux.RUnlock()
 	if len(pend) != 0 {
 		t.Fatalf("expected no pending close after requested-base fallback; got: %+v", pend)
+	}
+}
+
+func TestBaseIdOnlyFallbackMarksNTCloseAckByBaseID(t *testing.T) {
+	a := NewApp()
+
+	baseID := "TEST_BASE_ACK"
+	req := map[string]interface{}{
+		"BaseID":              baseID,
+		"ClosedHedgeQuantity": 1.0,
+		"NTInstrumentSymbol":  "NQ",
+		"NTAccountName":       "Sim101",
+		"ClosureReason":       "NT_stop_close",
+	}
+
+	if err := a.HandleNTCloseHedgeRequest(req); err != nil {
+		t.Fatalf("HandleNTCloseHedgeRequest error: %v", err)
+	}
+
+	tr, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected base_id-only CLOSE_HEDGE fallback when no tickets are known")
+	}
+	if tr.BaseID != baseID || tr.MT5Ticket != 0 || tr.Action != "CLOSE_HEDGE" {
+		t.Fatalf("unexpected fallback trade: %+v", tr)
+	}
+
+	if origin := a.consumeNTCloseOrigin(baseID, 987654, 5*time.Second); origin != "NT_CLOSE_ACK" {
+		t.Fatalf("expected base-id close intent to classify later MT5 close as NT_CLOSE_ACK, got %s", origin)
+	}
+	if origin := a.consumeNTCloseOrigin(baseID, 987654, 5*time.Second); origin != "MT5_CLOSE" {
+		t.Fatalf("expected NT close intent to be consumed after one ack, got %s", origin)
 	}
 }
