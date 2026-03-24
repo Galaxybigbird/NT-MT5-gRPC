@@ -4645,6 +4645,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             cachedPriceOffset = NormalizeSyntheticLabelPriceOffset(anchorPrice - baselinePrice, defaultPriceOffset);
         }
 
+        private TimeSeries GetPrimaryTimeSeries()
+        {
+            if (Times != null && Times.Length > 0)
+                return Times[0];
+            return null;
+        }
+
         private DateTime ResolveSyntheticProtectionLabelTime(NinjaTrader.NinjaScript.DrawingTools.Text label, DateTime cachedTime)
         {
             if (label != null && label.Anchor != null && label.Anchor.Time != DateTime.MinValue)
@@ -4653,13 +4660,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (cachedTime != DateTime.MinValue)
                 return cachedTime;
 
-            if (Time != null && Time.Count > 0)
+            TimeSeries primaryTimes = GetPrimaryTimeSeries();
+            int primaryBar = GetPrimaryCurrentBar();
+            if (primaryTimes != null && primaryTimes.Count > 0)
             {
-                int barsAgo = Math.Min(CurrentBar, SyntheticProtectionLabelDefaultBarsAgo);
-                if (barsAgo >= 0 && barsAgo < Time.Count)
-                    return Time[barsAgo];
+                int barsAgo = Math.Min(Math.Max(0, primaryBar), SyntheticProtectionLabelDefaultBarsAgo);
+                if (barsAgo >= 0 && barsAgo < primaryTimes.Count)
+                    return primaryTimes[barsAgo];
 
-                return Time[0];
+                return primaryTimes[0];
             }
 
             return DateTime.UtcNow;
@@ -4668,17 +4677,22 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int ResolveSyntheticProtectionLabelBarsAgo(NinjaTrader.NinjaScript.DrawingTools.Text label, DateTime cachedTime)
         {
             DateTime anchorTime = ResolveSyntheticProtectionLabelTime(label, cachedTime);
-            if (Time == null || Time.Count == 0)
+            TimeSeries primaryTimes = GetPrimaryTimeSeries();
+            int primaryBar = Math.Max(0, GetPrimaryCurrentBar());
+            if (primaryTimes == null || primaryTimes.Count == 0)
                 return 0;
 
-            if (anchorTime != DateTime.MinValue && Bars != null)
+            if (anchorTime != DateTime.MinValue &&
+                BarsArray != null &&
+                BarsArray.Length > 0 &&
+                BarsArray[0] != null)
             {
-                int barIndex = Bars.GetBar(anchorTime);
+                int barIndex = BarsArray[0].GetBar(anchorTime);
                 if (barIndex >= 0)
-                    return Math.Max(0, Math.Min(CurrentBar, CurrentBar - barIndex));
+                    return Math.Max(0, Math.Min(primaryBar, primaryBar - barIndex));
             }
 
-            return Math.Max(0, Math.Min(CurrentBar, SyntheticProtectionLabelDefaultBarsAgo));
+            return Math.Max(0, Math.Min(primaryBar, SyntheticProtectionLabelDefaultBarsAgo));
         }
 
         private NinjaTrader.NinjaScript.DrawingTools.Text DrawSyntheticProtectionLabel(
@@ -4700,11 +4714,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (label != null)
             {
                 label.IsLocked = false;
-                if (Time != null && Time.Count > 0)
+                TimeSeries primaryTimes = GetPrimaryTimeSeries();
+                if (primaryTimes != null && primaryTimes.Count > 0)
                 {
-                    int clampedBarsAgo = Math.Max(0, Math.Min(CurrentBar, barsAgo));
-                    if (clampedBarsAgo >= 0 && clampedBarsAgo < Time.Count)
-                        cachedTime = Time[clampedBarsAgo];
+                    int clampedBarsAgo = Math.Max(0, Math.Min(GetPrimaryCurrentBar(), barsAgo));
+                    if (clampedBarsAgo >= 0 && clampedBarsAgo < primaryTimes.Count)
+                        cachedTime = primaryTimes[clampedBarsAgo];
                 }
                 if (label.Anchor != null)
                 {
@@ -14604,17 +14619,23 @@ namespace NinjaTrader.NinjaScript.Strategies
                         : (activeStates.Count > 0 ? activeStates[0].TradeId : null);
                     if (!string.IsNullOrEmpty(seedId) && TryGetMultiEntrySyncGroupByTradeId(seedId, out group))
                     {
-                        int remaining = Math.Min(qty, GetMultiEntrySyncRemainingQuantity(group.TradeId));
-                        if (remaining > 0)
+                        int groupQty = Math.Min(qty, GetMultiEntrySyncRemainingQuantity(group.TradeId));
+                        if (groupQty > 0)
                         {
-                            StrategyLogInfo($"[SAFETY] Flattening {Position.MarketPosition.ToString().ToLowerInvariant()} {remaining} across sync group due to {reason}");
-                            ExitMultiEntrySyncTrades(group.TradeId, remaining, "TERM");
-                            return;
+                            StrategyLogInfo($"[SAFETY] Flattening {Position.MarketPosition.ToString().ToLowerInvariant()} {groupQty} across sync group due to {reason}");
+                            ExitMultiEntrySyncTrades(group.TradeId, groupQty, "TERM");
+                            qty -= groupQty;
+                            if (qty <= 0)
+                                return;
+
+                            activeStates = activeStates
+                                .Where(st => st != null && !string.Equals(st.SyncTradeId, group.TradeId, StringComparison.OrdinalIgnoreCase))
+                                .ToList();
                         }
                     }
                 }
 
-                if (activeStates.Count > 1)
+                if (activeStates.Count > 0)
                 {
                     int remaining = qty;
                     foreach (var st in activeStates)

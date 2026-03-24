@@ -5,6 +5,8 @@ using System.ComponentModel;
 using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.Linq;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Media;
 using System.Xml.Serialization;
 using NinjaTrader.Gui;
@@ -35,6 +37,13 @@ namespace NinjaTrader.NinjaScript
     {
         Ticks,
         Price
+    }
+
+    public enum ScaleLadderProtectionKind
+    {
+        Ticks,
+        ATR,
+        Dollars
     }
 }
 
@@ -72,19 +81,38 @@ namespace NinjaTrader.NinjaScript.Indicators
             public List<string> Warnings { get; private set; }
         }
 
+        private sealed class SimulatedTradeStep
+        {
+            public int LadderIndex { get; set; }
+            public double FillPrice { get; set; }
+            public int PreviousQuantity { get; set; }
+            public double PreviousAverageEntry { get; set; }
+        }
+
         private const float ColumnWidth = 220f;
         private const float LabelVerticalGap = 18f;
         private const float SummaryLineHeight = 16f;
+        private const int ProtectionLabelDefaultBarsAgo = 20;
+        private const int ProtectionLabelDefaultTickOffset = 35;
+        private const int OverlayButtonZIndex = 2000;
 
         private HorizontalLine entryLine;
         private HorizontalLine stopLine;
         private HorizontalLine targetLine;
+        private HorizontalLine originalEntryReferenceLine;
         private HorizontalLine[] ladderLines = new HorizontalLine[0];
         private SimpleFont renderFont;
+        private ATR baseAtr;
+
+        private NinjaTrader.NinjaScript.DrawingTools.Text stopLabelObject;
+        private NinjaTrader.NinjaScript.DrawingTools.Text targetLabelObject;
 
         private string entryLineTag;
         private string stopLineTag;
         private string targetLineTag;
+        private string stopLabelTag;
+        private string targetLabelTag;
+        private string originalEntryReferenceLineTag;
         private string tagPrefix;
         private string[] ladderLineTags = new string[0];
 
@@ -92,6 +120,30 @@ namespace NinjaTrader.NinjaScript.Indicators
         private double workingStopPrice;
         private double workingTargetPrice;
         private bool anchorsSeeded;
+        private readonly Stack<SimulatedTradeStep> simulatedTradeHistory = new Stack<SimulatedTradeStep>();
+        private readonly HashSet<int> consumedLadderIndices = new HashSet<int>();
+        private int simulatedQuantity;
+        private double simulatedAverageEntry;
+        private double originalEntryReferencePrice;
+
+        private DateTime stopLabelAnchorTime = DateTime.MinValue;
+        private DateTime targetLabelAnchorTime = DateTime.MinValue;
+        private double stopLabelPriceOffset = double.NaN;
+        private double targetLabelPriceOffset = double.NaN;
+        private double stopLabelRenderedPrice;
+        private double targetLabelRenderedPrice;
+        private string stopLabelRenderedText;
+        private string targetLabelRenderedText;
+
+        private Panel chartOverlayHost;
+        private Border overlayButtonBorder;
+        private StackPanel overlayButtonPanel;
+        private Button addTradeButton;
+        private Button removeTradeButton;
+        private bool overlayButtonsAdded;
+        private bool overlayButtonsInitializing;
+        private bool lastAddTradeEnabled;
+        private bool lastRemoveTradeEnabled;
 
         protected override void OnStateChange()
         {
@@ -111,20 +163,25 @@ namespace NinjaTrader.NinjaScript.Indicators
                 TradeDirection = ScaleLadderTradeDirection.Long;
                 ScaleMode = ScaleLadderMode.ScaleInAtLoss;
                 SpacingUnit = ScaleLadderSpacingUnit.Ticks;
+                AtrPeriod = 14;
+                StopType = ScaleLadderProtectionKind.Ticks;
+                StopValue = 80;
                 StopTicks = 80;
+                TargetType = ScaleLadderProtectionKind.Ticks;
+                TargetValue = 160;
                 TargetTicks = 160;
                 BaseContracts = 1;
                 ContractsPerScaleLevel = 1;
                 ScaleLevelCount = 5;
                 SpacingValue = 20;
                 ShowGuideLines = true;
-                ShowLevelLabels = true;
+                ShowLevelLabels = false;
                 ShowSummaryPanel = true;
                 ResetAnchors = false;
 
                 EntryLineBrush = Brushes.DodgerBlue;
                 RiskSideBrush = Brushes.OrangeRed;
-                RewardSideBrush = Brushes.LimeGreen;
+                RewardSideBrush = Brushes.DeepSkyBlue;
                 SummaryBrush = Brushes.LightGray;
             }
             else if (State == State.DataLoaded)
@@ -139,6 +196,12 @@ namespace NinjaTrader.NinjaScript.Indicators
                 entryLineTag = tagPrefix + "_Entry";
                 stopLineTag = tagPrefix + "_Stop";
                 targetLineTag = tagPrefix + "_Target";
+                stopLabelTag = tagPrefix + "_StopLabel";
+                targetLabelTag = tagPrefix + "_TargetLabel";
+                originalEntryReferenceLineTag = tagPrefix + "_OriginalEntry";
+                NormalizeProtectionInputs();
+                simulatedQuantity = Math.Max(1, BaseContracts);
+                baseAtr = ATR(Math.Max(2, AtrPeriod));
             }
             else if (State == State.Historical)
             {
@@ -146,6 +209,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             }
             else if (State == State.Terminated)
             {
+                RemoveChartOverlayButtons();
                 RemoveAnchorLines();
             }
         }
@@ -163,8 +227,11 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (CurrentBar < 0 || ChartControl == null)
                 return;
 
+            TryInitializeChartOverlayButtons();
             EnsureAnchorLines();
             SyncWorkingPricesFromAnchors();
+            UpdateProtectionVisuals();
+            UpdateOverlayButtons();
             ForceRefresh();
         }
 
@@ -206,69 +273,24 @@ namespace NinjaTrader.NinjaScript.Indicators
                 float guideLineEndX = Math.Max(lineStartX + 40f, lossColumnX - 12f);
                 float summaryBottomY = DrawSummaryPanel(textFormat, summaryDxBrush, warningDxBrush, panelLeft + 10f, panelTop + 10f, validation);
 
-                DrawBasePriceLabel(textFormat, entryDxBrush, string.Format(CultureInfo.InvariantCulture, "Entry | Base {0}", BaseContracts), lossColumnX, chartScale.GetYByValue(workingEntryPrice) - 16f);
-                DrawBasePriceLabel(textFormat, riskDxBrush, BuildStopLineLabel(levels), lossColumnX, chartScale.GetYByValue(workingStopPrice) - 16f);
-                DrawBasePriceLabel(textFormat, rewardDxBrush, BuildTargetLineLabel(levels), profitColumnX, chartScale.GetYByValue(workingTargetPrice) - 16f);
-
-                if (ShowLevelLabels)
-                {
-                    DrawTextBlock(textFormat, mutedDxBrush, "Loss / level state", lossColumnX, Math.Max(summaryBottomY + 6f, panelTop + 62f), ColumnWidth);
-                    DrawTextBlock(textFormat, mutedDxBrush, "Target projection", profitColumnX, Math.Max(summaryBottomY + 6f, panelTop + 62f), ColumnWidth);
-                }
+                DrawBasePriceLabel(
+                    textFormat,
+                    entryDxBrush,
+                    string.Format(CultureInfo.InvariantCulture, "Entry | Base {0}", GetEffectiveQuantity()),
+                    lossColumnX,
+                    chartScale.GetYByValue(workingEntryPrice) - 16f);
 
                 if (!validation.CanRenderLevels || levels.Count == 0)
                     return;
 
-                Brush ladderBrush = validation.ScaleOnFavorableSide ? RewardSideBrush : RiskSideBrush;
+                Brush ladderBrush = GetLadderLineBrush(validation.ScaleOnFavorableSide);
                 using (var ladderDxBrush = ladderBrush.ToDxBrush(RenderTarget))
                 {
-                    bool suppressedLossLabels = false;
-                    bool suppressedProfitLabels = false;
-                    float lastLossLabelY = float.MinValue;
-                    float lastProfitLabelY = float.MinValue;
-
                     foreach (var level in levels.OrderBy(l => chartScale.GetYByValue(l.LevelPrice)))
                     {
                         float levelY = chartScale.GetYByValue(level.LevelPrice);
                         if (ShowGuideLines)
                             RenderTarget.DrawLine(new SharpDX.Vector2(lineStartX, levelY), new SharpDX.Vector2(guideLineEndX, levelY), ladderDxBrush, 1f);
-
-                        if (!ShowLevelLabels)
-                            continue;
-
-                        string lossText = BuildLossLabel(level);
-                        string profitText = BuildProfitLabel(level);
-
-                        if (Math.Abs(levelY - lastLossLabelY) >= LabelVerticalGap)
-                        {
-                            DrawTextBlock(textFormat, riskDxBrush, lossText, lossColumnX, levelY - 7f, ColumnWidth);
-                            lastLossLabelY = levelY;
-                        }
-                        else
-                        {
-                            suppressedLossLabels = true;
-                        }
-
-                        if (Math.Abs(levelY - lastProfitLabelY) >= LabelVerticalGap)
-                        {
-                            DrawTextBlock(textFormat, rewardDxBrush, profitText, profitColumnX, levelY - 7f, ColumnWidth);
-                            lastProfitLabelY = levelY;
-                        }
-                        else
-                        {
-                            suppressedProfitLabels = true;
-                        }
-                    }
-
-                    if (suppressedLossLabels || suppressedProfitLabels)
-                    {
-                        DrawTextBlock(
-                            textFormat,
-                            warningDxBrush,
-                            "Some labels were hidden because the levels are too close together.",
-                            panelLeft + 10f,
-                            Math.Max(summaryBottomY + 6f, panelTop + 78f),
-                            panelRight - panelLeft - 20f);
                     }
                 }
             }
@@ -293,7 +315,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             string line2 = string.Format(
                 CultureInfo.InvariantCulture,
                 "Base {0} | Step {1} x {2} | Spacing {3}",
-                BaseContracts,
+                GetEffectiveQuantity(),
                 ContractsPerScaleLevel,
                 ScaleLevelCount,
                 spacingLabel);
@@ -401,8 +423,8 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             if (IsScaleInMode())
             {
-                int runningQuantity = BaseContracts;
-                double runningAverage = workingEntryPrice;
+                int runningQuantity = GetEffectiveQuantity();
+                double runningAverage = GetEffectiveAverageEntry();
 
                 for (int i = 0; i < orderedLevelPrices.Count; i++)
                 {
@@ -433,7 +455,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 return;
             }
 
-            int remainingQuantity = BaseContracts;
+            int remainingQuantity = GetEffectiveQuantity();
             double realizedPnl = 0;
 
             for (int i = 0; i < orderedLevelPrices.Count; i++)
@@ -511,7 +533,7 @@ namespace NinjaTrader.NinjaScript.Indicators
             validation.ScaleOnFavorableSide = IsScaleOnFavorableSide();
             validation.VisibleLevelCount = ScaleLevelCount;
 
-            if (IsScaleOutMode() && (ContractsPerScaleLevel * ScaleLevelCount) > BaseContracts)
+            if (IsScaleOutMode() && (ContractsPerScaleLevel * ScaleLevelCount) > GetEffectiveQuantity())
                 validation.Warnings.Add("Scale-out size exceeds BaseContracts.");
 
             if (validation.Warnings.Count > 0)
@@ -534,7 +556,10 @@ namespace NinjaTrader.NinjaScript.Indicators
                 return;
 
             if (resetRequested)
+            {
+                ResetSimulationState();
                 SeedWorkingPrices();
+            }
 
             entryLine = FindHorizontalLine(entryLineTag) ?? entryLine;
             stopLine = FindHorizontalLine(stopLineTag) ?? stopLine;
@@ -547,9 +572,9 @@ namespace NinjaTrader.NinjaScript.Indicators
             if (targetLine == null)
                 targetLine = Draw.HorizontalLine(this, targetLineTag, workingTargetPrice, RewardSideBrush);
 
-            ApplyAnchorStyle(entryLine, EntryLineBrush, DashStyleHelper.Dash, 2);
-            ApplyAnchorStyle(stopLine, RiskSideBrush, DashStyleHelper.Solid, 2);
-            ApplyAnchorStyle(targetLine, RewardSideBrush, DashStyleHelper.Solid, 2);
+            ApplyEntryLineStyle(entryLine);
+            ApplyProtectionLineStyle(stopLine, Brushes.OrangeRed);
+            ApplyProtectionLineStyle(targetLine, Brushes.DeepSkyBlue);
             EnsureLadderLines(resetRequested);
 
             if (resetRequested)
@@ -589,9 +614,17 @@ namespace NinjaTrader.NinjaScript.Indicators
                 }
             }
 
-            Brush ladderBrush = IsScaleOnFavorableSide() ? RewardSideBrush : RiskSideBrush;
+            Brush ladderBrush = GetLadderLineBrush(IsScaleOnFavorableSide());
             for (int i = 0; i < desiredCount; i++)
             {
+                if (consumedLadderIndices.Contains(i))
+                {
+                    if (!string.IsNullOrEmpty(ladderLineTags[i]))
+                        RemoveDrawObject(ladderLineTags[i]);
+                    ladderLines[i] = null;
+                    continue;
+                }
+
                 ladderLines[i] = FindHorizontalLine(ladderLineTags[i]) ?? ladderLines[i];
                 bool created = false;
                 if (ladderLines[i] == null)
@@ -600,10 +633,18 @@ namespace NinjaTrader.NinjaScript.Indicators
                     created = true;
                 }
 
-                ApplyAnchorStyle(ladderLines[i], ladderBrush, DashStyleHelper.Dot, 1);
+                ApplyLadderLineStyle(ladderLines[i], ladderBrush);
                 if (resetRequested || created)
                     SetAnchorPrice(ladderLines[i], GetSeededLadderPrice(i + 1));
             }
+        }
+
+        private Brush GetLadderLineBrush(bool scaleOnFavorableSide)
+        {
+            if (IsScaleInMode())
+                return Brushes.Aqua;
+
+            return scaleOnFavorableSide ? RewardSideBrush : RiskSideBrush;
         }
 
         private double GetSeededLadderPrice(int levelNumber)
@@ -635,6 +676,9 @@ namespace NinjaTrader.NinjaScript.Indicators
 
             for (int i = 0; i < ladderLines.Length; i++)
             {
+                if (consumedLadderIndices.Contains(i))
+                    continue;
+
                 double price = GetAnchorPrice(ladderLines[i]);
                 if (price <= 0)
                     continue;
@@ -657,7 +701,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                     continue;
                 }
 
-                prices.Add(RoundToTick(price));
+                prices.Add(price);
             }
 
             return prices
@@ -667,18 +711,15 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         private void SeedWorkingPrices()
         {
-            double tickSize = GetSafeTickSize();
             double closePrice = CurrentBar >= 0 ? Close[0] : 0;
             if (closePrice <= 0)
                 closePrice = Instrument != null && Instrument.MasterInstrument != null ? Instrument.MasterInstrument.RoundToTickSize(1.0) : 1.0;
 
             double defaultEntry = RoundToTick(closePrice);
-            double stopOffset = Math.Max(1, StopTicks) * tickSize;
-            double targetOffset = Math.Max(1, TargetTicks) * tickSize;
-
             workingEntryPrice = defaultEntry;
-            workingStopPrice = RoundToTick(defaultEntry + (TradeDirection == ScaleLadderTradeDirection.Long ? -stopOffset : stopOffset));
-            workingTargetPrice = RoundToTick(defaultEntry + (TradeDirection == ScaleLadderTradeDirection.Long ? targetOffset : -targetOffset));
+            simulatedAverageEntry = workingEntryPrice;
+            simulatedQuantity = Math.Max(1, BaseContracts);
+            ApplyConfiguredProtectionPrices(workingEntryPrice, simulatedQuantity);
             anchorsSeeded = true;
         }
 
@@ -693,21 +734,83 @@ namespace NinjaTrader.NinjaScript.Indicators
             double stop = GetAnchorPrice(stopLine);
             double target = GetAnchorPrice(targetLine);
 
-            if (entry > 0)
-                workingEntryPrice = RoundToTick(entry);
+            if (HasSimulatedTrades())
+            {
+                if (simulatedAverageEntry > 0 && !double.IsNaN(simulatedAverageEntry) && !double.IsInfinity(simulatedAverageEntry))
+                {
+                    workingEntryPrice = simulatedAverageEntry;
+                    if (entryLine != null && !PricesClose(entry, simulatedAverageEntry))
+                        SetAnchorPrice(entryLine, simulatedAverageEntry);
+                }
+            }
+            else if (entry > 0)
+            {
+                workingEntryPrice = entry;
+                simulatedAverageEntry = entry;
+                simulatedQuantity = Math.Max(1, BaseContracts);
+            }
+
             if (stop > 0)
-                workingStopPrice = RoundToTick(stop);
+                workingStopPrice = stop;
             if (target > 0)
-                workingTargetPrice = RoundToTick(target);
+                workingTargetPrice = target;
         }
 
-        private void ApplyAnchorStyle(HorizontalLine line, Brush brush, DashStyleHelper dashStyle, int width)
+        private void ApplyEntryLineStyle(HorizontalLine line)
+        {
+            ApplyLineStyle(line, EntryLineBrush ?? Brushes.DodgerBlue, 2, "Dash");
+        }
+
+        private void ApplyProtectionLineStyle(HorizontalLine line, Brush brush)
+        {
+            ApplyLineStyle(line, brush, 3, "Solid");
+        }
+
+        private void ApplyOriginalEntryReferenceLineStyle(HorizontalLine line)
+        {
+            ApplyLineStyle(line, Brushes.MediumPurple, 3, "Solid");
+        }
+
+        private void ApplyLadderLineStyle(HorizontalLine line, Brush brush)
+        {
+            ApplyLineStyle(line, brush, 3, "Dash");
+        }
+
+        private void ApplyLineStyle(HorizontalLine line, Brush brush, int width, string dashStyleName)
         {
             if (line == null)
                 return;
 
+            if (line.Stroke == null)
+                line.Stroke = new Stroke(brush, DashStyleHelper.Solid, width);
+
             line.IsLocked = false;
-            line.Stroke = new Stroke(brush, dashStyle, width);
+            line.Stroke.Brush = brush;
+            line.Stroke.Width = width;
+            SetLineDashStyle(line.Stroke, dashStyleName);
+        }
+
+        private void SetLineDashStyle(object stroke, string styleName)
+        {
+            if (stroke == null || string.IsNullOrWhiteSpace(styleName))
+                return;
+
+            var helperProp = stroke.GetType().GetProperty("DashStyleHelper");
+            if (helperProp != null)
+            {
+                object dashValue = Enum.Parse(helperProp.PropertyType, styleName);
+                helperProp.SetValue(stroke, dashValue, null);
+                return;
+            }
+
+            var dashProp = stroke.GetType().GetProperty("DashStyle");
+            if (dashProp == null || dashProp.PropertyType != typeof(DashStyle))
+                return;
+
+            DashStyle dashStyle = styleName.Equals("Dash", StringComparison.OrdinalIgnoreCase)
+                ? new DashStyle(new double[] { 6, 3 }, 0)
+                : DashStyles.Solid;
+            dashProp.SetValue(stroke, dashStyle, null);
         }
 
         private double GetAnchorPrice(HorizontalLine line)
@@ -722,12 +825,12 @@ namespace NinjaTrader.NinjaScript.Indicators
             return price;
         }
 
-        private void SetAnchorPrice(HorizontalLine line, double price)
+        private void SetAnchorPrice(HorizontalLine line, double price, bool roundToTick = false)
         {
-            if (line == null || line.StartAnchor == null || price <= 0)
+            if (line == null || line.StartAnchor == null || price <= 0 || double.IsNaN(price) || double.IsInfinity(price))
                 return;
 
-            line.StartAnchor.Price = RoundToTick(price);
+            line.StartAnchor.Price = roundToTick ? RoundToTick(price) : price;
         }
 
         private HorizontalLine FindHorizontalLine(string tag)
@@ -741,6 +844,22 @@ namespace NinjaTrader.NinjaScript.Indicators
                     continue;
 
                 return drawObject as HorizontalLine;
+            }
+
+            return null;
+        }
+
+        private NinjaTrader.NinjaScript.DrawingTools.Text FindTextObject(string tag)
+        {
+            if (string.IsNullOrWhiteSpace(tag) || DrawObjects == null)
+                return null;
+
+            foreach (var drawObject in DrawObjects)
+            {
+                if (drawObject == null || !string.Equals(drawObject.Tag, tag, StringComparison.Ordinal))
+                    continue;
+
+                return drawObject as NinjaTrader.NinjaScript.DrawingTools.Text;
             }
 
             return null;
@@ -762,6 +881,40 @@ namespace NinjaTrader.NinjaScript.Indicators
                         RemoveDrawObject(ladderLineTags[i]);
                 }
             }
+
+            RemoveProtectionLabelDrawObjects();
+            RemoveOriginalEntryReferenceLine();
+
+            entryLine = null;
+            stopLine = null;
+            targetLine = null;
+        }
+
+        private void RemoveProtectionLabelDrawObjects()
+        {
+            if (!string.IsNullOrEmpty(stopLabelTag))
+                RemoveDrawObject(stopLabelTag);
+            if (!string.IsNullOrEmpty(targetLabelTag))
+                RemoveDrawObject(targetLabelTag);
+
+            stopLabelObject = null;
+            targetLabelObject = null;
+            stopLabelAnchorTime = DateTime.MinValue;
+            targetLabelAnchorTime = DateTime.MinValue;
+            stopLabelPriceOffset = double.NaN;
+            targetLabelPriceOffset = double.NaN;
+            stopLabelRenderedPrice = 0;
+            targetLabelRenderedPrice = 0;
+            stopLabelRenderedText = null;
+            targetLabelRenderedText = null;
+        }
+
+        private void RemoveOriginalEntryReferenceLine()
+        {
+            if (!string.IsNullOrEmpty(originalEntryReferenceLineTag))
+                RemoveDrawObject(originalEntryReferenceLineTag);
+
+            originalEntryReferenceLine = null;
         }
 
         private double GetSafeTickSize()
@@ -778,6 +931,134 @@ namespace NinjaTrader.NinjaScript.Indicators
                 return price;
 
             return Instrument.MasterInstrument.RoundToTickSize(price);
+        }
+
+        private void NormalizeProtectionInputs()
+        {
+            if (StopType == ScaleLadderProtectionKind.Ticks)
+            {
+                StopTicks = Math.Max(1, (int)Math.Round(Math.Max(1.0, StopValue)));
+                StopValue = StopTicks;
+            }
+
+            if (TargetType == ScaleLadderProtectionKind.Ticks)
+            {
+                TargetTicks = Math.Max(1, (int)Math.Round(Math.Max(1.0, TargetValue)));
+                TargetValue = TargetTicks;
+            }
+        }
+
+        private double GetLatestAtrValue()
+        {
+            try
+            {
+                return baseAtr != null ? baseAtr[0] : 0.0;
+            }
+            catch
+            {
+                return 0.0;
+            }
+        }
+
+        private double GetProtectionValue(bool isStop)
+        {
+            return Math.Max(0.0, isStop ? StopValue : TargetValue);
+        }
+
+        private bool IsAtrProtectionMode(bool isStop)
+        {
+            return isStop ? StopType == ScaleLadderProtectionKind.ATR : TargetType == ScaleLadderProtectionKind.ATR;
+        }
+
+        private bool IsDollarProtectionMode(bool isStop)
+        {
+            return isStop ? StopType == ScaleLadderProtectionKind.Dollars : TargetType == ScaleLadderProtectionKind.Dollars;
+        }
+
+        private double ConvertDollarsToPrice(double dollars, int quantityHint)
+        {
+            if (dollars <= 0)
+                return 0;
+
+            double pointValue = Instrument?.MasterInstrument?.PointValue ?? 0.0;
+            if (pointValue <= 0 || double.IsNaN(pointValue) || double.IsInfinity(pointValue))
+                return 0;
+
+            int quantity = Math.Max(1, quantityHint);
+            return dollars / (pointValue * quantity);
+        }
+
+        private double ResolveProtectionOffsetPrice(bool isStop, int quantityHint, double atrValue = double.NaN)
+        {
+            double value = GetProtectionValue(isStop);
+            if (value <= 0)
+                return 0;
+
+            double tickSize = GetSafeTickSize();
+            if (tickSize <= 0)
+                return 0;
+
+            if (IsAtrProtectionMode(isStop))
+            {
+                double effectiveAtr = (!double.IsNaN(atrValue) && atrValue > 0) ? atrValue : GetLatestAtrValue();
+                return effectiveAtr > 0 ? effectiveAtr * value : 0;
+            }
+
+            if (IsDollarProtectionMode(isStop))
+                return ConvertDollarsToPrice(value, quantityHint);
+
+            double ticks = Math.Max(1.0, Math.Round(value));
+            return ticks * tickSize;
+        }
+
+        private double? ResolveConfiguredProtectionPrice(bool isStop, double entryPrice, int quantityHint, double atrValue = double.NaN)
+        {
+            if (entryPrice <= 0 || double.IsNaN(entryPrice) || double.IsInfinity(entryPrice))
+                return null;
+
+            double offset = ResolveProtectionOffsetPrice(isStop, quantityHint, atrValue);
+            if (offset <= 0 || double.IsNaN(offset) || double.IsInfinity(offset))
+                return null;
+
+            double desiredPrice;
+            if (TradeDirection == ScaleLadderTradeDirection.Long)
+                desiredPrice = isStop ? entryPrice - offset : entryPrice + offset;
+            else
+                desiredPrice = isStop ? entryPrice + offset : entryPrice - offset;
+
+            return RoundToTick(desiredPrice);
+        }
+
+        private double ResolveFallbackProtectionPrice(bool isStop, double entryPrice)
+        {
+            double tickSize = GetSafeTickSize();
+            double offset = tickSize > 0 ? tickSize : 0.25;
+
+            if (TradeDirection == ScaleLadderTradeDirection.Long)
+                return RoundToTick(isStop ? entryPrice - offset : entryPrice + offset);
+
+            return RoundToTick(isStop ? entryPrice + offset : entryPrice - offset);
+        }
+
+        private void ApplyConfiguredProtectionPrices(double entryPrice, int quantityHint)
+        {
+            if (entryPrice <= 0 || double.IsNaN(entryPrice) || double.IsInfinity(entryPrice))
+                return;
+
+            NormalizeProtectionInputs();
+
+            int effectiveQuantity = Math.Max(1, quantityHint);
+            double atrValue = GetLatestAtrValue();
+            double? desiredStop = ResolveConfiguredProtectionPrice(true, entryPrice, effectiveQuantity, atrValue);
+            double? desiredTarget = ResolveConfiguredProtectionPrice(false, entryPrice, effectiveQuantity, atrValue);
+
+            workingStopPrice = desiredStop ?? (workingStopPrice > 0 ? workingStopPrice : ResolveFallbackProtectionPrice(true, entryPrice));
+            workingTargetPrice = desiredTarget ?? (workingTargetPrice > 0 ? workingTargetPrice : ResolveFallbackProtectionPrice(false, entryPrice));
+
+            if (stopLine != null && workingStopPrice > 0)
+                SetAnchorPrice(stopLine, workingStopPrice);
+            if (targetLine != null && workingTargetPrice > 0)
+                SetAnchorPrice(targetLine, workingTargetPrice);
         }
 
         private double PriceDeltaToSignedTicks(double priceDelta, double directionSign)
@@ -820,7 +1101,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 return levels[levels.Count - 1].TargetPnl;
 
             double directionSign = TradeDirection == ScaleLadderTradeDirection.Long ? 1.0 : -1.0;
-            return PriceDeltaToDollars(workingTargetPrice - workingEntryPrice, BaseContracts, directionSign);
+            return PriceDeltaToDollars(workingTargetPrice - workingEntryPrice, GetEffectiveQuantity(), directionSign);
         }
 
         private double GetFinalStopPnl(IList<LadderLevel> levels)
@@ -835,7 +1116,7 @@ namespace NinjaTrader.NinjaScript.Indicators
                 return finalLevel.RealizedPnl + PriceDeltaToDollars(workingStopPrice - workingEntryPrice, finalLevel.QuantityAfterLevel, directionSign);
             }
 
-            return PriceDeltaToDollars(workingStopPrice - workingEntryPrice, BaseContracts, directionSign);
+            return PriceDeltaToDollars(workingStopPrice - workingEntryPrice, GetEffectiveQuantity(), directionSign);
         }
 
         private int GetPriceUnitDecimals()
@@ -897,6 +1178,694 @@ namespace NinjaTrader.NinjaScript.Indicators
             return TradeDirection == ScaleLadderTradeDirection.Long ? 1.0 : -1.0;
         }
 
+        private bool HasSimulatedTrades()
+        {
+            return simulatedTradeHistory.Count > 0;
+        }
+
+        private int GetEffectiveQuantity()
+        {
+            return HasSimulatedTrades() ? Math.Max(1, simulatedQuantity) : Math.Max(1, BaseContracts);
+        }
+
+        private double GetEffectiveAverageEntry()
+        {
+            if (HasSimulatedTrades() && simulatedAverageEntry > 0 && !double.IsNaN(simulatedAverageEntry) && !double.IsInfinity(simulatedAverageEntry))
+                return simulatedAverageEntry;
+
+            return workingEntryPrice;
+        }
+
+        private double GetEffectiveOriginalEntryReferencePrice()
+        {
+            if (originalEntryReferencePrice > 0 && !double.IsNaN(originalEntryReferencePrice) && !double.IsInfinity(originalEntryReferencePrice))
+                return originalEntryReferencePrice;
+
+            return workingEntryPrice;
+        }
+
+        private void ResetSimulationState()
+        {
+            simulatedTradeHistory.Clear();
+            consumedLadderIndices.Clear();
+            simulatedQuantity = Math.Max(1, BaseContracts);
+            simulatedAverageEntry = workingEntryPrice;
+            originalEntryReferencePrice = 0;
+            RemoveOriginalEntryReferenceLine();
+            UpdateOverlayButtons(true);
+        }
+
+        private bool TryGetNextEligibleLadderCandidate(out int ladderIndex, out double ladderPrice)
+        {
+            ladderIndex = -1;
+            ladderPrice = 0;
+
+            if (!IsScaleInMode() || ladderLines == null || ladderLines.Length == 0)
+                return false;
+
+            double directionSign = GetDirectionSign();
+            double scaleSign = GetScaleSideSign(directionSign, IsScaleOnFavorableSide());
+            double boundaryPrice = IsScaleOnFavorableSide() ? workingTargetPrice : workingStopPrice;
+            double boundaryDistance = (boundaryPrice - workingEntryPrice) * scaleSign;
+            double bestDistance = double.MaxValue;
+
+            for (int i = 0; i < ladderLines.Length; i++)
+            {
+                if (consumedLadderIndices.Contains(i))
+                    continue;
+
+                double price = GetAnchorPrice(ladderLines[i]);
+                if (price <= 0)
+                    continue;
+
+                double distance = (price - workingEntryPrice) * scaleSign;
+                if (distance <= 0)
+                    continue;
+
+                if (boundaryDistance > 0 && distance > boundaryDistance + (GetSafeTickSize() * 0.5))
+                    continue;
+
+                if (distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    ladderIndex = i;
+                    ladderPrice = price;
+                }
+            }
+
+            return ladderIndex >= 0 && ladderPrice > 0;
+        }
+
+        private void HandleAddTradeRequest()
+        {
+            if (!IsScaleInMode())
+                return;
+
+            EnsureAnchorLines();
+            SyncWorkingPricesFromAnchors();
+
+            int ladderIndex;
+            double fillPrice;
+            if (!TryGetNextEligibleLadderCandidate(out ladderIndex, out fillPrice))
+                return;
+
+            int previousQuantity = GetEffectiveQuantity();
+            double previousAverage = GetEffectiveAverageEntry();
+
+            if (!HasSimulatedTrades())
+                originalEntryReferencePrice = previousAverage;
+
+            int newQuantity = previousQuantity + ContractsPerScaleLevel;
+            double newAverage = ((previousAverage * previousQuantity) + (fillPrice * ContractsPerScaleLevel)) / Math.Max(1, newQuantity);
+
+            simulatedTradeHistory.Push(new SimulatedTradeStep
+            {
+                LadderIndex = ladderIndex,
+                FillPrice = fillPrice,
+                PreviousQuantity = previousQuantity,
+                PreviousAverageEntry = previousAverage
+            });
+
+            consumedLadderIndices.Add(ladderIndex);
+            simulatedQuantity = newQuantity;
+            simulatedAverageEntry = newAverage;
+            workingEntryPrice = newAverage;
+            ApplyConfiguredProtectionPrices(simulatedAverageEntry, simulatedQuantity);
+
+            if (ladderIndex >= 0 && ladderIndex < ladderLines.Length)
+                ladderLines[ladderIndex] = null;
+            if (ladderIndex >= 0 && ladderIndex < ladderLineTags.Length && !string.IsNullOrEmpty(ladderLineTags[ladderIndex]))
+                RemoveDrawObject(ladderLineTags[ladderIndex]);
+
+            if (entryLine != null)
+                SetAnchorPrice(entryLine, simulatedAverageEntry);
+
+            UpdateProtectionVisuals();
+            UpdateOverlayButtons(true);
+            ForceRefresh();
+        }
+
+        private void HandleRemoveTradeRequest()
+        {
+            if (!HasSimulatedTrades())
+                return;
+
+            EnsureAnchorLines();
+            SyncWorkingPricesFromAnchors();
+
+            SimulatedTradeStep step = simulatedTradeHistory.Pop();
+            consumedLadderIndices.Remove(step.LadderIndex);
+            RestoreConsumedLadderLine(step);
+
+            simulatedQuantity = Math.Max(1, step.PreviousQuantity);
+            simulatedAverageEntry = step.PreviousAverageEntry;
+            workingEntryPrice = simulatedAverageEntry;
+            ApplyConfiguredProtectionPrices(simulatedAverageEntry, simulatedQuantity);
+
+            if (entryLine != null)
+                SetAnchorPrice(entryLine, simulatedAverageEntry);
+
+            if (!HasSimulatedTrades())
+            {
+                originalEntryReferencePrice = 0;
+                RemoveOriginalEntryReferenceLine();
+            }
+
+            UpdateProtectionVisuals();
+            UpdateOverlayButtons(true);
+            ForceRefresh();
+        }
+
+        private void RestoreConsumedLadderLine(SimulatedTradeStep step)
+        {
+            if (step == null || step.LadderIndex < 0 || step.LadderIndex >= ladderLineTags.Length)
+                return;
+
+            string tag = ladderLineTags[step.LadderIndex];
+            if (string.IsNullOrWhiteSpace(tag))
+                return;
+
+            Brush ladderBrush = GetLadderLineBrush(IsScaleOnFavorableSide());
+            HorizontalLine line = Draw.HorizontalLine(this, tag, step.FillPrice, ladderBrush);
+            ApplyLadderLineStyle(line, ladderBrush);
+            SetAnchorPrice(line, step.FillPrice);
+            ladderLines[step.LadderIndex] = line;
+        }
+
+        private void TryInitializeChartOverlayButtons()
+        {
+            if (overlayButtonsAdded || overlayButtonsInitializing || ChartControl == null)
+                return;
+
+            overlayButtonsInitializing = true;
+
+            try
+            {
+                ChartControl.Dispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        if (overlayButtonsAdded || ChartControl == null)
+                            return;
+
+                        chartOverlayHost = FindOverlayHostPanel(ChartControl);
+                        if (chartOverlayHost == null)
+                            return;
+
+                        overlayButtonPanel = new StackPanel
+                        {
+                            Orientation = Orientation.Vertical
+                        };
+
+                        addTradeButton = CreateOverlayButton("Add Trade", Brushes.SteelBlue, "Simulate filling the nearest scale-in level.");
+                        removeTradeButton = CreateOverlayButton("Remove Trade", Brushes.IndianRed, "Undo the last simulated add.");
+
+                        addTradeButton.Margin = new Thickness(0, 0, 0, 4);
+                        addTradeButton.Click += AddTradeButton_Click;
+                        removeTradeButton.Click += RemoveTradeButton_Click;
+
+                        overlayButtonPanel.Children.Add(addTradeButton);
+                        overlayButtonPanel.Children.Add(removeTradeButton);
+
+                        overlayButtonBorder = new Border
+                        {
+                            HorizontalAlignment = HorizontalAlignment.Right,
+                            VerticalAlignment = VerticalAlignment.Bottom,
+                            Margin = new Thickness(0, 0, 14, 18),
+                            Padding = new Thickness(4),
+                            CornerRadius = new CornerRadius(4),
+                            Background = new SolidColorBrush(Color.FromArgb(150, 12, 18, 26)),
+                            BorderBrush = new SolidColorBrush(Color.FromArgb(180, 74, 90, 110)),
+                            BorderThickness = new Thickness(1),
+                            Child = overlayButtonPanel
+                        };
+
+                        if (chartOverlayHost is Grid grid)
+                        {
+                            Grid.SetRow(overlayButtonBorder, Grid.GetRow(ChartControl));
+                            Grid.SetColumn(overlayButtonBorder, Grid.GetColumn(ChartControl));
+                            Grid.SetRowSpan(overlayButtonBorder, Math.Max(1, Grid.GetRowSpan(ChartControl)));
+                            Grid.SetColumnSpan(overlayButtonBorder, Math.Max(1, Grid.GetColumnSpan(ChartControl)));
+                        }
+
+                        System.Windows.Controls.Panel.SetZIndex(overlayButtonBorder, OverlayButtonZIndex);
+                        chartOverlayHost.Children.Add(overlayButtonBorder);
+
+                        overlayButtonsAdded = true;
+                        UpdateOverlayButtons(true);
+                    }
+                    finally
+                    {
+                        overlayButtonsInitializing = false;
+                    }
+                });
+            }
+            catch
+            {
+                overlayButtonsInitializing = false;
+            }
+        }
+
+        private Button CreateOverlayButton(string content, Brush background, string toolTip)
+        {
+            return new Button
+            {
+                Content = content,
+                MinWidth = 96,
+                Margin = new Thickness(0),
+                Padding = new Thickness(10, 4, 10, 4),
+                Background = background,
+                Foreground = Brushes.White,
+                ToolTip = toolTip
+            };
+        }
+
+        private void UpdateOverlayButtons(bool force = false)
+        {
+            if (ChartControl == null || addTradeButton == null || removeTradeButton == null)
+                return;
+
+            bool addEnabled = IsScaleInMode() && TryGetNextEligibleLadderCandidate(out _, out _);
+            bool removeEnabled = IsScaleInMode() && HasSimulatedTrades();
+
+            if (!force && addEnabled == lastAddTradeEnabled && removeEnabled == lastRemoveTradeEnabled)
+                return;
+
+            lastAddTradeEnabled = addEnabled;
+            lastRemoveTradeEnabled = removeEnabled;
+
+            Action apply = () =>
+            {
+                ApplyOverlayButtonState(addTradeButton, addEnabled, Brushes.SteelBlue);
+                ApplyOverlayButtonState(removeTradeButton, removeEnabled, Brushes.IndianRed);
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
+        }
+
+        private void ApplyOverlayButtonState(Button button, bool enabled, Brush activeBrush)
+        {
+            if (button == null)
+                return;
+
+            button.IsEnabled = enabled;
+            button.Background = enabled ? activeBrush : Brushes.DimGray;
+            button.Foreground = enabled ? Brushes.White : Brushes.LightGray;
+            button.Opacity = enabled ? 1.0 : 0.7;
+        }
+
+        private void RemoveChartOverlayButtons()
+        {
+            overlayButtonsInitializing = false;
+
+            if (!overlayButtonsAdded && overlayButtonBorder == null)
+                return;
+
+            Action remove = () =>
+            {
+                if (addTradeButton != null)
+                    addTradeButton.Click -= AddTradeButton_Click;
+                if (removeTradeButton != null)
+                    removeTradeButton.Click -= RemoveTradeButton_Click;
+
+                if (overlayButtonBorder != null && chartOverlayHost != null)
+                    chartOverlayHost.Children.Remove(overlayButtonBorder);
+
+                chartOverlayHost = null;
+                overlayButtonBorder = null;
+                overlayButtonPanel = null;
+                addTradeButton = null;
+                removeTradeButton = null;
+                overlayButtonsAdded = false;
+                lastAddTradeEnabled = false;
+                lastRemoveTradeEnabled = false;
+            };
+
+            if (ChartControl != null && !ChartControl.Dispatcher.CheckAccess())
+                ChartControl.Dispatcher.InvokeAsync(remove);
+            else
+                remove();
+        }
+
+        private Panel FindOverlayHostPanel(DependencyObject child)
+        {
+            DependencyObject current = child;
+            while (current != null)
+            {
+                current = VisualTreeHelper.GetParent(current);
+                if (current is Panel panel)
+                    return panel;
+            }
+
+            return null;
+        }
+
+        private void AddTradeButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(_ => HandleAddTradeRequest(), null);
+        }
+
+        private void RemoveTradeButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(_ => HandleRemoveTradeRequest(), null);
+        }
+
+        private void UpdateProtectionVisuals()
+        {
+            if (ChartControl == null)
+            {
+                RemoveProtectionLabelDrawObjects();
+                RemoveOriginalEntryReferenceLine();
+                return;
+            }
+
+            stopLabelObject = FindTextObject(stopLabelTag);
+            targetLabelObject = FindTextObject(targetLabelTag);
+            originalEntryReferenceLine = FindHorizontalLine(originalEntryReferenceLineTag);
+
+            double originalEntryPrice = GetEffectiveOriginalEntryReferencePrice();
+            double liveAveragePrice = GetEffectiveAverageEntry();
+            int liveQuantity = GetEffectiveQuantity();
+
+            if (HasSimulatedTrades() && !PricesClose(originalEntryPrice, liveAveragePrice))
+            {
+                originalEntryReferenceLine = EnsureOriginalEntryReferenceLine(originalEntryPrice);
+            }
+            else
+            {
+                RemoveOriginalEntryReferenceLine();
+            }
+
+            if (workingStopPrice > 0)
+            {
+                double defaultStopLabelOffset = GetProtectionDefaultLabelPriceOffset(true);
+                SyncProtectionLabelPlacementFromChart(stopLabelObject, stopLabelRenderedPrice, defaultStopLabelOffset, ref stopLabelAnchorTime, ref stopLabelPriceOffset);
+                string stopLabel = BuildProtectionLabel(workingStopPrice, originalEntryPrice, liveAveragePrice, liveQuantity);
+                if (!string.IsNullOrWhiteSpace(stopLabel))
+                {
+                    if (ShouldRedrawProtectionLabel(stopLabelObject, stopLabelRenderedText, stopLabel, stopLabelRenderedPrice, workingStopPrice))
+                    {
+                        stopLabelObject = DrawProtectionLabel(
+                            stopLabelObject,
+                            stopLabelTag,
+                            stopLabel,
+                            workingStopPrice,
+                            Brushes.OrangeRed,
+                            defaultStopLabelOffset,
+                            ref stopLabelAnchorTime,
+                            ref stopLabelPriceOffset);
+                        stopLabelRenderedPrice = workingStopPrice;
+                        stopLabelRenderedText = stopLabel;
+                    }
+                }
+                else
+                {
+                    RemoveDrawObject(stopLabelTag);
+                    stopLabelObject = null;
+                    stopLabelAnchorTime = DateTime.MinValue;
+                    stopLabelPriceOffset = double.NaN;
+                    stopLabelRenderedPrice = 0;
+                    stopLabelRenderedText = null;
+                }
+            }
+            else
+            {
+                RemoveDrawObject(stopLabelTag);
+                stopLabelObject = null;
+                stopLabelAnchorTime = DateTime.MinValue;
+                stopLabelPriceOffset = double.NaN;
+                stopLabelRenderedPrice = 0;
+                stopLabelRenderedText = null;
+            }
+
+            if (workingTargetPrice > 0)
+            {
+                double defaultTargetLabelOffset = GetProtectionDefaultLabelPriceOffset(false);
+                SyncProtectionLabelPlacementFromChart(targetLabelObject, targetLabelRenderedPrice, defaultTargetLabelOffset, ref targetLabelAnchorTime, ref targetLabelPriceOffset);
+                string targetLabel = BuildProtectionLabel(workingTargetPrice, originalEntryPrice, liveAveragePrice, liveQuantity);
+                if (!string.IsNullOrWhiteSpace(targetLabel))
+                {
+                    if (ShouldRedrawProtectionLabel(targetLabelObject, targetLabelRenderedText, targetLabel, targetLabelRenderedPrice, workingTargetPrice))
+                    {
+                        targetLabelObject = DrawProtectionLabel(
+                            targetLabelObject,
+                            targetLabelTag,
+                            targetLabel,
+                            workingTargetPrice,
+                            Brushes.DeepSkyBlue,
+                            defaultTargetLabelOffset,
+                            ref targetLabelAnchorTime,
+                            ref targetLabelPriceOffset);
+                        targetLabelRenderedPrice = workingTargetPrice;
+                        targetLabelRenderedText = targetLabel;
+                    }
+                }
+                else
+                {
+                    RemoveDrawObject(targetLabelTag);
+                    targetLabelObject = null;
+                    targetLabelAnchorTime = DateTime.MinValue;
+                    targetLabelPriceOffset = double.NaN;
+                    targetLabelRenderedPrice = 0;
+                    targetLabelRenderedText = null;
+                }
+            }
+            else
+            {
+                RemoveDrawObject(targetLabelTag);
+                targetLabelObject = null;
+                targetLabelAnchorTime = DateTime.MinValue;
+                targetLabelPriceOffset = double.NaN;
+                targetLabelRenderedPrice = 0;
+                targetLabelRenderedText = null;
+            }
+        }
+
+        private string BuildProtectionLabel(double linePrice, double originalEntryPrice, double liveAveragePrice, int quantity)
+        {
+            if (originalEntryPrice <= 0 || liveAveragePrice <= 0 || quantity <= 0)
+                return string.Empty;
+
+            double originalEntryDelta = linePrice - originalEntryPrice;
+            double liveAverageDelta = linePrice - liveAveragePrice;
+            double liveDollars = PriceDeltaToDollars(liveAverageDelta, quantity, GetDirectionSign());
+            double originalTicks = PriceDeltaToSignedTicks(originalEntryDelta, GetDirectionSign());
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} | {1} ({2})",
+                FormatProtectionCurrency(liveDollars),
+                FormatProtectionPriceUnitDelta(originalEntryDelta),
+                FormatProtectionTickDelta(originalTicks));
+        }
+
+        private string FormatProtectionPriceUnitDelta(double delta)
+        {
+            string format = "F" + GetPriceUnitDecimals().ToString(CultureInfo.InvariantCulture);
+            if (delta > 0)
+                return "+" + Math.Abs(delta).ToString(format, CultureInfo.InvariantCulture);
+            if (delta < 0)
+                return "-" + Math.Abs(delta).ToString(format, CultureInfo.InvariantCulture);
+            return 0.0.ToString(format, CultureInfo.InvariantCulture);
+        }
+
+        private string FormatProtectionTickDelta(double ticks)
+        {
+            double roundedTicks = Math.Round(ticks, 2, MidpointRounding.AwayFromZero);
+            if (roundedTicks > 0)
+                return "+" + roundedTicks.ToString("0.##", CultureInfo.InvariantCulture) + "t";
+            if (roundedTicks < 0)
+                return "-" + Math.Abs(roundedTicks).ToString("0.##", CultureInfo.InvariantCulture) + "t";
+            return "0t";
+        }
+
+        private string FormatProtectionCurrency(double value)
+        {
+            string prefix = value >= 0 ? "+$" : "-$";
+            return prefix + Math.Abs(value).ToString("N2", CultureInfo.InvariantCulture);
+        }
+
+        private double GetProtectionDefaultLabelPriceOffset(bool isStop)
+        {
+            double tickSize = GetSafeTickSize();
+            double direction = isStop ? 1.0 : -1.0;
+            return direction * (tickSize * ProtectionLabelDefaultTickOffset);
+        }
+
+        private double NormalizeProtectionLabelPriceOffset(double priceOffset, double defaultPriceOffset)
+        {
+            if (double.IsNaN(priceOffset) || double.IsInfinity(priceOffset))
+                return defaultPriceOffset;
+
+            double tickSize = GetSafeTickSize();
+            if (tickSize <= 0)
+                return priceOffset;
+
+            return Math.Round(priceOffset / tickSize) * tickSize;
+        }
+
+        private void SyncProtectionLabelPlacementFromChart(
+            NinjaTrader.NinjaScript.DrawingTools.Text label,
+            double renderedLinePrice,
+            double defaultPriceOffset,
+            ref DateTime cachedTime,
+            ref double cachedPriceOffset)
+        {
+            if (label == null || label.Anchor == null)
+                return;
+
+            if (label.Anchor.Time != DateTime.MinValue)
+                cachedTime = label.Anchor.Time;
+
+            double anchorPrice = label.Anchor.Price;
+            if (anchorPrice <= 0 || double.IsNaN(anchorPrice) || double.IsInfinity(anchorPrice))
+                return;
+
+            double baselinePrice = renderedLinePrice > 0
+                ? renderedLinePrice
+                : anchorPrice - defaultPriceOffset;
+            cachedPriceOffset = NormalizeProtectionLabelPriceOffset(anchorPrice - baselinePrice, defaultPriceOffset);
+        }
+
+        private DateTime ResolveProtectionLabelTime(NinjaTrader.NinjaScript.DrawingTools.Text label, DateTime cachedTime)
+        {
+            if (label != null && label.Anchor != null && label.Anchor.Time != DateTime.MinValue)
+                return label.Anchor.Time;
+
+            if (cachedTime != DateTime.MinValue)
+                return cachedTime;
+
+            if (Time != null && Time.Count > 0)
+            {
+                int barsAgo = Math.Min(CurrentBar, ProtectionLabelDefaultBarsAgo);
+                if (barsAgo >= 0 && barsAgo < Time.Count)
+                    return Time[barsAgo];
+
+                return Time[0];
+            }
+
+            return DateTime.UtcNow;
+        }
+
+        private int ResolveProtectionLabelBarsAgo(NinjaTrader.NinjaScript.DrawingTools.Text label, DateTime cachedTime)
+        {
+            DateTime anchorTime = ResolveProtectionLabelTime(label, cachedTime);
+            if (Time == null || Time.Count == 0)
+                return 0;
+
+            if (anchorTime != DateTime.MinValue && Bars != null)
+            {
+                int barIndex = Bars.GetBar(anchorTime);
+                if (barIndex >= 0)
+                    return Math.Max(0, Math.Min(CurrentBar, CurrentBar - barIndex));
+            }
+
+            return Math.Max(0, Math.Min(CurrentBar, ProtectionLabelDefaultBarsAgo));
+        }
+
+        private NinjaTrader.NinjaScript.DrawingTools.Text DrawProtectionLabel(
+            NinjaTrader.NinjaScript.DrawingTools.Text label,
+            string tag,
+            string text,
+            double linePrice,
+            Brush brush,
+            double defaultPriceOffset,
+            ref DateTime cachedTime,
+            ref double cachedPriceOffset)
+        {
+            int barsAgo = ResolveProtectionLabelBarsAgo(label, cachedTime);
+            double priceOffset = NormalizeProtectionLabelPriceOffset(cachedPriceOffset, defaultPriceOffset);
+            double anchorPrice = RoundToTick(linePrice + priceOffset);
+            var font = new SimpleFont("Arial", 11) { Bold = true };
+            label = Draw.Text(
+                this,
+                tag,
+                false,
+                text,
+                barsAgo,
+                anchorPrice,
+                0,
+                brush,
+                font,
+                System.Windows.TextAlignment.Right,
+                null,
+                null,
+                0);
+            if (label != null)
+            {
+                label.IsLocked = false;
+                if (Time != null && Time.Count > 0)
+                {
+                    int clampedBarsAgo = Math.Max(0, Math.Min(CurrentBar, barsAgo));
+                    if (clampedBarsAgo >= 0 && clampedBarsAgo < Time.Count)
+                        cachedTime = Time[clampedBarsAgo];
+                }
+
+                if (label.Anchor != null)
+                {
+                    if (label.Anchor.Time != DateTime.MinValue)
+                        cachedTime = label.Anchor.Time;
+
+                    double actualAnchorPrice = label.Anchor.Price;
+                    if (actualAnchorPrice > 0 && !double.IsNaN(actualAnchorPrice) && !double.IsInfinity(actualAnchorPrice))
+                        cachedPriceOffset = NormalizeProtectionLabelPriceOffset(actualAnchorPrice - linePrice, defaultPriceOffset);
+                }
+            }
+            return label;
+        }
+
+        private bool ShouldRedrawProtectionLabel(
+            NinjaTrader.NinjaScript.DrawingTools.Text label,
+            string renderedText,
+            string desiredText,
+            double renderedLinePrice,
+            double desiredLinePrice)
+        {
+            if (label == null)
+                return true;
+
+            if (string.IsNullOrWhiteSpace(desiredText))
+                return false;
+
+            if (!string.Equals(renderedText ?? string.Empty, desiredText ?? string.Empty, StringComparison.Ordinal))
+                return true;
+
+            if (renderedLinePrice <= 0 || desiredLinePrice <= 0)
+                return true;
+
+            return !PricesClose(renderedLinePrice, desiredLinePrice);
+        }
+
+        private HorizontalLine EnsureOriginalEntryReferenceLine(double desiredPrice)
+        {
+            if (desiredPrice <= 0)
+                return null;
+
+            originalEntryReferenceLine = FindHorizontalLine(originalEntryReferenceLineTag) ?? originalEntryReferenceLine;
+            if (originalEntryReferenceLine == null)
+                originalEntryReferenceLine = Draw.HorizontalLine(this, originalEntryReferenceLineTag, desiredPrice, Brushes.MediumPurple);
+
+            if (originalEntryReferenceLine == null)
+                return null;
+
+            ApplyOriginalEntryReferenceLineStyle(originalEntryReferenceLine);
+
+            double currentPrice = GetAnchorPrice(originalEntryReferenceLine);
+            if (currentPrice <= 0 || !PricesClose(currentPrice, desiredPrice))
+                SetAnchorPrice(originalEntryReferenceLine, desiredPrice);
+
+            return originalEntryReferenceLine;
+        }
+
+        private bool PricesClose(double left, double right)
+        {
+            double tolerance = Math.Max(1e-6, GetSafeTickSize() * 0.25);
+            return Math.Abs(left - right) <= tolerance;
+        }
+
         [NinjaScriptProperty]
         [Display(Name = "Trade Direction", GroupName = "Parameters", Order = 0)]
         public ScaleLadderTradeDirection TradeDirection { get; set; }
@@ -910,14 +1879,33 @@ namespace NinjaTrader.NinjaScript.Indicators
         public ScaleLadderSpacingUnit SpacingUnit { get; set; }
 
         [NinjaScriptProperty]
-        [Range(1, 100000)]
-        [Display(Name = "Stop Ticks", GroupName = "Parameters", Order = 3)]
+        [Range(2, 100)]
+        [Display(Name = "Base Atr Period", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 0)]
+        public int AtrPeriod { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "StopType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 1)]
+        public ScaleLadderProtectionKind StopType { get; set; }
+
+        [Browsable(false)]
         public int StopTicks { get; set; }
 
         [NinjaScriptProperty]
-        [Range(1, 100000)]
-        [Display(Name = "Target Ticks", GroupName = "Parameters", Order = 4)]
+        [Range(0.01, 100000.0)]
+        [Display(Name = "StopValue", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 2)]
+        public double StopValue { get; set; }
+
+        [NinjaScriptProperty]
+        [Display(Name = "TargetType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 3)]
+        public ScaleLadderProtectionKind TargetType { get; set; }
+
+        [Browsable(false)]
         public int TargetTicks { get; set; }
+
+        [NinjaScriptProperty]
+        [Range(0.01, 100000.0)]
+        [Display(Name = "TargetValue", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 4)]
+        public double TargetValue { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 1000)]
@@ -943,20 +1931,19 @@ namespace NinjaTrader.NinjaScript.Indicators
         [Display(Name = "Show Guide Lines", GroupName = "Display", Order = 9)]
         public bool ShowGuideLines { get; set; }
 
-        [NinjaScriptProperty]
-        [Display(Name = "Show Level Labels", GroupName = "Display", Order = 10)]
+        [Browsable(false)]
         public bool ShowLevelLabels { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Show Summary Panel", GroupName = "Display", Order = 11)]
+        [Display(Name = "Show Summary Panel", GroupName = "Display", Order = 10)]
         public bool ShowSummaryPanel { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Reset Anchors", GroupName = "Display", Order = 12)]
+        [Display(Name = "Reset Anchors", GroupName = "Display", Order = 11)]
         public bool ResetAnchors { get; set; }
 
         [XmlIgnore]
-        [Display(Name = "Entry Line Brush", GroupName = "Display", Order = 13)]
+        [Display(Name = "Entry Line Brush", GroupName = "Display", Order = 12)]
         public Brush EntryLineBrush { get; set; }
 
         [Browsable(false)]
@@ -967,7 +1954,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Risk Side Brush", GroupName = "Display", Order = 14)]
+        [Display(Name = "Risk Side Brush", GroupName = "Display", Order = 13)]
         public Brush RiskSideBrush { get; set; }
 
         [Browsable(false)]
@@ -978,7 +1965,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Reward Side Brush", GroupName = "Display", Order = 15)]
+        [Display(Name = "Reward Side Brush", GroupName = "Display", Order = 14)]
         public Brush RewardSideBrush { get; set; }
 
         [Browsable(false)]
@@ -989,7 +1976,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Summary Brush", GroupName = "Display", Order = 16)]
+        [Display(Name = "Summary Brush", GroupName = "Display", Order = 15)]
         public Brush SummaryBrush { get; set; }
 
         [Browsable(false)]
