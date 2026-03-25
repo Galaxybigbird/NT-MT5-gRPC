@@ -1190,14 +1190,9 @@ public TrailingActivationType TrailingStopType
                 
                 LogInfo("GRPC", $"MT5 closure details - Reason: {closureReason}, Ticket: {mt5TicketStr}, Instrument: {instrument}");
                 
-                // Find the corresponding NT position by BaseID
-                // Look for an account that has positions, not just the first account
-                var account = Account.All.FirstOrDefault(a => a.Positions.Count > 0);
-                if (account == null)
-                {
-                    // Fallback to any account if no account has positions
-                    account = Account.All.FirstOrDefault();
-                }
+                // Resolve the intended NT account first so late MT5 close notifications do not
+                // fall back to an unrelated sim/backtest account after the owning strategy exits.
+                var account = ResolveAccountForMt5Closure(baseId, notificationJson, instrument);
                 
                 if (account == null)
                 {
@@ -1565,6 +1560,71 @@ public TrailingActivationType TrailingStopType
             }
 
             return false;
+        }
+
+        private Account ResolveAccountForMt5Closure(string baseId, string notificationJson, string instrument)
+        {
+            string preferredAccountName = ExtractJsonValue(notificationJson, "nt_account_name");
+            if (string.IsNullOrWhiteSpace(preferredAccountName))
+                preferredAccountName = ExtractJsonValue(notificationJson, "account_name");
+
+            if (string.IsNullOrWhiteSpace(preferredAccountName) &&
+                tradeSyncService != null &&
+                tradeSyncService.TryGetTrade(baseId, out var record) &&
+                record != null)
+            {
+                preferredAccountName = record.AccountName;
+            }
+
+            if (string.IsNullOrWhiteSpace(preferredAccountName))
+            {
+                lock (_activeNtTradesLock)
+                {
+                    if (activeNtTrades.TryGetValue(baseId, out var details) && details != null)
+                        preferredAccountName = details.NtAccountName;
+                }
+            }
+
+            Account account = FindAccountByName(preferredAccountName);
+            if (account != null)
+                return account;
+
+            string instrumentName = (instrument ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(instrumentName))
+            {
+                account = Account.All.FirstOrDefault(a =>
+                    a != null &&
+                    a.Positions.Any(p => DoesPositionMatchInstrument(p, instrumentName) && p.Quantity != 0));
+                if (account != null)
+                    return account;
+            }
+
+            account = Account.All.FirstOrDefault(a => a != null && a.Positions.Count > 0);
+            return account ?? Account.All.FirstOrDefault();
+        }
+
+        private static Account FindAccountByName(string accountName)
+        {
+            string normalized = (accountName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+                return null;
+
+            return Account.All.FirstOrDefault(a =>
+                a != null &&
+                string.Equals((a.Name ?? string.Empty).Trim(), normalized, StringComparison.OrdinalIgnoreCase));
+        }
+
+        private static bool DoesPositionMatchInstrument(NinjaTrader.Cbi.Position position, string instrumentName)
+        {
+            if (position == null || position.Instrument == null)
+                return false;
+
+            string normalized = (instrumentName ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(normalized))
+                return false;
+
+            return string.Equals(position.Instrument.FullName, normalized, StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(position.Instrument.MasterInstrument?.Name, normalized, StringComparison.OrdinalIgnoreCase);
         }
 
         private void CancelProtectiveOrdersForBaseId(Account account, string baseId)

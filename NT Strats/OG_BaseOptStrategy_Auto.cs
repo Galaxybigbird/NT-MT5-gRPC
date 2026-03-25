@@ -291,7 +291,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         private DateTime dailyPnLLimitProfitCandidateAt = DateTime.MinValue;
         private double dailyPnLLimitProfitCandidatePnL = 0.0;
         private const double DailyPnLLimitProfitConfirmSeconds = 0.75;
-        private const int MaxTradesPerEntry = 10;
         private const int ManualOrderSeriesIndex = 1;
         private const string ManualCloseReason = "NT_MANUAL_BUTTON";
         private const string StopLossCloseReason = "NT_STOP_CLOSE";
@@ -771,6 +770,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ShowVwapMrVisuals = true;
                 ShowChecklistVisuals = true;
                 ShowStatusPanelVisuals = true;
+                ShowBiasButtons = true;
+                ShowMiscButtons = true;
                 ShowTradePnlTags = true;
                 showChecklistVisuals = ShowChecklistVisuals;
                 showStatusPanelVisuals = ShowStatusPanelVisuals;
@@ -791,7 +792,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnableScaleInTrailing = true;
                 ScaleInDrawdownTicks = 30;
                 ScaleInTradesToAdd = 1;
-                ScaleInMaxTrades = 5;
+                ScaleInMaxTrades = 0;
                 ScaleInTrailActivationMode = BreakEvenTriggerModeOption.Dollars;
                 ScaleInTrailActivationValue = 500;
                 ScaleInProfitLockMode = BreakEvenTriggerModeOption.Dollars;
@@ -896,7 +897,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 htfSecondaryIndex = nextIndex;
                 AddDataSeries(BarsPeriodType.Minute, HtfSwingSecondaryMinutes);
 
-                EntriesPerDirection = MaxTradesPerEntry;
+                TryEnsureEntriesPerDirectionCapacity(GetConfiguredEntriesPerDirectionCapacity());
 
                     // optional: log parameters once per iteration for diagnostics
                 if (Debug)
@@ -1020,8 +1021,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     // Safety: flatten any open position when the strategy terminates to avoid naked risk.
                     TryFlattenActivePosition("strategy_terminated");
-                    if (Account != null && Instrument != null && GetAccountInstrumentSignedQuantity() == 0)
-                        PublishExternallyFlattenedTrackedCloses("strategy_terminated");
+                    bool forcedClosePublished = PublishExternallyFlattenedTrackedCloses("strategy_terminated");
+                    if (forcedClosePublished)
+                        StrategyLogInfo("[SAFETY] Published forced hedge close request(s) due to strategy_terminated.");
                 }
 
                 ResetTradeState(preserveProtection);
@@ -3775,6 +3777,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            if (shutdownInProgress || HasTrackedTradeCloseSettling())
+                return;
+
             TradeRuntimeState activeState;
             if (!string.IsNullOrEmpty(activeTradeId) && TryGetTradeState(activeTradeId, out activeState) && activeState != null)
             {
@@ -5219,6 +5224,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             int submitted = 0;
             int nativeProtectionCount = 0;
+            int remainingAccountQty = Math.Abs(GetAccountInstrumentSignedQuantity());
+            if (remainingAccountQty <= 0 && Position != null && Position.MarketPosition != MarketPosition.Flat)
+                remainingAccountQty = Math.Abs(Position.Quantity);
             foreach (TradeRuntimeState state in GetOpenManagedStates())
             {
                 if (state == null || state.RemainingQuantity <= 0 || state.EntryOrderPending)
@@ -5232,6 +5240,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     CancelOpposingProtectiveOrder(state, stopExit);
                     nativeProtectionCount++;
+                    remainingAccountQty = Math.Max(0, remainingAccountQty - Math.Max(1, state.RemainingQuantity));
                     continue;
                 }
 
@@ -5240,6 +5249,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 int qty = Math.Max(1, state.RemainingQuantity);
                 if (state.Bootstrapped && Position != null && Position.MarketPosition != MarketPosition.Flat)
                     qty = Math.Min(qty, Math.Abs(Position.Quantity));
+                if (remainingAccountQty > 0)
+                    qty = Math.Min(qty, remainingAccountQty);
                 if (qty <= 0)
                     continue;
 
@@ -5250,6 +5261,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 else if (state.EntrySide == MarketPosition.Short)
                     ExitShort(qty, exitSignal, fromEntry);
                 submitted++;
+                remainingAccountQty = Math.Max(0, remainingAccountQty - qty);
             }
 
             if (submitted == 0 && nativeProtectionCount == 0 && Position != null && Position.MarketPosition != MarketPosition.Flat)
@@ -11640,26 +11652,46 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private int GetConfiguredEntriesPerDirectionCapacity()
+        {
+            int capacity = 1;
+            capacity = Math.Max(capacity, TradesPerEntry);
+            capacity = Math.Max(capacity, ChopTradesPerEntry);
+            capacity = Math.Max(capacity, TradesPerStraddleEntry);
+            capacity = Math.Max(capacity, ScaleInTradesToAdd);
+            if (ScaleInMaxTrades > 0)
+                capacity = Math.Max(capacity, ScaleInMaxTrades);
+            if (tradesPerEntryOverride > 0)
+                capacity = Math.Max(capacity, tradesPerEntryOverride);
+            if (chopTradesPerEntryOverride > 0)
+                capacity = Math.Max(capacity, chopTradesPerEntryOverride);
+            return Math.Max(1, capacity);
+        }
+
+        private void TryEnsureEntriesPerDirectionCapacity(int required)
+        {
+            required = Math.Max(1, required);
+            if (EntriesPerDirection >= required)
+                return;
+
+            try
+            {
+                EntriesPerDirection = required;
+            }
+            catch (Exception ex)
+            {
+                if (Debug)
+                    StrategyLogDebug($"[UI] Failed to update EntriesPerDirection to {required}: {ex.Message}");
+            }
+        }
+
         private int GetEffectiveTradesPerEntry()
         {
             int effective = tradesPerEntryOverride > 0 ? tradesPerEntryOverride : TradesPerEntry;
             if (effective < 1)
                 effective = 1;
-            if (effective > MaxTradesPerEntry)
-                effective = MaxTradesPerEntry;
 
-            if (EntriesPerDirection < effective)
-            {
-                try
-                {
-                    EntriesPerDirection = effective;
-                }
-                catch (Exception ex)
-                {
-                    if (Debug)
-                        StrategyLogDebug($"[UI] Failed to update EntriesPerDirection to {effective}: {ex.Message}");
-                }
-            }
+            TryEnsureEntriesPerDirectionCapacity(effective);
 
             return effective;
         }
@@ -11690,21 +11722,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             int effective = chopTradesPerEntryOverride > 0 ? chopTradesPerEntryOverride : ChopTradesPerEntry;
             if (effective < 1)
                 effective = 1;
-            if (effective > MaxTradesPerEntry)
-                effective = MaxTradesPerEntry;
 
-            if (EntriesPerDirection < effective)
-            {
-                try
-                {
-                    EntriesPerDirection = effective;
-                }
-                catch (Exception ex)
-                {
-                    if (Debug)
-                        StrategyLogDebug($"[UI] Failed to update EntriesPerDirection to {effective}: {ex.Message}");
-                }
-            }
+            TryEnsureEntriesPerDirectionCapacity(effective);
 
             return effective;
         }
@@ -11714,21 +11733,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             int effective = TradesPerStraddleEntry;
             if (effective < 1)
                 effective = 1;
-            if (effective > MaxTradesPerEntry)
-                effective = MaxTradesPerEntry;
 
-            if (EntriesPerDirection < effective)
-            {
-                try
-                {
-                    EntriesPerDirection = effective;
-                }
-                catch (Exception ex)
-                {
-                    if (Debug)
-                        StrategyLogDebug($"[STRADDLE] Failed to update EntriesPerDirection to {effective}: {ex.Message}");
-                }
-            }
+            TryEnsureEntriesPerDirectionCapacity(effective);
 
             return effective;
         }
@@ -12508,6 +12514,30 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private void InvokeBaseOnOrderUpdateSafely(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string nativeError)
+        {
+            try
+            {
+                base.OnOrderUpdate(order, limitPrice, stopPrice, quantity, filled, averageFillPrice, orderState, time, error, nativeError);
+            }
+            catch (Exception ex) when (ex is IndexOutOfRangeException || ex is NullReferenceException)
+            {
+                string orderName = !string.IsNullOrWhiteSpace(order?.Name) ? order.Name : "<unknown>";
+                string signalName = !string.IsNullOrWhiteSpace(order?.FromEntrySignal) ? order.FromEntrySignal : "<none>";
+                string accountName = !string.IsNullOrWhiteSpace(Account?.Name) ? Account.Name : "<unknown>";
+                StrategyLogError(string.Format("[AUTO][ORDERUPD] Suppressed {0} in base.OnOrderUpdate acct={1} order={2} signal={3} state={4}: {5}",
+                    ex.GetType().Name,
+                    accountName,
+                    orderName,
+                    signalName,
+                    State,
+                    ex.Message));
+
+                if (Debug)
+                    StrategyLogDebug(string.Format("{0:yyyy-MM-dd HH:mm:ss}: Continuing after base.OnOrderUpdate {1} for order '{2}'", time, ex.GetType().Name, orderName));
+            }
+        }
+
         private bool IsLiveExecutionContext(Execution execution)
         {
             if (execution == null)
@@ -12616,10 +12646,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 bool hasWorkingEntry = HasWorkingEntryOrders();
                 if (!hasWorkingEntry)
                 {
+                    bool forcedClosePublished = false;
+                    if (!HasTrackedTradeCloseSettling())
+                        forcedClosePublished = PublishExternallyFlattenedTrackedCloses("position_flat");
+
                     CancelWorkingEntryOrders("position_flat");
                     foreach (var st in tradeStates.Values.ToList())
                         CancelProtectiveOrders(st);
                     pending = PublishPendingCloses();
+                    if (forcedClosePublished)
+                        StrategyLogInfo("[AUTO][SYNC] Published forced hedge close request(s) for externally flattened position.");
                     if (!pending)
                     {
                         ResetTradeState();
@@ -13229,6 +13265,20 @@ namespace NinjaTrader.NinjaScript.Strategies
             return false;
         }
 
+        private static bool LooksLikeStopOrder(Order order)
+        {
+            if (order == null)
+                return false;
+
+            string name = order.Name ?? string.Empty;
+            if (name.IndexOf("_BS", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+            if (name.IndexOf("stop", StringComparison.OrdinalIgnoreCase) >= 0)
+                return true;
+
+            return order.OrderType == OrderType.StopMarket || order.OrderType == OrderType.StopLimit;
+        }
+
         private string FormatHtfEntrySummary(TradeRuntimeState state)
         {
             if (state == null || !state.EntryHtfEnabled)
@@ -13567,35 +13617,37 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         protected override void OnOrderUpdate(Order order, double limitPrice, double stopPrice, int quantity, int filled, double averageFillPrice, OrderState orderState, DateTime time, ErrorCode error, string nativeError)
         {
-            base.OnOrderUpdate(order, limitPrice, stopPrice, quantity, filled, averageFillPrice, orderState, time, error, nativeError);
+            InvokeBaseOnOrderUpdateSafely(order, limitPrice, stopPrice, quantity, filled, averageFillPrice, orderState, time, error, nativeError);
 
-            if (order == null)
-                return;
-
-            string name = order.Name ?? "<null>";
-            bool looksManual = false;
-            if (!string.IsNullOrEmpty(name))
+            try
             {
-                looksManual = name.StartsWith("L", StringComparison.OrdinalIgnoreCase) ||
-                              name.StartsWith("S", StringComparison.OrdinalIgnoreCase) ||
-                              name.IndexOf("MAN", StringComparison.OrdinalIgnoreCase) >= 0;
-            }
+                if (order == null)
+                    return;
 
-            if (looksManual || Debug)
-            {
-                StrategyLogInfo(string.Format("[AUTO][ORDERUPD] name={0} fromEntry={1} action={2} state={3} qty={4} filled={5} oco={6} stop={7} limit={8} error={9} native='{10}'",
-                    name,
-                    order.FromEntrySignal ?? "<null>",
-                    order.OrderAction,
-                    orderState,
-                    order.Quantity,
-                    order.Filled,
-                    order.Oco ?? "<none>",
-                    stopPrice,
-                    limitPrice,
-                    error,
-                    string.IsNullOrEmpty(nativeError) ? "<none>" : nativeError));
-            }
+                string name = order.Name ?? "<null>";
+                bool looksManual = false;
+                if (!string.IsNullOrEmpty(name))
+                {
+                    looksManual = name.StartsWith("L", StringComparison.OrdinalIgnoreCase) ||
+                                  name.StartsWith("S", StringComparison.OrdinalIgnoreCase) ||
+                                  name.IndexOf("MAN", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+
+                if (looksManual || Debug)
+                {
+                    StrategyLogInfo(string.Format("[AUTO][ORDERUPD] name={0} fromEntry={1} action={2} state={3} qty={4} filled={5} oco={6} stop={7} limit={8} error={9} native='{10}'",
+                        name,
+                        order.FromEntrySignal ?? "<null>",
+                        order.OrderAction,
+                        orderState,
+                        order.Quantity,
+                        order.Filled,
+                        order.Oco ?? "<none>",
+                        stopPrice,
+                        limitPrice,
+                        error,
+                        string.IsNullOrEmpty(nativeError) ? "<none>" : nativeError));
+                }
 
             if (!string.IsNullOrEmpty(name) &&
                 (orderState == OrderState.Cancelled || orderState == OrderState.Rejected || orderState == OrderState.Unknown))
@@ -13852,9 +13904,28 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
-            DetectManualStopTargetAdjustments(order, limitPrice, stopPrice, orderState);
-            DetectManualChopEntryAdjustments(order, limitPrice, orderState);
-            HandleStopUpdateErrors(order, stopPrice, orderState, error, nativeError);
+                DetectManualStopTargetAdjustments(order, limitPrice, stopPrice, orderState);
+                DetectManualChopEntryAdjustments(order, limitPrice, orderState);
+                HandleStopUpdateErrors(order, stopPrice, orderState, error, nativeError);
+            }
+            catch (Exception ex) when (ex is IndexOutOfRangeException || ex is NullReferenceException)
+            {
+                string orderName = !string.IsNullOrWhiteSpace(order?.Name) ? order.Name : "<unknown>";
+                string signalName = !string.IsNullOrWhiteSpace(order?.FromEntrySignal) ? order.FromEntrySignal : "<none>";
+                string accountName = !string.IsNullOrWhiteSpace(Account?.Name) ? Account.Name : "<unknown>";
+                string positionSide = Position != null ? Position.MarketPosition.ToString() : "<null>";
+                int positionQty = Position != null ? Position.Quantity : 0;
+                StrategyLogError(string.Format("[AUTO][ORDERUPD] Suppressed {0} acct={1} order={2} signal={3} state={4} currentBar={5} pos={6} qty={7}: {8}",
+                    ex.GetType().Name,
+                    accountName,
+                    orderName,
+                    signalName,
+                    State,
+                    CurrentBar,
+                    positionSide,
+                    positionQty,
+                    ex.Message));
+            }
         }
 
         private string ResolveTradeIdFromOrder(Order order)
@@ -15756,26 +15827,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (state == null)
                 return false;
 
-            Order order = isStop ? state.StopOrder : state.TargetOrder;
+            Order order = GetLiveNativeProtectionOrder(state, isStop);
             return order != null && !IsTerminalState(order.OrderState);
         }
 
         private bool IsNativeProtectionOrderCoveringSyntheticTouch(TradeRuntimeState state, bool isStop, double linePrice)
         {
-            if (!HasLiveNativeProtectionOrder(state, isStop))
+            Order order = GetLiveNativeProtectionOrder(state, isStop);
+            if (order == null || IsTerminalState(order.OrderState))
                 return false;
 
-            if (linePrice <= 0)
-                return true;
-
-            Order order = isStop ? state.StopOrder : state.TargetOrder;
-            double protectionPrice = isStop ? order.StopPrice : order.LimitPrice;
-            if (protectionPrice <= 0)
-                protectionPrice = isStop ? state.LastStopPrice : state.LastTargetPrice;
-            if (protectionPrice <= 0)
-                return true;
-
-            return PricesClose(protectionPrice, linePrice);
+            return IsProtectionOrderPriceCoveringSyntheticTouch(state, order, isStop, linePrice);
         }
 
         private void CancelOpposingProtectiveOrder(TradeRuntimeState state, bool stopExit, Order filledOrder = null)
@@ -15785,13 +15847,86 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (stopExit)
             {
-                TryCancelOrder(state.TradeId, state.TargetOrder, filledOrder, "target");
+                Order targetOrder = GetLiveNativeProtectionOrder(state, false);
+                TryCancelOrder(state.TradeId, targetOrder, filledOrder, "target");
                 state.TargetOrder = null;
                 return;
             }
 
-            TryCancelOrder(state.TradeId, state.StopOrder, filledOrder, "stop");
+            Order stopOrder = GetLiveNativeProtectionOrder(state, true);
+            TryCancelOrder(state.TradeId, stopOrder, filledOrder, "stop");
             state.StopOrder = null;
+        }
+
+        private Order GetLiveNativeProtectionOrder(TradeRuntimeState state, bool isStop)
+        {
+            if (state == null)
+                return null;
+
+            Order trackedOrder = isStop ? state.StopOrder : state.TargetOrder;
+            if (trackedOrder != null && !IsTerminalState(trackedOrder.OrderState))
+                return trackedOrder;
+
+            if (Account == null || Account.Orders == null)
+                return trackedOrder;
+
+            foreach (Order accountOrder in Account.Orders)
+            {
+                if (accountOrder == null || IsTerminalState(accountOrder.OrderState))
+                    continue;
+                if (isStop)
+                {
+                    if (!LooksLikeStopOrder(accountOrder))
+                        continue;
+                }
+                else if (!LooksLikeTargetOrder(accountOrder))
+                {
+                    continue;
+                }
+
+                string resolvedTradeId = ResolveTradeIdFromOrder(accountOrder);
+                if (!string.Equals(resolvedTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                if (isStop)
+                    state.StopOrder = accountOrder;
+                else
+                    state.TargetOrder = accountOrder;
+                return accountOrder;
+            }
+
+            return trackedOrder;
+        }
+
+        private bool IsProtectionOrderPriceCoveringSyntheticTouch(TradeRuntimeState state, Order order, bool isStop, double linePrice)
+        {
+            if (state == null || order == null)
+                return false;
+
+            if (linePrice <= 0)
+                return true;
+
+            double protectionPrice = isStop ? order.StopPrice : order.LimitPrice;
+            if (protectionPrice <= 0)
+                protectionPrice = isStop ? state.LastStopPrice : state.LastTargetPrice;
+            if (protectionPrice <= 0)
+                return true;
+
+            double tolerance = Instrument?.MasterInstrument?.TickSize ?? TickSize;
+            if (tolerance <= 0)
+                tolerance = 1e-6;
+
+            if (state.EntrySide == MarketPosition.Long)
+                return isStop
+                    ? protectionPrice >= linePrice - (tolerance * 0.5)
+                    : protectionPrice <= linePrice + (tolerance * 0.5);
+
+            if (state.EntrySide == MarketPosition.Short)
+                return isStop
+                    ? protectionPrice <= linePrice + (tolerance * 0.5)
+                    : protectionPrice >= linePrice - (tolerance * 0.5);
+
+            return PricesClose(protectionPrice, linePrice);
         }
 
         private void TryCancelOrder(string tradeId, Order order, Order filledOrder, string label)
@@ -16558,21 +16693,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualTradePanel.Children.Add(manualSellButton);
                     manualButtonsPanel.Children.Add(manualHaltPanel);
                     manualButtonsPanel.Children.Add(manualTradePanel);
-                    biasTogglePanel.Children.Add(new TextBlock
+                    if (ShowBiasButtons)
                     {
-                        Text = "Bias",
-                        Margin = new Thickness(2, 4, 6, 2),
-                        VerticalAlignment = VerticalAlignment.Center,
-                        Foreground = Brushes.White
-                    });
-                    biasButtonsPanel.Children.Add(biasBothToggleButton);
-                    biasButtonsPanel.Children.Add(biasLongToggleButton);
-                    biasButtonsPanel.Children.Add(biasShortToggleButton);
-                    biasButtonsPanel.Children.Add(vwapGateToggleButton);
-                    biasTogglePanel.Children.Add(biasButtonsPanel);
-                    toggleButtonsPanel.Children.Add(pnlTagsToggleButton);
-                    toggleButtonsPanel.Children.Add(reverseSignalToggleButton);
-                    toggleButtonsPanel.Children.Add(syntheticAutoRetakeToggleButton);
+                        biasTogglePanel.Children.Add(new TextBlock
+                        {
+                            Text = "Bias",
+                            Margin = new Thickness(2, 4, 6, 2),
+                            VerticalAlignment = VerticalAlignment.Center,
+                            Foreground = Brushes.White
+                        });
+                        biasButtonsPanel.Children.Add(biasBothToggleButton);
+                        biasButtonsPanel.Children.Add(biasLongToggleButton);
+                        biasButtonsPanel.Children.Add(biasShortToggleButton);
+                        biasButtonsPanel.Children.Add(vwapGateToggleButton);
+                        biasTogglePanel.Children.Add(biasButtonsPanel);
+                    }
+                    if (ShowMiscButtons)
+                    {
+                        toggleButtonsPanel.Children.Add(pnlTagsToggleButton);
+                        toggleButtonsPanel.Children.Add(reverseSignalToggleButton);
+                        toggleButtonsPanel.Children.Add(syntheticAutoRetakeToggleButton);
+                    }
                     manualOffsetPanel.Children.Add(manualLimitButton);
                     manualOffsetPanel.Children.Add(manualStopButton);
                     manualOffsetPanel.Children.Add(manualPendingPlacementToggleButton);
@@ -16604,8 +16745,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     addOnTradePanel.Children.Add(addOnTradeButton);
 
                     chartTraderButtonPanel.Children.Add(manualButtonsPanel);
-                    chartTraderButtonPanel.Children.Add(biasTogglePanel);
-                    chartTraderButtonPanel.Children.Add(toggleButtonsPanel);
+                    if (ShowBiasButtons)
+                        chartTraderButtonPanel.Children.Add(biasTogglePanel);
+                    if (ShowMiscButtons)
+                        chartTraderButtonPanel.Children.Add(toggleButtonsPanel);
                     chartTraderButtonPanel.Children.Add(manualOffsetPanel);
                     chartTraderButtonPanel.Children.Add(visualTogglePanel);
                     chartTraderButtonPanel.Children.Add(tradesPerEntryPanel);
@@ -18059,8 +18202,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            int clamped = Math.Max(1, Math.Min(MaxTradesPerEntry, parsed));
+            int clamped = Math.Max(1, parsed);
             tradesPerEntryOverride = clamped;
+            TryEnsureEntriesPerDirectionCapacity(clamped);
             StrategyLogInfo($"[UI] TradesPerEntry override set to {clamped}.");
             UpdateTradesPerEntryInput(true);
         }
@@ -18092,8 +18236,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            int clamped = Math.Max(1, Math.Min(MaxTradesPerEntry, parsed));
+            int clamped = Math.Max(1, parsed);
             chopTradesPerEntryOverride = clamped;
+            TryEnsureEntriesPerDirectionCapacity(clamped);
             StrategyLogInfo($"[UI] ChopTradesPerEntry override set to {clamped}.");
             UpdateChopTradesPerEntryInput(true);
         }
@@ -19103,7 +19248,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(1, 10), Display(Name = "MinSignalsToEnterShort", GroupName = "01 - Bias & Voting", Order = 2)]
         public int MinSignalsToEnterShort { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "TradesPerEntry", GroupName = "01 - Bias & Voting", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "TradesPerEntry", GroupName = "01 - Bias & Voting", Order = 3)]
         public int TradesPerEntry { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Treat Multi-Entry as 1 Trade?", GroupName = "01 - Bias & Voting", Order = 4)]
@@ -19235,6 +19380,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Display(Name = "Show Status Visuals", GroupName = "02 - Indicator Visuals", Order = 8)]
         public bool ShowStatusPanelVisuals { get; set; }
 
+        [NinjaScriptProperty, Display(Name = "Bias Buttons", GroupName = "02 - Indicator Visuals", Order = 9)]
+        public bool ShowBiasButtons { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Misc Buttons", GroupName = "02 - Indicator Visuals", Order = 10)]
+        public bool ShowMiscButtons { get; set; }
+
         [NinjaScriptProperty, Display(Name = "Show Trade PnL Tags", GroupName = "02 - Filters", Order = 26)]
         public bool ShowTradePnlTags { get; set; }
 
@@ -19298,7 +19449,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(2, 200), Display(Name = "Chop Range Lookback Bars", GroupName = "02 - Chop Trading", Order = 2)]
         public int ChopRangeLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "Chop Trades Per Entry", GroupName = "02 - Chop Trading", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Chop Trades Per Entry", GroupName = "02 - Chop Trading", Order = 3)]
         public int ChopTradesPerEntry { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Chop Stop Type", GroupName = "02 - Chop Trading", Order = 4)]
@@ -19547,7 +19698,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(-50, 50), Display(Name = "Straddle Zone Offset (ticks)", GroupName = "09 - Straddle", Order = 5)]
         public int StraddleZoneOffsetTicks { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "Trades Per Straddle Entry", GroupName = "09 - Straddle", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "Trades Per Straddle Entry", GroupName = "09 - Straddle", Order = 6)]
         public int TradesPerStraddleEntry { get; set; }
 
         [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Stop Mult", GroupName = "09 - Straddle", Order = 7)]
@@ -19577,7 +19728,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "10 - Scale-In", Order = 4)]
         public int ScaleInTradesToAdd { get; set; }
 
-        [NinjaScriptProperty, Range(0, 50), Display(Name = "Scale-In Max Trades", GroupName = "10 - Scale-In", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Max Trades", GroupName = "10 - Scale-In", Order = 5)]
         public int ScaleInMaxTrades { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "10 - Scale-In", Order = 6)]
