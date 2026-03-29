@@ -19278,226 +19278,226 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0, 100), Display(Name = "RSI Chop Short Threshold", GroupName = "01 - Bias & Voting", Order = 12)]
         public int RsiChopShortThreshold { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable ORB Filter", GroupName = "02 - Filters", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Enable ORB Filter", GroupName = "05 - Filters", Order = 0)]
         public bool EnableOrbFilter { get; set; }
 
-        [NinjaScriptProperty, Range(1, 120), Display(Name = "ORB Minutes", GroupName = "02 - Filters", Order = 1)]
+        [NinjaScriptProperty, Range(1, 120), Display(Name = "ORB Minutes", GroupName = "05 - Filters", Order = 1)]
         public int OrbMinutes { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Use Fixed ORB Start Time", GroupName = "02 - Filters", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Use Fixed ORB Start Time", GroupName = "05 - Filters", Order = 2)]
         public bool OrbUseFixedStartTime { get; set; }
 
-        [NinjaScriptProperty, Range(0, 23), Display(Name = "ORB Start Hour (chart time)", GroupName = "02 - Filters", Order = 3)]
+        [NinjaScriptProperty, Range(0, 23), Display(Name = "ORB Start Hour (chart time)", GroupName = "05 - Filters", Order = 3)]
         public int OrbStartHour { get; set; }
 
-        [NinjaScriptProperty, Range(0, 59), Display(Name = "ORB Start Minute (chart time)", GroupName = "02 - Filters", Order = 4)]
+        [NinjaScriptProperty, Range(0, 59), Display(Name = "ORB Start Minute (chart time)", GroupName = "05 - Filters", Order = 4)]
         public int OrbStartMinute { get; set; }
 
-        [NinjaScriptProperty, Range(0, 240), Display(Name = "ORB Pre-Start Block (min)", GroupName = "02 - Filters", Order = 5)]
+        [NinjaScriptProperty, Range(0, 240), Display(Name = "ORB Pre-Start Block (min)", GroupName = "05 - Filters", Order = 5)]
         public int OrbPreStartBlockMinutes { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Chop Filter", GroupName = "02 - Filters", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "Enable Chop Filter", GroupName = "05 - Filters", Order = 6)]
         public bool EnableChopFilter { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "Chop Lookback Bars", GroupName = "02 - Filters", Order = 7)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "Chop Lookback Bars", GroupName = "05 - Filters", Order = 7)]
         public int ChopLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100), Display(Name = "Chop ADX Period", GroupName = "02 - Filters", Order = 8)]
+        [NinjaScriptProperty, Range(2, 100), Display(Name = "Chop ADX Period", GroupName = "05 - Filters", Order = 8)]
         public int ChopAdxPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "Chop ADX Threshold", GroupName = "02 - Filters", Order = 9)]
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "Chop ADX Threshold", GroupName = "05 - Filters", Order = 9)]
         public int ChopAdxThreshold { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "Chop Bollinger Period", GroupName = "02 - Filters", Order = 10)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "Chop Bollinger Period", GroupName = "05 - Filters", Order = 10)]
         public int ChopBollingerPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 5.0), Display(Name = "Chop Bollinger StdDev", GroupName = "02 - Filters", Order = 11)]
+        [NinjaScriptProperty, Range(0.5, 5.0), Display(Name = "Chop Bollinger StdDev", GroupName = "05 - Filters", Order = 11)]
         public double ChopBollingerStdDev { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "Chop BB Width %", GroupName = "02 - Filters", Order = 12)]
+        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "Chop BB Width %", GroupName = "05 - Filters", Order = 12)]
         public double ChopBBWidthPct { get; set; }
 
-        [NinjaScriptProperty, Range(0, 20), Display(Name = "Chop Breakout Buffer (ticks)", GroupName = "02 - Filters", Order = 13)]
+        [NinjaScriptProperty, Range(0, 20), Display(Name = "Chop Breakout Buffer (ticks)", GroupName = "05 - Filters", Order = 13)]
         public int ChopBreakoutBufferTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable HTF Swing Gate", GroupName = "02 - Filters", Order = 14)]
+        [NinjaScriptProperty, Display(Name = "Enable HTF Swing Gate", GroupName = "05 - Filters", Order = 14)]
         public bool EnableHtfSwingGate { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "HTF Swing Mode", GroupName = "02 - Filters", Order = 15)]
+        [NinjaScriptProperty, Display(Name = "HTF Swing Mode", GroupName = "05 - Filters", Order = 15)]
         public HtfSwingModeOption HtfSwingMode { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "HTF Swing Action", GroupName = "02 - Filters", Order = 16)]
+        [NinjaScriptProperty, Display(Name = "HTF Swing Action", GroupName = "05 - Filters", Order = 16)]
         public HtfSwingActionOption HtfSwingAction { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "HTF Swing Lookback Bars", GroupName = "02 - Filters", Order = 17)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "HTF Swing Lookback Bars", GroupName = "05 - Filters", Order = 17)]
         public int HtfSwingLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "HTF Swing Pivot Strength", GroupName = "02 - Filters", Order = 18)]
+        [NinjaScriptProperty, Range(1, 10), Display(Name = "HTF Swing Pivot Strength", GroupName = "05 - Filters", Order = 18)]
         public int HtfSwingPivotStrength { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "HTF Swing Distance (ATR)", GroupName = "02 - Filters", Order = 19)]
+        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "HTF Swing Distance (ATR)", GroupName = "05 - Filters", Order = 19)]
         public double HtfSwingDistanceAtr { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "HTF Swing ATR Period", GroupName = "02 - Filters", Order = 20)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "HTF Swing ATR Period", GroupName = "05 - Filters", Order = 20)]
         public int HtfSwingAtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "HTF Swing Hold Bars", GroupName = "02 - Filters", Order = 21)]
+        [NinjaScriptProperty, Range(1, 10), Display(Name = "HTF Swing Hold Bars", GroupName = "05 - Filters", Order = 21)]
         public int HtfSwingHoldBars { get; set; }
 
-        [NinjaScriptProperty, Range(1, 240), Display(Name = "HTF Swing Primary Minutes", GroupName = "02 - Filters", Order = 22)]
+        [NinjaScriptProperty, Range(1, 240), Display(Name = "HTF Swing Primary Minutes", GroupName = "05 - Filters", Order = 22)]
         public int HtfSwingPrimaryMinutes { get; set; }
 
-        [NinjaScriptProperty, Range(1, 240), Display(Name = "HTF Swing Secondary Minutes", GroupName = "02 - Filters", Order = 23)]
+        [NinjaScriptProperty, Range(1, 240), Display(Name = "HTF Swing Secondary Minutes", GroupName = "05 - Filters", Order = 23)]
         public int HtfSwingSecondaryMinutes { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show Filter Visuals", GroupName = "02 - Filters", Order = 24)]
+        [NinjaScriptProperty, Display(Name = "Show Filter Visuals", GroupName = "05 - Filters", Order = 24)]
         public bool ShowFilterVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show SMA Visuals", GroupName = "02 - Indicator Visuals", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Show SMA Visuals", GroupName = "07 - Indicator Visuals", Order = 0)]
         public bool ShowSmaVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show EMA Visuals", GroupName = "02 - Indicator Visuals", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "Show EMA Visuals", GroupName = "07 - Indicator Visuals", Order = 1)]
         public bool ShowEmaVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show RSI Visuals", GroupName = "02 - Indicator Visuals", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Show RSI Visuals", GroupName = "07 - Indicator Visuals", Order = 2)]
         public bool ShowRsiVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show MACD Visuals", GroupName = "02 - Indicator Visuals", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Show MACD Visuals", GroupName = "07 - Indicator Visuals", Order = 3)]
         public bool ShowMacdVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show ATR Visuals", GroupName = "02 - Indicator Visuals", Order = 4)]
+        [NinjaScriptProperty, Display(Name = "Show ATR Visuals", GroupName = "07 - Indicator Visuals", Order = 4)]
         public bool ShowAtrVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show Chop BB Visuals", GroupName = "02 - Indicator Visuals", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Show Chop BB Visuals", GroupName = "07 - Indicator Visuals", Order = 5)]
         public bool ShowChopBbVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show VWAP MR Visuals", GroupName = "02 - Indicator Visuals", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "Show VWAP MR Visuals", GroupName = "07 - Indicator Visuals", Order = 6)]
         public bool ShowVwapMrVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show Stats Visuals", GroupName = "02 - Indicator Visuals", Order = 7)]
+        [NinjaScriptProperty, Display(Name = "Show Stats Visuals", GroupName = "07 - Indicator Visuals", Order = 7)]
         public bool ShowChecklistVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show Status Visuals", GroupName = "02 - Indicator Visuals", Order = 8)]
+        [NinjaScriptProperty, Display(Name = "Show Status Visuals", GroupName = "07 - Indicator Visuals", Order = 8)]
         public bool ShowStatusPanelVisuals { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Bias Buttons", GroupName = "02 - Indicator Visuals", Order = 9)]
+        [NinjaScriptProperty, Display(Name = "Bias Buttons", GroupName = "07 - Indicator Visuals", Order = 9)]
         public bool ShowBiasButtons { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Misc Buttons", GroupName = "02 - Indicator Visuals", Order = 10)]
+        [NinjaScriptProperty, Display(Name = "Misc Buttons", GroupName = "07 - Indicator Visuals", Order = 10)]
         public bool ShowMiscButtons { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Show Trade PnL Tags", GroupName = "02 - Filters", Order = 26)]
+        [NinjaScriptProperty, Display(Name = "Show Trade PnL Tags", GroupName = "05 - Filters", Order = 26)]
         public bool ShowTradePnlTags { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Volatility Expansion Vote", GroupName = "02 - Filters", Order = 28)]
+        [NinjaScriptProperty, Display(Name = "Enable Volatility Expansion Vote", GroupName = "05 - Filters", Order = 28)]
         public bool EnableVolatilityExpansionVote { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "VolExp BB Width Delta %", GroupName = "02 - Filters", Order = 29)]
+        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "VolExp BB Width Delta %", GroupName = "05 - Filters", Order = 29)]
         public double VolExpBbWidthDeltaPct { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "VolExp ATR Baseline Period", GroupName = "02 - Filters", Order = 30)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "VolExp ATR Baseline Period", GroupName = "05 - Filters", Order = 30)]
         public int VolExpAtrBaselinePeriod { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 5.0), Display(Name = "VolExp ATR Multiplier", GroupName = "02 - Filters", Order = 31)]
+        [NinjaScriptProperty, Range(0.5, 5.0), Display(Name = "VolExp ATR Multiplier", GroupName = "05 - Filters", Order = 31)]
         public double VolExpAtrMultiplier { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable RVOL/VROC Gate", GroupName = "02 - Filters", Order = 32)]
+        [NinjaScriptProperty, Display(Name = "Enable RVOL/VROC Gate", GroupName = "05 - Filters", Order = 32)]
         public bool EnableRvolGate { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "RVOL Lookback Bars", GroupName = "02 - Filters", Order = 33)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "RVOL Lookback Bars", GroupName = "05 - Filters", Order = 33)]
         public int RvolLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "RVOL Min", GroupName = "02 - Filters", Order = 34)]
+        [NinjaScriptProperty, Range(0.1, 5.0), Display(Name = "RVOL Min", GroupName = "05 - Filters", Order = 34)]
         public double RvolMin { get; set; }
 
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "VROC Lookback Bars", GroupName = "02 - Filters", Order = 35)]
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "VROC Lookback Bars", GroupName = "05 - Filters", Order = 35)]
         public int VrocLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 500.0), Display(Name = "VROC Min %", GroupName = "02 - Filters", Order = 36)]
+        [NinjaScriptProperty, Range(0.0, 500.0), Display(Name = "VROC Min %", GroupName = "05 - Filters", Order = 36)]
         public double VrocMinPct { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Compression Guard", GroupName = "02 - Filters", Order = 37)]
+        [NinjaScriptProperty, Display(Name = "Enable Compression Guard", GroupName = "05 - Filters", Order = 37)]
         public bool EnableCompressionGuard { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "Compression BB Width %", GroupName = "02 - Filters", Order = 38)]
+        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "Compression BB Width %", GroupName = "05 - Filters", Order = 38)]
         public double CompressionGuardBbWidthPct { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Compression Require Both Gates", GroupName = "02 - Filters", Order = 39)]
+        [NinjaScriptProperty, Display(Name = "Compression Require Both Gates", GroupName = "05 - Filters", Order = 39)]
         public bool CompressionGuardRequireBoth { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "Chop Breakout Hold Bars", GroupName = "02 - Filters", Order = 40)]
+        [NinjaScriptProperty, Range(1, 10), Display(Name = "Chop Breakout Hold Bars", GroupName = "05 - Filters", Order = 40)]
         public int ChopBreakoutHoldBars { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Chop Decay Gate", GroupName = "02 - Filters", Order = 41)]
+        [NinjaScriptProperty, Display(Name = "Enable Chop Decay Gate", GroupName = "05 - Filters", Order = 41)]
         public bool EnableChopDecayGate { get; set; }
 
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "Chop Decay Bars", GroupName = "02 - Filters", Order = 42)]
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "Chop Decay Bars", GroupName = "05 - Filters", Order = 42)]
         public int ChopDecayBars { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 50.0), Display(Name = "Chop Decay ADX Delta", GroupName = "02 - Filters", Order = 43)]
+        [NinjaScriptProperty, Range(0.0, 50.0), Display(Name = "Chop Decay ADX Delta", GroupName = "05 - Filters", Order = 43)]
         public double ChopDecayAdxDelta { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "Chop Decay BB Width Delta %", GroupName = "02 - Filters", Order = 44)]
+        [NinjaScriptProperty, Range(0.0, 5.0), Display(Name = "Chop Decay BB Width Delta %", GroupName = "05 - Filters", Order = 44)]
         public double ChopDecayBbWidthDeltaPct { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Chop Range Trades", GroupName = "02 - Chop Trading", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Enable Chop Range Trades", GroupName = "04 - Chop Trading", Order = 0)]
         public bool EnableChopRangeTrades { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Chop Range Mode", GroupName = "02 - Chop Trading", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "Chop Range Mode", GroupName = "04 - Chop Trading", Order = 1)]
         public ChopRangeModeOption ChopRangeMode { get; set; }
 
-        [NinjaScriptProperty, Range(2, 200), Display(Name = "Chop Range Lookback Bars", GroupName = "02 - Chop Trading", Order = 2)]
+        [NinjaScriptProperty, Range(2, 200), Display(Name = "Chop Range Lookback Bars", GroupName = "04 - Chop Trading", Order = 2)]
         public int ChopRangeLookbackBars { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Chop Trades Per Entry", GroupName = "02 - Chop Trading", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Chop Trades Per Entry", GroupName = "04 - Chop Trading", Order = 3)]
         public int ChopTradesPerEntry { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Chop Stop Type", GroupName = "02 - Chop Trading", Order = 4)]
+        [NinjaScriptProperty, Display(Name = "Chop Stop Type", GroupName = "04 - Chop Trading", Order = 4)]
         public StopKind ChopStopType { get; set; }
 
-        [NinjaScriptProperty, Range(1, 200), Display(Name = "Chop Stop Ticks", GroupName = "02 - Chop Trading", Order = 5)]
+        [NinjaScriptProperty, Range(1, 200), Display(Name = "Chop Stop Ticks", GroupName = "04 - Chop Trading", Order = 5)]
         public int ChopStopTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Chop Stop ATR Mult", GroupName = "02 - Chop Trading", Order = 6)]
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Chop Stop ATR Mult", GroupName = "04 - Chop Trading", Order = 6)]
         public double ChopStopAtrMult { get; set; }
 
-        [NinjaScriptProperty, Range(1, 100), Display(Name = "Chop Trail Ticks", GroupName = "02 - Chop Trading", Order = 7)]
+        [NinjaScriptProperty, Range(1, 100), Display(Name = "Chop Trail Ticks", GroupName = "04 - Chop Trading", Order = 7)]
         public int ChopTrailTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0, 50), Display(Name = "Chop Trail Plus Ticks", GroupName = "02 - Chop Trading", Order = 8)]
+        [NinjaScriptProperty, Range(0, 50), Display(Name = "Chop Trail Plus Ticks", GroupName = "04 - Chop Trading", Order = 8)]
         public int ChopTrailPlusTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Chop Add-on Profit Mode", GroupName = "02 - Chop Trading", Order = 9)]
+        [NinjaScriptProperty, Display(Name = "Chop Add-on Profit Mode", GroupName = "04 - Chop Trading", Order = 9)]
         public ChopAddOnProfitModeOption ChopAddOnProfitMode { get; set; }
 
-        [NinjaScriptProperty, Range(0, 1000), Display(Name = "Chop Add-on Profit Ticks", GroupName = "02 - Chop Trading", Order = 10)]
+        [NinjaScriptProperty, Range(0, 1000), Display(Name = "Chop Add-on Profit Ticks", GroupName = "04 - Chop Trading", Order = 10)]
         public int ChopAddOnProfitTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0, 10000), Display(Name = "Chop Add-on Profit Dollars", GroupName = "02 - Chop Trading", Order = 11)]
+        [NinjaScriptProperty, Range(0, 10000), Display(Name = "Chop Add-on Profit Dollars", GroupName = "04 - Chop Trading", Order = 11)]
         public double ChopAddOnProfitDollars { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "UseSMA", GroupName = "02 - Indicator Toggles", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "UseSMA", GroupName = "06 - Indicator Toggles", Order = 0)]
         public bool UseSMA { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "UseEMA", GroupName = "02 - Indicator Toggles", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "UseEMA", GroupName = "06 - Indicator Toggles", Order = 1)]
         public bool UseEMA { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "UseRSI", GroupName = "02 - Indicator Toggles", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "UseRSI", GroupName = "06 - Indicator Toggles", Order = 2)]
         public bool UseRSI { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "UseMACD", GroupName = "02 - Indicator Toggles", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "UseMACD", GroupName = "06 - Indicator Toggles", Order = 3)]
         public bool UseMACD { get; set; }
 
         [NinjaScriptProperty, Browsable(false)]
         public bool EnableVwapMrStrategy { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "VWAP Timeframe", GroupName = "03 - Indicator Periods", Order = 10)]
+        [NinjaScriptProperty, Display(Name = "VWAP Timeframe", GroupName = "08 - Indicator Periods", Order = 10)]
         public VwapMrTimeframeOption VwapMrTimeframe { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "VWAP Band 1 Mult", GroupName = "03 - Indicator Periods", Order = 11)]
+        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "VWAP Band 1 Mult", GroupName = "08 - Indicator Periods", Order = 11)]
         public double VwapBand1Multiplier { get; set; }
 
-        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "VWAP Band 2 Mult", GroupName = "03 - Indicator Periods", Order = 12)]
+        [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "VWAP Band 2 Mult", GroupName = "08 - Indicator Periods", Order = 12)]
         public double VwapBand2Multiplier { get; set; }
 
         [NinjaScriptProperty, Browsable(false)]
@@ -19509,10 +19509,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Browsable(false)]
         public bool EnableVwapFailureFlip { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "VWAP Filter Spikes", GroupName = "03 - Indicator Periods", Order = 13)]
+        [NinjaScriptProperty, Display(Name = "VWAP Filter Spikes", GroupName = "08 - Indicator Periods", Order = 13)]
         public bool VwapFilterSpikes { get; set; }
 
-        [NinjaScriptProperty, Range(1.1, 50.0), Display(Name = "VWAP Spike Threshold (x median)", GroupName = "03 - Indicator Periods", Order = 14)]
+        [NinjaScriptProperty, Range(1.1, 50.0), Display(Name = "VWAP Spike Threshold (x median)", GroupName = "08 - Indicator Periods", Order = 14)]
         public double VwapSpikeThreshold { get; set; }
 
         [NinjaScriptProperty, Browsable(false)]
@@ -19536,217 +19536,217 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Browsable(false)]
         public bool EnableVwapThreeInside { get; set; }
 
-        [NinjaScriptProperty, Range(2, 400), Display(Name = "SmaPeriod", GroupName = "03 - Indicator Periods", Order = 0)]
+        [NinjaScriptProperty, Range(2, 400), Display(Name = "SmaPeriod", GroupName = "08 - Indicator Periods", Order = 0)]
         public int SmaPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(2, 200), Display(Name = "EmaFast", GroupName = "03 - Indicator Periods", Order = 1)]
+        [NinjaScriptProperty, Range(2, 200), Display(Name = "EmaFast", GroupName = "08 - Indicator Periods", Order = 1)]
         public int EmaFast { get; set; }
 
-        [NinjaScriptProperty, Range(2, 400), Display(Name = "EmaSlow", GroupName = "03 - Indicator Periods", Order = 2)]
+        [NinjaScriptProperty, Range(2, 400), Display(Name = "EmaSlow", GroupName = "08 - Indicator Periods", Order = 2)]
         public int EmaSlow { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100), Display(Name = "RsiPeriod", GroupName = "03 - Indicator Periods", Order = 3)]
+        [NinjaScriptProperty, Range(2, 100), Display(Name = "RsiPeriod", GroupName = "08 - Indicator Periods", Order = 3)]
         public int RsiPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10), Display(Name = "RsiSmooth", GroupName = "03 - Indicator Periods", Order = 4)]
+        [NinjaScriptProperty, Range(1, 10), Display(Name = "RsiSmooth", GroupName = "08 - Indicator Periods", Order = 4)]
         public int RsiSmooth { get; set; }
 
-        [NinjaScriptProperty, Range(50, 90), Display(Name = "RsiLongThreshold", GroupName = "03 - Indicator Periods", Order = 5)]
+        [NinjaScriptProperty, Range(50, 90), Display(Name = "RsiLongThreshold", GroupName = "08 - Indicator Periods", Order = 5)]
         public int RsiLongThreshold { get; set; }
 
-        [NinjaScriptProperty, Range(10, 50), Display(Name = "RsiShortThreshold", GroupName = "03 - Indicator Periods", Order = 6)]
+        [NinjaScriptProperty, Range(10, 50), Display(Name = "RsiShortThreshold", GroupName = "08 - Indicator Periods", Order = 6)]
         public int RsiShortThreshold { get; set; }
 
-        [NinjaScriptProperty, Range(2, 50), Display(Name = "MacdFast", GroupName = "03 - Indicator Periods", Order = 7)]
+        [NinjaScriptProperty, Range(2, 50), Display(Name = "MacdFast", GroupName = "08 - Indicator Periods", Order = 7)]
         public int MacdFast { get; set; }
 
-        [NinjaScriptProperty, Range(5, 100), Display(Name = "MacdSlow", GroupName = "03 - Indicator Periods", Order = 8)]
+        [NinjaScriptProperty, Range(5, 100), Display(Name = "MacdSlow", GroupName = "08 - Indicator Periods", Order = 8)]
         public int MacdSlow { get; set; }
 
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "MacdSmooth", GroupName = "03 - Indicator Periods", Order = 9)]
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "MacdSmooth", GroupName = "08 - Indicator Periods", Order = 9)]
         public int MacdSmooth { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 0)]
+        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 0)]
         public int AtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 1)]
         public StopKind StopType { get; set; }
 
         [Browsable(false)]
         public int StopTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "StopValue", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 2)]
+        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "StopValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 2)]
         public double AtrStopMult { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 3)]
         public TargetKind TargetType { get; set; }
 
         [Browsable(false)]
         public int TargetTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "TargetValue", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 4)]
+        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "TargetValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 4)]
         public double AtrTargetMult { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Protection Control Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Protection Control Mode", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 5)]
         public ProtectionControlModeOption ProtectionControlMode { get; set; }
 
-        [NinjaScriptProperty, Range(1, 10000), Display(Name = "Manual Entry Offset (ticks)", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 7)]
+        [NinjaScriptProperty, Range(1, 10000), Display(Name = "Manual Entry Offset (ticks)", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 7)]
         public int ManualEntryOffsetTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Global Trailing", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 8)]
+        [NinjaScriptProperty, Display(Name = "Enable Global Trailing", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 8)]
         public bool EnableGlobalTrailing { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Global Trail Activation Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 9)]
+        [NinjaScriptProperty, Display(Name = "Global Trail Activation Mode", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 9)]
         public BreakEvenTriggerModeOption GlobalTrailActivationMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Activation Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 10)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Activation Value", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 10)]
         public double GlobalTrailActivationValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Global Profit Lock Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 11)]
+        [NinjaScriptProperty, Display(Name = "Global Profit Lock Mode", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 11)]
         public BreakEvenTriggerModeOption GlobalProfitLockMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Profit Lock Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 12)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Profit Lock Value", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 12)]
         public double GlobalProfitLockValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Global Trail Increment Mode", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 13)]
+        [NinjaScriptProperty, Display(Name = "Global Trail Increment Mode", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 13)]
         public BreakEvenTriggerModeOption GlobalTrailIncrementMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Increment Value", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 14)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Global Trail Increment Value", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 14)]
         public double GlobalTrailIncrementValue { get; set; }
 
-        // [NinjaScriptProperty, Display(Name = "TrailType", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 6)]
+        // [NinjaScriptProperty, Display(Name = "TrailType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 6)]
         // public TrailKind TrailType { get; set; }
 
-        // [NinjaScriptProperty, Range(1, 200), Display(Name = "TrailTicks", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 7)]
+        // [NinjaScriptProperty, Range(1, 200), Display(Name = "TrailTicks", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 7)]
         // public int TrailTicks { get; set; }
 
-        // [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrTrailMult", GroupName = "04 - Stops, Targets, & Global Trailing", Order = 8)]
+        // [NinjaScriptProperty, Range(0.5, 10.0), Display(Name = "AtrTrailMult", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 8)]
         // public double AtrTrailMult { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Use DEMA ATR Trailing", GroupName = "05 - DEMA ATR Trailing", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Use DEMA ATR Trailing", GroupName = "09 - DEMA ATR Trailing", Order = 0)]
         public bool UseDemaAtrTrailing { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "DEMA ATR Activation Mode", GroupName = "05 - DEMA ATR Trailing", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "DEMA ATR Activation Mode", GroupName = "09 - DEMA ATR Trailing", Order = 1)]
         public TrailingActivationType DemaAtrActivationMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 10000.0), Display(Name = "DEMA ATR Activation Value", GroupName = "05 - DEMA ATR Trailing", Order = 2)]
+        [NinjaScriptProperty, Range(0.0, 10000.0), Display(Name = "DEMA ATR Activation Value", GroupName = "09 - DEMA ATR Trailing", Order = 2)]
         public double DemaAtrActivationValue { get; set; }
 
-        [NinjaScriptProperty, Range(5, 200), Display(Name = "DEMA ATR Period", GroupName = "05 - DEMA ATR Trailing", Order = 3)]
+        [NinjaScriptProperty, Range(5, 200), Display(Name = "DEMA ATR Period", GroupName = "09 - DEMA ATR Trailing", Order = 3)]
         public int DemaAtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "DEMA ATR Multiplier", GroupName = "05 - DEMA ATR Trailing", Order = 4)]
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "DEMA ATR Multiplier", GroupName = "09 - DEMA ATR Trailing", Order = 4)]
         public double DemaAtrMultiplier { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Use Tight DEMA ATR Trailing", GroupName = "05 - DEMA ATR Trailing", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Use Tight DEMA ATR Trailing", GroupName = "09 - DEMA ATR Trailing", Order = 5)]
         public bool UseTightDemaAtrTrailing { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Use BreakEven Clamp", GroupName = "06 - BreakEven", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Use BreakEven Clamp", GroupName = "10 - BreakEven", Order = 0)]
         public bool UseBreakEvenClamp { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "BreakEven Trigger Mode", GroupName = "06 - BreakEven", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "BreakEven Trigger Mode", GroupName = "10 - BreakEven", Order = 1)]
         public BreakEvenTriggerModeOption BreakEvenTriggerMode { get; set; }
 
-        [NinjaScriptProperty, Range(0, 400), Display(Name = "BreakEven Trigger Ticks", GroupName = "06 - BreakEven", Order = 2)]
+        [NinjaScriptProperty, Range(0, 400), Display(Name = "BreakEven Trigger Ticks", GroupName = "10 - BreakEven", Order = 2)]
         public int BreakEvenTriggerTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "BreakEven Trigger Dollars", GroupName = "06 - BreakEven", Order = 3)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "BreakEven Trigger Dollars", GroupName = "10 - BreakEven", Order = 3)]
         public double BreakEvenTriggerDollars { get; set; }
 
-        [NinjaScriptProperty, Range(0, 100), Display(Name = "BreakEven Plus Ticks", GroupName = "06 - BreakEven", Order = 4)]
+        [NinjaScriptProperty, Range(0, 100), Display(Name = "BreakEven Plus Ticks", GroupName = "10 - BreakEven", Order = 4)]
         public int BreakEvenPlusTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Force DEMA on BreakEven Clamp", GroupName = "06 - BreakEven", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Force DEMA on BreakEven Clamp", GroupName = "10 - BreakEven", Order = 5)]
         public bool EnableDemaAtrOnBreakEvenClamp { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Debug", GroupName = "07 - Misc", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Debug", GroupName = "11 - Misc", Order = 0)]
         public bool Debug { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Signal Diagnostics", GroupName = "07 - Misc", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "Enable Signal Diagnostics", GroupName = "11 - Misc", Order = 1)]
         public bool EnableSignalDiagnostics { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Trade Story Logging", GroupName = "07 - Misc", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Enable Trade Story Logging", GroupName = "11 - Misc", Order = 2)]
         public bool EnableTradeStoryLogging { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Start Halted On Enable", GroupName = "07 - Misc", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "Start Halted On Enable", GroupName = "11 - Misc", Order = 3)]
         public bool StartHaltedOnEnable { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits (DLL/DPL)", GroupName = "08 - Daily Limits", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits (DLL/DPL)", GroupName = "12 - Daily Limits", Order = 0)]
         public bool EnableDailyPnLLimits { get; set; }
 
-        [NinjaScriptProperty, Range(-1000000.0, 0.0), Display(Name = "Daily Loss Limit (DLL)", GroupName = "08 - Daily Limits", Order = 1)]
+        [NinjaScriptProperty, Range(-1000000.0, 0.0), Display(Name = "Daily Loss Limit (DLL)", GroupName = "12 - Daily Limits", Order = 1)]
         public double DailyLossLimit { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 1000000.0), Display(Name = "Daily Profit Limit (DPL)", GroupName = "08 - Daily Limits", Order = 2)]
+        [NinjaScriptProperty, Range(0.0, 1000000.0), Display(Name = "Daily Profit Limit (DPL)", GroupName = "12 - Daily Limits", Order = 2)]
         public double DailyProfitLimit { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Straddle Trades", GroupName = "09 - Straddle", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Enable Straddle Trades", GroupName = "13 - Straddle", Order = 0)]
         public bool EnableStraddleTrades { get; set; }
 
-        [NinjaScriptProperty, Range(0, 23), Display(Name = "Straddle Start Hour (chart time)", GroupName = "09 - Straddle", Order = 1)]
+        [NinjaScriptProperty, Range(0, 23), Display(Name = "Straddle Start Hour (chart time)", GroupName = "13 - Straddle", Order = 1)]
         public int StraddleStartHour { get; set; }
 
-        [NinjaScriptProperty, Range(0, 59), Display(Name = "Straddle Start Minute (chart time)", GroupName = "09 - Straddle", Order = 2)]
+        [NinjaScriptProperty, Range(0, 59), Display(Name = "Straddle Start Minute (chart time)", GroupName = "13 - Straddle", Order = 2)]
         public int StraddleStartMinute { get; set; }
 
-        [NinjaScriptProperty, Range(1, 120), Display(Name = "Straddle Range Minutes", GroupName = "09 - Straddle", Order = 3)]
+        [NinjaScriptProperty, Range(1, 120), Display(Name = "Straddle Range Minutes", GroupName = "13 - Straddle", Order = 3)]
         public int StraddleRangeMinutes { get; set; }
 
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "Straddle Zone Size (ticks)", GroupName = "09 - Straddle", Order = 4)]
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "Straddle Zone Size (ticks)", GroupName = "13 - Straddle", Order = 4)]
         public int StraddleZoneTicks { get; set; }
 
-        [NinjaScriptProperty, Range(-50, 50), Display(Name = "Straddle Zone Offset (ticks)", GroupName = "09 - Straddle", Order = 5)]
+        [NinjaScriptProperty, Range(-50, 50), Display(Name = "Straddle Zone Offset (ticks)", GroupName = "13 - Straddle", Order = 5)]
         public int StraddleZoneOffsetTicks { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Trades Per Straddle Entry", GroupName = "09 - Straddle", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "Trades Per Straddle Entry", GroupName = "13 - Straddle", Order = 6)]
         public int TradesPerStraddleEntry { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Stop Mult", GroupName = "09 - Straddle", Order = 7)]
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Stop Mult", GroupName = "13 - Straddle", Order = 7)]
         public double StraddleAtrStopMult { get; set; }
 
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Trail Mult", GroupName = "09 - Straddle", Order = 8)]
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Trail Mult", GroupName = "13 - Straddle", Order = 8)]
         public double StraddleAtrTrailMult { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Straddle Trail Activation ($)", GroupName = "09 - Straddle", Order = 9)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Straddle Trail Activation ($)", GroupName = "13 - Straddle", Order = 9)]
         public double StraddleTrailActivationDollars { get; set; }
 
-        [NinjaScriptProperty, Range(0, 120), Display(Name = "Straddle Min Profit Hold (sec)", GroupName = "09 - Straddle", Order = 10)]
+        [NinjaScriptProperty, Range(0, 120), Display(Name = "Straddle Min Profit Hold (sec)", GroupName = "13 - Straddle", Order = 10)]
         public int StraddleMinProfitHoldSeconds { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trades", GroupName = "10 - Scale-In", Order = 0)]
+        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trades", GroupName = "03 - Scale-In", Order = 0)]
         public bool EnableScaleInTrades { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Publish Scale-In Trades To Bridge", GroupName = "10 - Scale-In", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "Publish Scale-In Trades To Bridge", GroupName = "03 - Scale-In", Order = 1)]
         public bool PublishScaleInTradesToBridge { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trailing", GroupName = "10 - Scale-In", Order = 2)]
+        [NinjaScriptProperty, Display(Name = "Enable Scale-In Trailing", GroupName = "03 - Scale-In", Order = 2)]
         public bool EnableScaleInTrailing { get; set; }
 
-        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Drawdown Step (ticks)", GroupName = "10 - Scale-In", Order = 3)]
+        [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Drawdown Step (ticks)", GroupName = "03 - Scale-In", Order = 3)]
         public int ScaleInDrawdownTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "10 - Scale-In", Order = 4)]
+        [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "03 - Scale-In", Order = 4)]
         public int ScaleInTradesToAdd { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Max Trades", GroupName = "10 - Scale-In", Order = 5)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Max Trades", GroupName = "03 - Scale-In", Order = 5)]
         public int ScaleInMaxTrades { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "10 - Scale-In", Order = 6)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "03 - Scale-In", Order = 6)]
         public BreakEvenTriggerModeOption ScaleInTrailActivationMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Value", GroupName = "10 - Scale-In", Order = 7)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Activation Value", GroupName = "03 - Scale-In", Order = 7)]
         public double ScaleInTrailActivationValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "10 - Scale-In", Order = 8)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Profit Lock Mode", GroupName = "03 - Scale-In", Order = 8)]
         public BreakEvenTriggerModeOption ScaleInProfitLockMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Value", GroupName = "10 - Scale-In", Order = 9)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Profit Lock Value", GroupName = "03 - Scale-In", Order = 9)]
         public double ScaleInProfitLockValue { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "10 - Scale-In", Order = 10)]
+        [NinjaScriptProperty, Display(Name = "Scale-In Trail Increment Mode", GroupName = "03 - Scale-In", Order = 10)]
         public BreakEvenTriggerModeOption ScaleInTrailIncrementMode { get; set; }
 
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "10 - Scale-In", Order = 11)]
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "03 - Scale-In", Order = 11)]
         public double ScaleInTrailIncrementValue { get; set; }
 
         #endregion

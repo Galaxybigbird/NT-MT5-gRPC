@@ -1867,15 +1867,15 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [NinjaScriptProperty]
-        [Display(Name = "Trade Direction", GroupName = "Parameters", Order = 0)]
+        [Display(Name = "Trade Direction", GroupName = "05 - Parameters", Order = 0)]
         public ScaleLadderTradeDirection TradeDirection { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Scale Mode", GroupName = "Parameters", Order = 1)]
+        [Display(Name = "Scale Mode", GroupName = "05 - Parameters", Order = 1)]
         public ScaleLadderMode ScaleMode { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Spacing Unit", GroupName = "Parameters", Order = 2)]
+        [Display(Name = "Spacing Unit", GroupName = "05 - Parameters", Order = 2)]
         public ScaleLadderSpacingUnit SpacingUnit { get; set; }
 
         [NinjaScriptProperty]
@@ -1909,41 +1909,41 @@ namespace NinjaTrader.NinjaScript.Indicators
 
         [NinjaScriptProperty]
         [Range(1, 1000)]
-        [Display(Name = "Base Contracts", GroupName = "Parameters", Order = 5)]
+        [Display(Name = "Base Contracts", GroupName = "05 - Parameters", Order = 5)]
         public int BaseContracts { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 1000)]
-        [Display(Name = "Contracts Per Scale Level", GroupName = "Parameters", Order = 6)]
+        [Display(Name = "Contracts Per Scale Level", GroupName = "05 - Parameters", Order = 6)]
         public int ContractsPerScaleLevel { get; set; }
 
         [NinjaScriptProperty]
         [Range(1, 100)]
-        [Display(Name = "Scale Level Count", GroupName = "Parameters", Order = 7)]
+        [Display(Name = "Scale Level Count", GroupName = "05 - Parameters", Order = 7)]
         public int ScaleLevelCount { get; set; }
 
         [NinjaScriptProperty]
         [Range(0.0001, 1000000.0)]
-        [Display(Name = "Spacing Value", GroupName = "Parameters", Order = 8)]
+        [Display(Name = "Spacing Value", GroupName = "05 - Parameters", Order = 8)]
         public double SpacingValue { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Show Guide Lines", GroupName = "Display", Order = 9)]
+        [Display(Name = "Show Guide Lines", GroupName = "06 - Display", Order = 9)]
         public bool ShowGuideLines { get; set; }
 
         [Browsable(false)]
         public bool ShowLevelLabels { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Show Summary Panel", GroupName = "Display", Order = 10)]
+        [Display(Name = "Show Summary Panel", GroupName = "06 - Display", Order = 10)]
         public bool ShowSummaryPanel { get; set; }
 
         [NinjaScriptProperty]
-        [Display(Name = "Reset Anchors", GroupName = "Display", Order = 11)]
+        [Display(Name = "Reset Anchors", GroupName = "06 - Display", Order = 11)]
         public bool ResetAnchors { get; set; }
 
         [XmlIgnore]
-        [Display(Name = "Entry Line Brush", GroupName = "Display", Order = 12)]
+        [Display(Name = "Entry Line Brush", GroupName = "06 - Display", Order = 12)]
         public Brush EntryLineBrush { get; set; }
 
         [Browsable(false)]
@@ -1954,7 +1954,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Risk Side Brush", GroupName = "Display", Order = 13)]
+        [Display(Name = "Risk Side Brush", GroupName = "06 - Display", Order = 13)]
         public Brush RiskSideBrush { get; set; }
 
         [Browsable(false)]
@@ -1965,7 +1965,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Reward Side Brush", GroupName = "Display", Order = 14)]
+        [Display(Name = "Reward Side Brush", GroupName = "06 - Display", Order = 14)]
         public Brush RewardSideBrush { get; set; }
 
         [Browsable(false)]
@@ -1976,7 +1976,7 @@ namespace NinjaTrader.NinjaScript.Indicators
         }
 
         [XmlIgnore]
-        [Display(Name = "Summary Brush", GroupName = "Display", Order = 15)]
+        [Display(Name = "Summary Brush", GroupName = "06 - Display", Order = 15)]
         public Brush SummaryBrush { get; set; }
 
         [Browsable(false)]
