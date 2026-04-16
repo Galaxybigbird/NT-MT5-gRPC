@@ -10,9 +10,11 @@ using System.Reflection;
 using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using NinjaTrader.Cbi;
+using NinjaTrader.Gui;
 using NinjaTrader.Gui.Chart;
 using NinjaTrader.Gui.Tools;
 using NinjaTrader.Data;
@@ -23,10 +25,21 @@ using NinjaTrader.NinjaScript.Shared;
 using NinjaTrader.NinjaScript.Strategies;
 using NinjaTrader.NinjaScript.AddOns;
 using NinjaTrader.NinjaScript.DrawingTools;
+using DxTextFormat = SharpDX.DirectWrite.TextFormat;
+using DxTextLayout = SharpDX.DirectWrite.TextLayout;
 #endregion
 
 namespace NinjaTrader.NinjaScript.Strategies
 {
+    [Gui.CategoryExpanded("04 - Chop Trading", false)]
+    [Gui.CategoryExpanded("05 - Filters", false)]
+    [Gui.CategoryExpanded("06 - Indicator Toggles", false)]
+    [Gui.CategoryExpanded("07 - Indicator Visuals", false)]
+    [Gui.CategoryExpanded("08 - Indicator Periods", false)]
+    [Gui.CategoryExpanded("09 - DEMA ATR Trailing", false)]
+    [Gui.CategoryExpanded("10 - BreakEven", false)]
+    [Gui.CategoryExpanded("11 - Misc", false)]
+    [Gui.CategoryExpanded("12 - Daily Limits", false)]
     public class BaseOptStrategyAuto : Strategy, ITradeSyncParticipant, IRunUpParticipant
     {
         // --- indicator refs
@@ -104,6 +117,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool straddleArmed;
         private bool straddleLongTriggered;
         private bool straddleShortTriggered;
+        private bool straddleSessionConsumed;
         private double straddleRangeHigh = double.MinValue;
         private double straddleRangeLow = double.MaxValue;
         private double straddleLongZoneUpper;
@@ -120,18 +134,25 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double? straddleHardStopShortAutoPrice;
         private Rectangle straddleLongZoneRect;
         private Rectangle straddleShortZoneRect;
+        private HorizontalLine straddleLongTriggerLine;
+        private HorizontalLine straddleShortTriggerLine;
         private HorizontalLine straddleHardStopLongLine;
         private HorizontalLine straddleHardStopShortLine;
         private readonly List<string> straddlePendingLongTradeIds = new List<string>();
         private readonly List<string> straddlePendingShortTradeIds = new List<string>();
+        private MarketPosition straddleDelayedEntryCandidateSide = MarketPosition.Flat;
+        private DateTime straddleDelayedEntryCandidateStart = DateTime.MinValue;
         private double lastBid = double.NaN;
         private double lastAsk = double.NaN;
         private double lastLast = double.NaN;
         private DateTime lastMarketDataTime = DateTime.MinValue;
+        private double lastStraddleTrackingPrice = double.NaN;
+        private DateTime lastStraddleTrackingTime = DateTime.MinValue;
         private bool straddleZonesFrozen;
-        private double straddleRangeShift;
+        private Account subscribedAccountEvents;
 
         private static long tradeSequence;
+        private static long straddlePendingOcoSequence;
         private readonly List<string> openTradeOrder = new List<string>();
         private Dictionary<string, TradeRuntimeState> tradeStates;
         private string activeTradeId;
@@ -261,12 +282,15 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const string StraddleRangeTag = "straddle_range";
         private const string StraddleLongZoneTag = "straddle_long_zone";
         private const string StraddleShortZoneTag = "straddle_short_zone";
+        private const string StraddleLongTriggerTag = "straddle_long_trigger";
+        private const string StraddleShortTriggerTag = "straddle_short_trigger";
         private const string StraddleStatusTag = "straddle_status";
         private const string StraddleCountdownTag = "straddle_countdown";
         private const string StraddleHardStopLongTag = "straddle_hard_stop_long";
         private const string StraddleHardStopShortTag = "straddle_hard_stop_short";
         private const string StraddleHardStopLongLabelTag = "straddle_hard_stop_long_label";
         private const string StraddleHardStopShortLabelTag = "straddle_hard_stop_short_label";
+        private const string StraddlePendingOrderOcoPrefix = "STRADP|";
         private const string ScaleInDrawdownTagPrefix = "scale_in_dd_";
         private const string SyntheticStopLineTag = "synthetic_protection_stop";
         private const string SyntheticTargetLineTag = "synthetic_protection_target";
@@ -276,7 +300,30 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const int SyntheticProtectionLabelDefaultBarsAgo = 20;
         private const int SyntheticProtectionLabelDefaultTickOffset = 35;
         private const int MaxScaleInDrawdownLines = 50;
+        private const int ScaleInOverlayButtonZIndex = 2000;
+        private const int MinScaleInLevelEntries = 1;
+        private const int MaxScaleInLevelEntries = 1000;
+        private const int MinRuntimeScaleInLevelCount = 1;
+        private const int MaxRuntimeScaleInLevelCount = MaxScaleInDrawdownLines;
+        private const int MinScaleInLevelSpacingTicks = 1;
+        private const int MaxScaleInLevelSpacingTicks = 10000;
+        private const float ScaleInMeasurementArrowSize = 5f;
+        private const float ScaleInMeasurementLineThickness = 1.25f;
+        private const float ScaleInMeasurementLabelWidth = 116f;
+        private const float ScaleInMeasurementLabelXGap = 6f;
+        private const float ScaleInMeasurementLabelPaddingX = 4f;
+        private const float ScaleInMeasurementLabelPaddingY = 2f;
+        private const double ScaleInMeasurementLabelHitPaddingX = 10.0;
+        private const double ScaleInMeasurementLabelHitPaddingY = 6.0;
+        private const double ScaleInOverlayPanelDefaultWidth = 252.0;
+        private const double ScaleInOverlayPanelDefaultHeight = 228.0;
+        private const double ScaleInOverlayPanelMinWidth = 252.0;
+        private const double ScaleInOverlayPanelMinHeight = 168.0;
+        private const double ScaleInOverlayPanelEdgePadding = 16.0;
         private static readonly TimeSpan StraddlePreArmOffset = TimeSpan.FromMilliseconds(250);
+        private static readonly Brush ScaleInOriginalMeasurementBrush = Brushes.MediumPurple;
+        private static readonly Brush ScaleInSpacingMeasurementBrush = Brushes.Gainsboro;
+        private static readonly Brush ScaleInConsumedReferenceBrush = Brushes.YellowGreen;
 
  
 
@@ -293,6 +340,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private const double DailyPnLLimitProfitConfirmSeconds = 0.75;
         private const int ManualOrderSeriesIndex = 1;
         private const string ManualCloseReason = "NT_MANUAL_BUTTON";
+        private const string ManualPendingExitOrderPrefix = "MPE_";
         private const string StopLossCloseReason = "NT_STOP_CLOSE";
         private const string ExternalFlatCloseReason = "NT_EXTERNAL_FLAT";
         private const double ManualProtectionHoldSeconds = 2.0;
@@ -324,6 +372,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         private DateTime manualHaltActivatedAt = DateTime.MinValue;
         private DateTime manualHaltLastEnforceAttemptAt = DateTime.MinValue;
         private DateTime manualHaltLastEnforceLogAt = DateTime.MinValue;
+        private bool manualHaltUserTradeProtectionActive;
+        private MarketPosition manualHaltUserTradeSide = MarketPosition.Flat;
+        private DateTime manualHaltUserTradeRequestedAt = DateTime.MinValue;
         private bool shutdownInProgress;
 
         private Chart chartWindow;
@@ -361,7 +412,45 @@ namespace NinjaTrader.NinjaScript.Strategies
         private TextBox tradesPerEntryTextBox;
         private TextBlock chopTradesPerEntryLabel;
         private TextBox chopTradesPerEntryTextBox;
+        private StackPanel chopTradesPerEntryPanel;
+        private TextBox runtimeStopLossTextBox;
+        private TextBox runtimeTargetTextBox;
+        private Button runtimeProtectionSetButton;
         private bool chartTraderButtonsAdded;
+        private readonly List<int> runtimeScaleInLevelEntries = new List<int>();
+        private readonly List<int> runtimeScaleInLevelSpacingTicks = new List<int>();
+        private readonly Dictionary<int, HorizontalLine> scaleInConsumedReferenceLines = new Dictionary<int, HorizontalLine>();
+        private readonly Dictionary<int, double> scaleInConsumedTriggerPrices = new Dictionary<int, double>();
+        private Panel scaleInOverlayHost;
+        private Canvas scaleInOverlayCanvas;
+        private Border scaleInOverlayBorder;
+        private Grid scaleInOverlayChromeGrid;
+        private StackPanel scaleInOverlayButtonPanel;
+        private StackPanel scaleInLadderEditorRowsPanel;
+        private Thumb scaleInOverlayDragThumb;
+        private Thumb scaleInOverlayTopResizeThumb;
+        private Thumb scaleInOverlayResizeThumb;
+        private Button scaleInOverlayAddLevelButton;
+        private Button scaleInOverlayRemoveLevelButton;
+        private readonly List<TextBox> scaleInLevelEntryTextBoxes = new List<TextBox>();
+        private readonly List<TextBox> scaleInLevelSpacingTextBoxes = new List<TextBox>();
+        private bool scaleInOverlayAdded;
+        private bool scaleInOverlayInitializing;
+        private bool scaleInOverlayEditorSyncing;
+        private bool runtimeScaleInLevelsInitialized;
+        private bool lastScaleInOverlayAddLevelEnabled;
+        private bool lastScaleInOverlayRemoveLevelEnabled;
+        private int lastRuntimeScaleInLevelSignature = int.MinValue;
+        private bool scaleInOverlayPanelPositionInitialized;
+        private bool scaleInMeasurementDragHandlersAttached;
+        private ChartControl scaleInMeasurementDragHostControl;
+        private Rect scaleInOriginalMeasurementLabelBounds = Rect.Empty;
+        private readonly List<Rect> scaleInSpacingMeasurementLabelBounds = new List<Rect>();
+        private double scaleInOriginalMeasurementXOffset;
+        private double scaleInSpacingMeasurementXOffset;
+        private ScaleInMeasurementDragTarget activeScaleInMeasurementDragTarget = ScaleInMeasurementDragTarget.None;
+        private Point activeScaleInMeasurementDragStartPoint;
+        private double activeScaleInMeasurementDragStartOffset;
         private bool visualsPanelExpanded = true;
         private bool indicatorVisualsPrimed = false;
         private bool showChecklistVisuals = true;
@@ -371,13 +460,50 @@ namespace NinjaTrader.NinjaScript.Strategies
         private int lastTradesPerEntryDisplay = -1;
         private int chopTradesPerEntryOverride;
         private int lastChopTradesPerEntryDisplay = -1;
+        private bool? lastChopTradesPerEntryVisible;
+        private double? runtimeStopLossValueOverride;
+        private double? runtimeTargetValueOverride;
         private bool lastManualButtonsEnabled;
         private bool lastAddOnButtonEnabled;
+        private const int ManagedProtectionDuplicateSuppressMs = 1500;
 
         private enum ProtectionUpdateOrigin
         {
             Auto,
             SyntheticManual
+        }
+
+        private sealed class RuntimeProtectionInputRequest
+        {
+            public string StopLossText;
+            public string TargetText;
+        }
+
+        private sealed class ScaleInRenderableLevel
+        {
+            public int LadderIndex;
+            public int DisplayLevelNumber;
+            public double Price;
+            public int EntriesToAdd;
+        }
+
+        private sealed class ScaleInOverlayTextBoxTag
+        {
+            public int LadderIndex { get; set; }
+            public ScaleInOverlayFieldKind FieldKind { get; set; }
+        }
+
+        private enum ScaleInOverlayFieldKind
+        {
+            Entries,
+            SpacingTicks
+        }
+
+        private enum ScaleInMeasurementDragTarget
+        {
+            None,
+            OriginalMeasurement,
+            SpacingMeasurements
         }
 
         private class TradeRuntimeState
@@ -404,6 +530,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             public double LastAutoEntryLimitPrice;
             public bool EntryOrderPending;
             public bool EntryCancelRequested;
+            public string EntryCancelOrderId;
+            public bool UsesAccountEntryOrders;
+            public DateTime LastEntryOrderAdjustAt;
             public bool ManualStopOverride;
             public bool ManualTargetOverride;
             public bool ManualStopPending;
@@ -414,6 +543,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             public bool PendingAutoTargetUpdate;
             public double PendingAutoStopPrice;
             public double PendingAutoTargetPrice;
+            public double LastAutoStopRequestPrice;
+            public double LastAutoTargetRequestPrice;
+            public DateTime LastAutoStopRequestAtUtc;
+            public DateTime LastAutoTargetRequestAtUtc;
             public bool ForcedDemaTrailLogged;
             public double LastStopPrice;
             public double LastTargetPrice;
@@ -679,6 +812,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ExitOnSessionCloseSeconds = 60;
                 BarsRequiredToTrade = 50;
                 IsInstantiatedOnEachOptimizationIteration = true;
+                TryConfigureConnectionLossHandlingDefault();
 
                 // Toggles
                 UseSMA = true;
@@ -770,13 +904,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ShowVwapMrVisuals = true;
                 ShowChecklistVisuals = true;
                 ShowStatusPanelVisuals = true;
-                ShowBiasButtons = true;
-                ShowMiscButtons = true;
+                ShowBiasButtons = false;
+                ShowMiscButtons = false;
                 ShowTradePnlTags = true;
                 showChecklistVisuals = ShowChecklistVisuals;
                 showStatusPanelVisuals = ShowStatusPanelVisuals;
                 syntheticAutoRetakeEnabled = true;
                 EnableStraddleTrades = false;
+                StraddleOverridesHaltMode = false;
+                StraddlePreserveTarget = false;
+                EnableStraddleTrailing = true;
+                StraddleExecutionMode = StraddleExecutionModeOption.Market;
+                StraddleDelayedEntryMilliseconds = 0;
                 StraddleStartHour = OrbStartHour;
                 StraddleStartMinute = OrbStartMinute;
                 StraddleRangeMinutes = 20;
@@ -792,7 +931,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnableScaleInTrailing = true;
                 ScaleInDrawdownTicks = 30;
                 ScaleInTradesToAdd = 1;
-                ScaleInMaxTrades = 0;
+                ScaleInMaxTrades = 5;
                 ScaleInTrailActivationMode = BreakEvenTriggerModeOption.Dollars;
                 ScaleInTrailActivationValue = 500;
                 ScaleInProfitLockMode = BreakEvenTriggerModeOption.Dollars;
@@ -902,7 +1041,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // optional: log parameters once per iteration for diagnostics
                 if (Debug)
                 {
-                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, EnableRegimeSwitching={EnableRegimeSwitching}, EnableCandleConviction={EnableCandleConviction}, RsiChopLong={RsiChopLongThreshold}, RsiChopShort={RsiChopShortThreshold}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, PublishScaleInTradesToBridge={PublishScaleInTradesToBridge}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ScaleInTradesToAdd={ScaleInTradesToAdd}, ScaleInMaxTrades={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationValue={ScaleInTrailActivationValue}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockValue={ScaleInProfitLockValue}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementValue={ScaleInTrailIncrementValue}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, EnableGlobalTrailing={EnableGlobalTrailing}, GlobalTrailActivationMode={GlobalTrailActivationMode}, GlobalTrailActivationValue={GlobalTrailActivationValue}, GlobalProfitLockMode={GlobalProfitLockMode}, GlobalProfitLockValue={GlobalProfitLockValue}, GlobalTrailIncrementMode={GlobalTrailIncrementMode}, GlobalTrailIncrementValue={GlobalTrailIncrementValue}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
+                    StrategyLogDebug($"PARAMS: Bias={Bias}, ReverseSignalTrading={ReverseSignalTrading}, EnableVoteEntrySignals={EnableVoteEntrySignals}, EnableRegimeSwitching={EnableRegimeSwitching}, EnableCandleConviction={EnableCandleConviction}, RsiChopLong={RsiChopLongThreshold}, RsiChopShort={RsiChopShortThreshold}, MinLong={MinSignalsToEnterLong}, MinShort={MinSignalsToEnterShort}, TradesPerEntry={TradesPerEntry}, TreatMultiEntryAsSingleTrade={TreatMultiEntryAsSingleTrade}, EntryCooldownBars={EntryCooldownBars}, EnableOrbFilter={EnableOrbFilter}, OrbMinutes={OrbMinutes}, OrbUseFixedStartTime={OrbUseFixedStartTime}, OrbStartHour={OrbStartHour}, OrbStartMinute={OrbStartMinute}, OrbPreStartBlockMinutes={OrbPreStartBlockMinutes}, EnableChopFilter={EnableChopFilter}, ChopLookbackBars={ChopLookbackBars}, ChopAdxPeriod={ChopAdxPeriod}, ChopAdxThreshold={ChopAdxThreshold}, ChopBollingerPeriod={ChopBollingerPeriod}, ChopBollingerStdDev={ChopBollingerStdDev}, ChopBBWidthPct={ChopBBWidthPct}, ChopBreakoutBufferTicks={ChopBreakoutBufferTicks}, ChopBreakoutHoldBars={ChopBreakoutHoldBars}, EnableCompressionGuard={EnableCompressionGuard}, CompressionGuardBbWidthPct={CompressionGuardBbWidthPct}, CompressionGuardRequireBoth={CompressionGuardRequireBoth}, EnableChopDecayGate={EnableChopDecayGate}, ChopDecayBars={ChopDecayBars}, ChopDecayAdxDelta={ChopDecayAdxDelta}, ChopDecayBbWidthDeltaPct={ChopDecayBbWidthDeltaPct}, EnableChopRangeTrades={EnableChopRangeTrades}, ChopRangeMode={ChopRangeMode}, ChopRangeLookbackBars={ChopRangeLookbackBars}, ChopTradesPerEntry={ChopTradesPerEntry}, ChopStopType={ChopStopType}, ChopStopTicks={ChopStopTicks}, ChopStopAtrMult={ChopStopAtrMult}, ChopTrailTicks={ChopTrailTicks}, ChopTrailPlusTicks={ChopTrailPlusTicks}, ChopAddOnProfitMode={ChopAddOnProfitMode}, ChopAddOnProfitTicks={ChopAddOnProfitTicks}, ChopAddOnProfitDollars={ChopAddOnProfitDollars}, EnableHtfSwingGate={EnableHtfSwingGate}, HtfSwingMode={HtfSwingMode}, HtfSwingAction={HtfSwingAction}, HtfSwingLookbackBars={HtfSwingLookbackBars}, HtfSwingPivotStrength={HtfSwingPivotStrength}, HtfSwingDistanceAtr={HtfSwingDistanceAtr}, HtfSwingAtrPeriod={HtfSwingAtrPeriod}, HtfSwingHoldBars={HtfSwingHoldBars}, HtfSwingPrimaryMinutes={HtfSwingPrimaryMinutes}, HtfSwingSecondaryMinutes={HtfSwingSecondaryMinutes}, EnableVolatilityExpansionVote={EnableVolatilityExpansionVote}, VolExpBbWidthDeltaPct={VolExpBbWidthDeltaPct}, VolExpAtrBaselinePeriod={VolExpAtrBaselinePeriod}, VolExpAtrMultiplier={VolExpAtrMultiplier}, EnableRvolGate={EnableRvolGate}, RvolLookbackBars={RvolLookbackBars}, RvolMin={RvolMin}, VrocLookbackBars={VrocLookbackBars}, VrocMinPct={VrocMinPct}, ShowFilterVisuals={ShowFilterVisuals}, ShowTradePnlTags={ShowTradePnlTags}, Visuals[SMA={ShowSmaVisuals},EMA={ShowEmaVisuals},RSI={ShowRsiVisuals},MACD={ShowMacdVisuals},ATR={ShowAtrVisuals},BB={ShowChopBbVisuals},VWAP={ShowVwapMrVisuals}], EnableStraddleTrades={EnableStraddleTrades}, StraddleOverridesHaltMode={StraddleOverridesHaltMode}, StraddlePreserveTarget={StraddlePreserveTarget}, EnableStraddleTrailing={EnableStraddleTrailing}, StraddleExecutionMode={StraddleExecutionMode}, StraddleDelayedEntryMilliseconds={StraddleDelayedEntryMilliseconds}, StraddleStartHour={StraddleStartHour}, StraddleStartMinute={StraddleStartMinute}, StraddleRangeMinutes={StraddleRangeMinutes}, StraddleZoneTicks={StraddleZoneTicks}, StraddleZoneOffsetTicks={StraddleZoneOffsetTicks}, TradesPerStraddleEntry={TradesPerStraddleEntry}, StraddleAtrStopMult={StraddleAtrStopMult}, StraddleAtrTrailMult={StraddleAtrTrailMult}, StraddleTrailActivationDollars={StraddleTrailActivationDollars}, StraddleMinProfitHoldSeconds={StraddleMinProfitHoldSeconds}, EnableScaleInTrades={EnableScaleInTrades}, PublishScaleInTradesToBridge={PublishScaleInTradesToBridge}, EnableScaleInTrailing={EnableScaleInTrailing}, ScaleInDrawdownTicks={ScaleInDrawdownTicks}, ContractsPerScaleLevel={ScaleInTradesToAdd}, ScaleLevelCount={ScaleInMaxTrades}, ScaleInTrailActivationMode={ScaleInTrailActivationMode}, ScaleInTrailActivationValue={ScaleInTrailActivationValue}, ScaleInProfitLockMode={ScaleInProfitLockMode}, ScaleInProfitLockValue={ScaleInProfitLockValue}, ScaleInTrailIncrementMode={ScaleInTrailIncrementMode}, ScaleInTrailIncrementValue={ScaleInTrailIncrementValue}, UseSMA={UseSMA}, SmaPeriod={SmaPeriod}, UseEMA={UseEMA}, EmaFast={EmaFast}, EmaSlow={EmaSlow}, UseRSI={UseRSI}, RsiPeriod={RsiPeriod}, RsiSmooth={RsiSmooth}, RsiLong={RsiLongThreshold}, RsiShort={RsiShortThreshold}, UseMACD={UseMACD}, VwapGate={UseVwapDirectionGate}, VwapTF={VwapMrTimeframe}, VwapBands={VwapBand1Multiplier}/{VwapBand2Multiplier}, VwapSpikeFilter={VwapFilterSpikes}, VwapSpikeThreshold={VwapSpikeThreshold}, MacdFast={MacdFast}, MacdSlow={MacdSlow}, MacdSmooth={MacdSmooth}, AtrPeriod={AtrPeriod}, StopType={StopType}, StopTicks={StopTicks}, AtrStopMult={AtrStopMult}, TargetType={TargetType}, TargetTicks={TargetTicks}, AtrTargetMult={AtrTargetMult}, ManualEntryOffsetTicks={ManualEntryOffsetTicks}, EnableGlobalTrailing={EnableGlobalTrailing}, GlobalTrailActivationMode={GlobalTrailActivationMode}, GlobalTrailActivationValue={GlobalTrailActivationValue}, GlobalProfitLockMode={GlobalProfitLockMode}, GlobalProfitLockValue={GlobalProfitLockValue}, GlobalTrailIncrementMode={GlobalTrailIncrementMode}, GlobalTrailIncrementValue={GlobalTrailIncrementValue}, UseDemaAtrTrailing={UseDemaAtrTrailing}, UseTightDemaAtrTrailing={UseTightDemaAtrTrailing}, DemaAtrPeriod={DemaAtrPeriod}, DemaAtrMultiplier={DemaAtrMultiplier}, DemaAtrActivationMode={DemaAtrActivationMode}, DemaAtrActivationValue={DemaAtrActivationValue}, UseBreakEvenClamp={UseBreakEvenClamp}, BreakEvenTriggerMode={BreakEvenTriggerMode}, BreakEvenTriggerTicks={BreakEvenTriggerTicks}, BreakEvenTriggerDollars={BreakEvenTriggerDollars}, BreakEvenPlusTicks={BreakEvenPlusTicks}, EnableDemaAtrOnBreakEvenClamp={EnableDemaAtrOnBreakEvenClamp}, EnableSignalDiagnostics={EnableSignalDiagnostics}, EnableTradeStoryLogging={EnableTradeStoryLogging}, StartHaltedOnEnable={StartHaltedOnEnable}");
                 }
 
                 if (tradeStates == null)
@@ -952,10 +1091,11 @@ namespace NinjaTrader.NinjaScript.Strategies
 				// Compute how many indicator families are enabled so we can cap required votes safely
 				maxSignalSlots = (UseSMA ? 1 : 0) + (UseEMA ? 1 : 0) + (UseRSI ? 1 : 0) + (UseMACD ? 1 : 0) + (EnableVolatilityExpansionVote ? 1 : 0);
 				if (maxSignalSlots <= 0) maxSignalSlots = 1; // prevent zero causing impossible thresholds
-					if (Debug && (MinSignalsToEnterLong > maxSignalSlots || MinSignalsToEnterShort > maxSignalSlots))
+                if (Debug && (MinSignalsToEnterLong > maxSignalSlots || MinSignalsToEnterShort > maxSignalSlots))
 						StrategyLogInfo($"WARN: MinSignals exceeds enabled indicators; capping in runtime. slots={maxSignalSlots} effMinL={Math.Min(MinSignalsToEnterLong, maxSignalSlots)} effMinS={Math.Min(MinSignalsToEnterShort, maxSignalSlots)}");
 
                 ResetTradeState();
+                ResetRuntimeScaleInLevelsToDefaults();
 
                 if (MultiStratManager.Instance != null && MultiStratManager.Instance.TradeSync != null)
                     MultiStratManager.Instance.TradeSync.RegisterStrategy(this);
@@ -967,6 +1107,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else if (State == State.Realtime)
             {
+                SubscribeAccountEvents();
+
                 // Daily PnL limits are "today-only" per Accounts tab; reset local latch on startup.
                 ResetDailyPnLLimitState("realtime_start");
                 RefreshDailyPnLLimitOnEnable();
@@ -981,6 +1123,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Flush any historical bookkeeping so live executions start from a clean slate.
                 ResetTradeState();
+                CancelAllAccountStraddlePendingOrders("realtime_start_cleanup");
                 StrategyLogInfo("[AUTO] Strategy entered realtime; automation enabled");
 
                 TryInitializeChartTraderButtons();
@@ -1002,6 +1145,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (State == State.Terminated)
             {
                 shutdownInProgress = true;
+                UnsubscribeAccountEvents();
 
                 try
                 {
@@ -1029,6 +1173,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 ResetTradeState(preserveProtection);
                 if (MultiStratManager.Instance != null && MultiStratManager.Instance.TradeSync != null)
                     MultiStratManager.Instance.TradeSync.UnregisterStrategy(this);
+                RemoveScaleInOverlayButtons();
                 RemoveChartTraderButtons();
                 RemoveDrawObject("BaseOptAutoChecklist");
                 UpdateStatusLabel("Stopped", false);
@@ -1041,6 +1186,39 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
         #endregion
+
+        private void TryConfigureConnectionLossHandlingDefault()
+        {
+            try
+            {
+                PropertyInfo property = GetType().GetProperty("ConnectionLossHandling", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)
+                    return;
+
+                string[] preferredModes =
+                {
+                    "KeepRunning",
+                    "ReconnectAndKeepRunning",
+                    "WaitUntilReconnected",
+                    "Recalculate"
+                };
+
+                string[] enumNames = Enum.GetNames(property.PropertyType);
+                foreach (string preferredMode in preferredModes)
+                {
+                    string matchedName = enumNames.FirstOrDefault(name => string.Equals(name, preferredMode, StringComparison.OrdinalIgnoreCase));
+                    if (string.IsNullOrEmpty(matchedName))
+                        continue;
+
+                    object value = Enum.Parse(property.PropertyType, matchedName, true);
+                    property.SetValue(this, value, null);
+                    return;
+                }
+            }
+            catch
+            {
+            }
+        }
 
         public override string DisplayName
         {
@@ -1075,7 +1253,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (e.MarketDataType == MarketDataType.Ask)
                 lastAsk = e.Price;
             else if (e.MarketDataType == MarketDataType.Last)
+            {
                 lastLast = e.Price;
+                if (e.Price > 0)
+                {
+                    lastStraddleTrackingPrice = e.Price;
+                    lastStraddleTrackingTime = eventTime;
+                }
+            }
             else
                 return;
             if (e.Time != DateTime.MinValue)
@@ -1156,8 +1341,51 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        protected override void OnRender(ChartControl chartControl, ChartScale chartScale)
+        {
+            base.OnRender(chartControl, chartScale);
+
+            if (IsInHitTest
+                || RenderTarget == null
+                || ChartPanel == null
+                || ChartBars == null
+                || chartScale == null
+                || !EnableScaleInTrades)
+                return;
+
+            double currentPrice = GetRealtimePrice();
+            List<ScaleInRenderableLevel> levels = GetRenderableActiveScaleInLevels(currentPrice);
+
+            using (var originalMeasurementDxBrush = ScaleInOriginalMeasurementBrush.ToDxBrush(RenderTarget))
+            using (var spacingMeasurementDxBrush = ScaleInSpacingMeasurementBrush.ToDxBrush(RenderTarget))
+            using (var measurementLabelBackgroundDxBrush = new SolidColorBrush(Color.FromArgb(236, 8, 12, 18)).ToDxBrush(RenderTarget))
+            using (var measurementLabelShadowDxBrush = new SolidColorBrush(Color.FromArgb(220, 0, 0, 0)).ToDxBrush(RenderTarget))
+            using (var measurementTextFormat = new SimpleFont("Arial", 10) { Bold = true }.ToDirectWriteTextFormat())
+            {
+                float panelLeft = ChartPanel.X;
+                float panelRight = ChartPanel.X + ChartPanel.W;
+                float lastVisibleBarX = chartControl.GetXByBarIndex(ChartBars, Math.Max(0, ChartBars.ToIndex));
+
+                RenderScaleInMeasurementOverlays(
+                    chartScale,
+                    measurementTextFormat,
+                    originalMeasurementDxBrush,
+                    spacingMeasurementDxBrush,
+                    measurementLabelBackgroundDxBrush,
+                    measurementLabelShadowDxBrush,
+                    levels,
+                    panelLeft,
+                    panelRight,
+                    lastVisibleBarX,
+                    currentPrice);
+            }
+        }
+
         private void OnBarUpdateCore()
         {
+            if (BarsInProgress == 0)
+                UpdateScaleInOverlayRuntimeState();
+
             int primaryBar = GetPrimaryCurrentBar();
             int minPrimaryBars = BarsRequiredToTrade;
             if (primaryBar < minPrimaryBars)
@@ -1228,11 +1456,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (tickPrice > 0)
                     {
                         lastLast = tickPrice;
+                        lastStraddleTrackingPrice = tickPrice;
+                        lastStraddleTrackingTime = tickTime;
                         if (tickTime != DateTime.MinValue)
                             lastMarketDataTime = tickTime;
                         UpdateStraddleRangeIntrabar(tickPrice, tickTime);
                         UpdateStraddleZones();
                         TryHandleStraddleEntry(tickPrice, tickTime);
+                        UpdateStraddleVisualsIntrabar(tickTime);
+                        UpdateStraddleCountdownVisual(tickTime, tickPrice);
                     }
                 }
 
@@ -2332,6 +2564,294 @@ namespace NinjaTrader.NinjaScript.Strategies
             return ApplyStraddleProtection(states, currentPrice, now);
         }
 
+        private bool IsStraddleManualHaltOverrideEnabled()
+        {
+            return EnableStraddleTrades && StraddleOverridesHaltMode;
+        }
+
+        private bool ShouldAllowStraddleWhileManualHalted()
+        {
+            return manualHaltActive && IsStraddleManualHaltOverrideEnabled();
+        }
+
+        private void SubscribeAccountEvents()
+        {
+            if (Account == null)
+                return;
+
+            if (ReferenceEquals(subscribedAccountEvents, Account))
+                return;
+
+            UnsubscribeAccountEvents();
+
+            try
+            {
+                Account.OrderUpdate += OnTrackedAccountOrderUpdate;
+                Account.ExecutionUpdate += OnTrackedAccountExecutionUpdate;
+                subscribedAccountEvents = Account;
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[STRADDLE] Failed to subscribe account events: {ex.Message}");
+            }
+        }
+
+        private void UnsubscribeAccountEvents()
+        {
+            if (subscribedAccountEvents == null)
+                return;
+
+            try
+            {
+                subscribedAccountEvents.OrderUpdate -= OnTrackedAccountOrderUpdate;
+                subscribedAccountEvents.ExecutionUpdate -= OnTrackedAccountExecutionUpdate;
+            }
+            catch
+            {
+            }
+
+            subscribedAccountEvents = null;
+        }
+
+        private bool TryResolveTrackedManualStraddleOrder(Order order, out string tradeId, out TradeRuntimeState state)
+        {
+            tradeId = null;
+            state = null;
+
+            if (order == null)
+                return false;
+            if (!TryExtractStraddlePendingTradeId(order.Oco, out tradeId))
+                return false;
+            if (!TryGetTradeState(tradeId, out state) || state == null)
+                return false;
+            if (!state.IsStraddleEntry || !state.UsesAccountEntryOrders)
+                return false;
+            return true;
+        }
+
+        private void OnTrackedAccountOrderUpdate(object sender, OrderEventArgs e)
+        {
+            try
+            {
+                if (e == null || e.Order == null)
+                    return;
+
+                string tradeId;
+                TradeRuntimeState state;
+                if (!TryResolveTrackedManualStraddleOrder(e.Order, out tradeId, out state))
+                    return;
+                if (!IsEntryOrderAction(e.Order.OrderAction))
+                    return;
+
+                state.EntryOrder = e.Order;
+
+                double actualEntryPrice = e.Order.OrderType == OrderType.StopMarket || e.Order.OrderType == OrderType.StopLimit
+                    ? (e.Order.StopPrice > 0 ? e.Order.StopPrice : e.StopPrice)
+                    : (e.Order.LimitPrice > 0 ? e.Order.LimitPrice : e.LimitPrice);
+                double requestedEntryPrice = e.Order.OrderType == OrderType.StopMarket || e.Order.OrderType == OrderType.StopLimit
+                    ? GetAccountOrderRequestedStopPrice(e.Order)
+                    : GetAccountOrderRequestedLimitPrice(e.Order);
+                double effectiveEntryPrice = requestedEntryPrice > 0 ? requestedEntryPrice : actualEntryPrice;
+
+                StrategyLogInfo($"[STRADDLE] Account order update {tradeId} state={e.OrderState} actual={actualEntryPrice:F2} requested={requestedEntryPrice:F2} filled={e.Filled}");
+
+                if (!IsTerminalState(e.OrderState))
+                {
+                    state.EntryOrderPending = true;
+                    if (actualEntryPrice > 0)
+                    {
+                        state.EntryPrice = actualEntryPrice;
+                        state.LastAutoEntryLimitPrice = actualEntryPrice;
+                    }
+
+                    if (state.PendingEntryPriceUpdate && state.PendingEntryLimitPrice > 0)
+                    {
+                        if (actualEntryPrice > 0 &&
+                            (IsEntryOrderPriceSettled(e.OrderState) || e.OrderState == OrderState.Accepted || e.OrderState == OrderState.Submitted) &&
+                            PricesClose(state.PendingEntryLimitPrice, actualEntryPrice))
+                        {
+                            state.PendingEntryPriceUpdate = false;
+                            state.PendingEntryLimitPrice = 0;
+                            state.EntryCancelRequested = false;
+                            state.EntryCancelOrderId = null;
+                            state.EntryPrice = actualEntryPrice;
+                            state.LastAutoEntryLimitPrice = actualEntryPrice;
+                        }
+                        else if (e.OrderState == OrderState.Working && actualEntryPrice > 0)
+                        {
+                            // The change request settled without the order actually landing on the
+                            // requested price. Treat the working price as authoritative so we do
+                            // not keep chasing a stale requested value into a through-market error.
+                            state.PendingEntryPriceUpdate = false;
+                            state.PendingEntryLimitPrice = 0;
+                            state.EntryCancelRequested = false;
+                            state.EntryCancelOrderId = null;
+                            state.EntryPrice = actualEntryPrice;
+                            state.LastAutoEntryLimitPrice = actualEntryPrice;
+                        }
+                        else if (requestedEntryPrice > 0 && PricesClose(state.PendingEntryLimitPrice, requestedEntryPrice))
+                        {
+                            state.LastAutoEntryLimitPrice = requestedEntryPrice;
+                        }
+                    }
+
+                    return;
+                }
+
+                if (e.OrderState == OrderState.Filled || e.Filled > 0)
+                {
+                    state.EntryOrderPending = false;
+                    state.PendingEntryPriceUpdate = false;
+                    state.PendingEntryLimitPrice = 0;
+                    state.EntryCancelRequested = false;
+                    state.EntryCancelOrderId = null;
+                    if (actualEntryPrice > 0)
+                    {
+                        state.EntryPrice = actualEntryPrice;
+                        state.LastAutoEntryLimitPrice = actualEntryPrice;
+                    }
+                    return;
+                }
+
+                bool preservePendingRestage = state.PendingEntryPriceUpdate && state.EntryCancelRequested;
+                if (preservePendingRestage)
+                {
+                    state.EntryOrderPending = true;
+                    return;
+                }
+
+                state.EntryOrder = null;
+                state.EntryOrderPending = false;
+                state.PendingEntryPriceUpdate = false;
+                state.PendingEntryLimitPrice = 0;
+                state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[STRADDLE] Account order update handler failed: {ex.Message}");
+            }
+        }
+
+        private void OnTrackedAccountExecutionUpdate(object sender, ExecutionEventArgs e)
+        {
+            try
+            {
+                if (e == null || e.Execution == null || e.Execution.Order == null)
+                    return;
+
+                string tradeId;
+                TradeRuntimeState state;
+                if (!TryResolveTrackedManualStraddleOrder(e.Execution.Order, out tradeId, out state))
+                    return;
+
+                OrderAction action = e.Execution.Order.OrderAction;
+                bool isEntry = action == OrderAction.Buy || action == OrderAction.SellShort;
+                bool isExit = action == OrderAction.Sell || action == OrderAction.BuyToCover;
+                if (!isEntry && !isExit)
+                    return;
+
+                StrategyLogInfo($"[STRADDLE] Account execution {tradeId} action={action} qty={e.Quantity} price={e.Price:F2}");
+
+                if (isEntry)
+                {
+                    HandleEntryExecution(e.Execution, state, false, true);
+
+                    ResetStraddleDelayedEntryCandidate();
+                    bool consumingFirstFill = !straddleSessionConsumed;
+                    straddleSessionConsumed = true;
+                    if (state.StraddleEntryTime == DateTime.MinValue)
+                        state.StraddleEntryTime = e.Execution.Time;
+                    if (state.EntrySide == MarketPosition.Long)
+                    {
+                        straddleLongTriggered = true;
+                        straddlePendingLongTradeIds.Remove(state.TradeId);
+                        CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_opposite_filled");
+                    }
+                    else if (state.EntrySide == MarketPosition.Short)
+                    {
+                        straddleShortTriggered = true;
+                        straddlePendingShortTradeIds.Remove(state.TradeId);
+                        CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_opposite_filled");
+                    }
+
+                    if (consumingFirstFill)
+                        StrategyLogInfo($"[STRADDLE] Session consumed by filled {state.EntrySide} entry {state.TradeId}; blocking additional straddle re-entry until next session.");
+
+                    return;
+                }
+
+                HandleExitExecution(e.Execution, state);
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[STRADDLE] Account execution update handler failed: {ex.Message}");
+            }
+        }
+
+        private bool HasLiveOrPendingStraddleActivity()
+        {
+            if (straddlePendingLongTradeIds.Count > 0 || straddlePendingShortTradeIds.Count > 0)
+                return true;
+
+            if (tradeStates == null || tradeStates.Count == 0)
+                return false;
+
+            foreach (var state in tradeStates.Values)
+            {
+                if (state == null || !state.IsStraddleEntry)
+                    continue;
+                if (state.RemainingQuantity > 0 || state.EntryOrderPending)
+                    return true;
+                if (GetLiveTrackedEntryOrder(state) != null)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool HasOpenAccountBackedTrades()
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return false;
+
+            foreach (var state in tradeStates.Values)
+            {
+                if (state == null || state.RemainingQuantity <= 0 || state.EntryOrderPending)
+                    continue;
+                if (state.UsesAccountEntryOrders)
+                    return true;
+                if (state.EntryOrder != null && state.EntryOrder.OrderEntry == OrderEntry.Manual)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private bool ShouldIgnoreStraddleStopRegression(TradeRuntimeState state, double effectivePrice)
+        {
+            if (state == null || !state.IsStraddleEntry || !state.StraddleTrailingActive)
+                return false;
+            if (state.LastStopPrice <= 0 || effectivePrice <= 0)
+                return false;
+
+            bool isLong = state.EntrySide == MarketPosition.Long;
+            if (isLong)
+                return effectivePrice < state.LastStopPrice && !PricesClose(effectivePrice, state.LastStopPrice);
+
+            return effectivePrice > state.LastStopPrice && !PricesClose(effectivePrice, state.LastStopPrice);
+        }
+
+        private double? ResolveStraddleConfiguredProtectionPrice(bool isStop, TradeRuntimeState referenceState, IEnumerable<TradeRuntimeState> states, double currentPrice)
+        {
+            if (referenceState == null)
+                return null;
+
+            int protectionQty = ResolveProtectionQuantity(referenceState, states);
+            double entryRef = ResolveProtectionReferenceEntryPrice(referenceState, currentPrice, preferPositionAverage: true);
+            return ResolveConfiguredProtectionPrice(isStop, referenceState.EntrySide, entryRef, protectionQty, GetLatestAtrValue());
+        }
+
         private bool ApplyStraddleProtection(List<TradeRuntimeState> states, double currentPrice, DateTime now)
         {
             if (states == null || states.Count == 0)
@@ -2350,8 +2870,19 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (tickSize <= 0)
                 tickSize = 1e-6;
 
+            TradeRuntimeState referenceState = states.FirstOrDefault(s => s != null);
+            if (referenceState == null)
+                return true;
+
+            double? configuredStop = ResolveStraddleConfiguredProtectionPrice(true, referenceState, states, currentPrice);
+            double? configuredTarget = StraddlePreserveTarget
+                ? ResolveStraddleConfiguredProtectionPrice(false, referenceState, states, currentPrice)
+                : null;
             double? hardStop = GetStraddleHardStopPrice(isLong ? MarketPosition.Long : MarketPosition.Short);
-            if (!hardStop.HasValue || hardStop.Value <= 0)
+            double? baselineStop = configuredStop.HasValue && configuredStop.Value > 0
+                ? configuredStop
+                : hardStop;
+            if (!baselineStop.HasValue || baselineStop.Value <= 0)
                 return true;
 
             double clampRef = currentPrice;
@@ -2370,30 +2901,108 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (state == null)
                     continue;
-                double desiredStop = hardStop.Value;
-                double? lastAccepted = state.LastStopPrice > 0 ? (double?)state.LastStopPrice : null;
+                double desiredStop = baselineStop.Value;
+                Order liveStopOrder = GetLiveNativeProtectionOrder(state, true);
+                bool hasLiveStopOrder = liveStopOrder != null && !IsTerminalState(liveStopOrder.OrderState);
+                double? lastAccepted = hasLiveStopOrder && liveStopOrder.StopPrice > 0
+                    ? (double?)liveStopOrder.StopPrice
+                    : (state.LastStopPrice > 0 ? (double?)state.LastStopPrice : null);
                 if (state.StraddleTrailingActive && lastAccepted.HasValue)
                     desiredStop = isLong ? Math.Max(lastAccepted.Value, desiredStop) : Math.Min(lastAccepted.Value, desiredStop);
                 double? safeStop = ClampStopPrice(desiredStop, clampRef, isLong, lastAccepted);
                 if (!safeStop.HasValue)
                     continue;
-                if (lastAccepted.HasValue && PricesClose(lastAccepted.Value, safeStop.Value))
+                if (hasLiveStopOrder && lastAccepted.HasValue && PricesClose(lastAccepted.Value, safeStop.Value))
+                {
+                    state.PendingAutoStopUpdate = false;
+                    state.PendingAutoStopPrice = 0;
+                    state.LastStopPrice = safeStop.Value;
                     continue;
+                }
 
-                IssueStopLoss(state.TradeId, CalculationMode.Price, safeStop.Value, false);
+                if (IssueStopLoss(state.TradeId, CalculationMode.Price, safeStop.Value, false))
+                {
+                    state.LastStopPrice = safeStop.Value;
+                    stopSet = true;
+                }
             }
 
-            if (!EnableScaleInTrades || !scaleInActive)
+            if (StraddlePreserveTarget)
+            {
+                foreach (var state in states)
+                {
+                    if (state == null || state.ExitAllTriggered)
+                        continue;
+
+                    if (!configuredTarget.HasValue || configuredTarget.Value <= 0)
+                        continue;
+
+                    double workingTarget = 0;
+                    Order liveTargetOrder = GetLiveNativeProtectionOrder(state, false);
+                    if (liveTargetOrder != null && !IsTerminalState(liveTargetOrder.OrderState))
+                    {
+                        workingTarget = liveTargetOrder.LimitPrice > 0 ? liveTargetOrder.LimitPrice : state.LastTargetPrice;
+                        if (workingTarget > 0)
+                            state.LastTargetPrice = workingTarget;
+                    }
+
+                    if (workingTarget > 0 && PricesClose(workingTarget, configuredTarget.Value))
+                    {
+                        state.PendingAutoTargetUpdate = false;
+                        state.PendingAutoTargetPrice = 0;
+                        state.LastTargetPrice = configuredTarget.Value;
+                        targetSet = true;
+                        continue;
+                    }
+
+                    if (state.PendingAutoTargetUpdate &&
+                        state.PendingAutoTargetPrice > 0 &&
+                        PricesClose(state.PendingAutoTargetPrice, configuredTarget.Value))
+                    {
+                        state.PendingAutoTargetUpdate = false;
+                        state.PendingAutoTargetPrice = 0;
+                        state.LastTargetPrice = configuredTarget.Value;
+                        targetSet = true;
+                        continue;
+                    }
+
+                    // Straddle does not use the synthetic target overlay, so preserving
+                    // the native target is the only way to keep the TP chart object visible.
+                    if (IssueProfitTarget(state.TradeId, CalculationMode.Price, configuredTarget.Value))
+                    {
+                        state.LastTargetPrice = configuredTarget.Value;
+                        targetSet = true;
+                    }
+                }
+            }
+            else
             {
                 foreach (var state in states)
                 {
                     if (state == null)
                         continue;
-                    if (state.TargetOrder != null && !IsTerminalState(state.TargetOrder.OrderState))
-                        TryCancelOrder(state.TradeId, state.TargetOrder, null, "target");
+                    Order liveTargetOrder = GetLiveNativeProtectionOrder(state, false);
+                    if (liveTargetOrder != null && !IsTerminalState(liveTargetOrder.OrderState))
+                        TryCancelOrder(state.TradeId, liveTargetOrder, null, "target");
                     state.TargetOrder = null;
                     state.LastTargetPrice = 0;
                 }
+            }
+
+            if (!EnableStraddleTrailing)
+            {
+                foreach (var state in states)
+                {
+                    if (state == null)
+                        continue;
+                    state.StraddleProfitStart = DateTime.MinValue;
+                    state.StraddleProfitGatePassed = false;
+                    state.StraddleTrailingActive = false;
+                    state.StraddleTrailHighWater = 0;
+                    state.StraddleTrailLowWater = 0;
+                }
+
+                return true;
             }
 
             double pnl = CalculateSignedUnrealizedPnlAtPrice(currentPrice);
@@ -2448,16 +3057,39 @@ namespace NinjaTrader.NinjaScript.Strategies
                             continue;
 
                         double desiredStop = trailStop;
-                        desiredStop = isLong ? Math.Max(desiredStop, hardStop.Value) : Math.Min(desiredStop, hardStop.Value);
-                        if (isLong && state.LastStopPrice > 0)
+                        desiredStop = isLong ? Math.Max(desiredStop, baselineStop.Value) : Math.Min(desiredStop, baselineStop.Value);
+                        Order liveStopOrder = GetLiveNativeProtectionOrder(state, true);
+                        double liveStopPrice = liveStopOrder != null && !IsTerminalState(liveStopOrder.OrderState) && liveStopOrder.StopPrice > 0
+                            ? liveStopOrder.StopPrice
+                            : 0;
+                        if (isLong && liveStopPrice > 0)
+                            desiredStop = Math.Max(liveStopPrice, desiredStop);
+                        else if (isLong && state.LastStopPrice > 0)
                             desiredStop = Math.Max(state.LastStopPrice, desiredStop);
-                        if (!isLong && state.LastStopPrice > 0)
+                        if (!isLong && liveStopPrice > 0)
+                            desiredStop = Math.Min(liveStopPrice, desiredStop);
+                        else if (!isLong && state.LastStopPrice > 0)
                             desiredStop = Math.Min(state.LastStopPrice, desiredStop);
 
-                        double? lastAccepted = state.LastStopPrice > 0 ? (double?)state.LastStopPrice : null;
+                        bool hasLiveStopOrder = liveStopOrder != null && !IsTerminalState(liveStopOrder.OrderState);
+                        double? lastAccepted = hasLiveStopOrder && liveStopPrice > 0
+                            ? (double?)liveStopPrice
+                            : (state.LastStopPrice > 0 ? (double?)state.LastStopPrice : null);
                         double? safeStop = ClampStopPrice(desiredStop, clampRef, isLong, lastAccepted);
-                        if (safeStop.HasValue && (!lastAccepted.HasValue || !PricesClose(lastAccepted.Value, safeStop.Value)))
-                            IssueStopLoss(state.TradeId, CalculationMode.Price, safeStop.Value, false);
+                        if (safeStop.HasValue && hasLiveStopOrder && lastAccepted.HasValue && PricesClose(lastAccepted.Value, safeStop.Value))
+                        {
+                            state.PendingAutoStopUpdate = false;
+                            state.PendingAutoStopPrice = 0;
+                            state.LastStopPrice = safeStop.Value;
+                        }
+                        else if (safeStop.HasValue)
+                        {
+                            if (IssueStopLoss(state.TradeId, CalculationMode.Price, safeStop.Value, false))
+                            {
+                                state.LastStopPrice = safeStop.Value;
+                                stopSet = true;
+                            }
+                        }
 
                         state.StraddleTrailingActive = true;
                         state.StraddleTrailHighWater = highWater;
@@ -2598,6 +3230,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool clearSyntheticManualOnSuccess = false;
             if (!PrepareSyntheticStopRequest(origin, desiredPrice, out clearSyntheticManualOnSuccess))
                 return false;
+
+            if (ShouldSuppressDuplicateManagedProtectionRequest(state, true, desiredPrice))
+            {
+                stopSet = true;
+                CompleteSyntheticStopRequest(origin, desiredPrice, clearSyntheticManualOnSuccess);
+                return true;
+            }
 
             if (state.PendingAutoStopUpdate && state.PendingAutoStopPrice > 0 && desiredPrice > 0 && PricesClose(state.PendingAutoStopPrice, desiredPrice))
             {
@@ -2757,6 +3396,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                                 || state.StopOrder.OrderState == OrderState.Working
                                 || state.StopOrder.OrderState == OrderState.Accepted)
                             {
+                                RecordManagedProtectionRequest(state, true, stopPrice);
                                 ChangeOrder(state.StopOrder, state.StopOrder.Quantity, stopPrice, stopPrice);
                                 state.LastStopPrice = stopPrice;
                                 stopSet = true;
@@ -2777,6 +3417,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // Start-behavior sync fills have no entry signal; use global exit orders (null fromEntrySignal)
                     // so Ninja attaches to the account position instead of expecting a matching signal name.
                     string fromEntry = state.Bootstrapped ? null : tradeId;
+                    RecordManagedProtectionRequest(state, true, stopPrice);
                     if (state.EntrySide == MarketPosition.Long)
                         state.StopOrder = ExitLongStopMarket(qty, stopPrice, stopSignal, fromEntry);
                     else
@@ -2848,6 +3489,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         state.LastStopPrice = 0;
                     }
 
+                    RecordManagedProtectionRequest(state, true, state.PendingAutoStopPrice > 0 ? state.PendingAutoStopPrice : desiredPrice);
                     SetStopLoss(tradeId, mode, targetValue, simulated);
                 }
                 CompleteSyntheticStopRequest(origin, desiredPrice, clearSyntheticManualOnSuccess);
@@ -2922,6 +3564,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool clearSyntheticManualOnSuccess = false;
             if (!PrepareSyntheticTargetRequest(origin, desiredPrice, out clearSyntheticManualOnSuccess))
                 return false;
+
+            if (ShouldSuppressDuplicateManagedProtectionRequest(state, false, desiredPrice))
+            {
+                targetSet = true;
+                CompleteSyntheticTargetRequest(origin, desiredPrice, clearSyntheticManualOnSuccess);
+                return true;
+            }
 
             if (state.PendingAutoTargetUpdate && state.PendingAutoTargetPrice > 0 && desiredPrice > 0 && PricesClose(state.PendingAutoTargetPrice, desiredPrice))
             {
@@ -3041,6 +3690,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                                 || state.TargetOrder.OrderState == OrderState.Working
                                 || state.TargetOrder.OrderState == OrderState.Accepted)
                             {
+                                RecordManagedProtectionRequest(state, false, targetPrice);
                                 ChangeOrder(state.TargetOrder, state.TargetOrder.Quantity, targetPrice, targetPrice);
                                 state.LastTargetPrice = targetPrice;
                                 state.PendingAutoTargetUpdate = false;
@@ -3058,6 +3708,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     // Use global exit orders for sync-bootstrapped fills (no entry signal)
                     string fromEntry = state.Bootstrapped ? null : tradeId;
+                    RecordManagedProtectionRequest(state, false, targetPrice);
                     if (state.EntrySide == MarketPosition.Long)
                         state.TargetOrder = ExitLongLimit(qty, targetPrice, targetSignal, fromEntry);
                     else
@@ -3095,6 +3746,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         StrategyLogInfo(string.Format("[AUTO][TARGET] Skip SetProfitTarget for {0}: price <= 0 ({1})", tradeId, value));
                         return false;
                     }
+                    RecordManagedProtectionRequest(state, false, state.PendingAutoTargetPrice > 0 ? state.PendingAutoTargetPrice : desiredPrice);
                     SetProfitTarget(tradeId, mode, desiredValue);
                 }
                 CompleteSyntheticTargetRequest(origin, desiredPrice, clearSyntheticManualOnSuccess);
@@ -3131,6 +3783,44 @@ namespace NinjaTrader.NinjaScript.Strategies
             return Math.Abs(a - b) <= tolerance * 0.25;
         }
 
+        private void RecordManagedProtectionRequest(TradeRuntimeState state, bool isStop, double requestedPrice)
+        {
+            if (state == null || requestedPrice <= 0 || double.IsNaN(requestedPrice) || double.IsInfinity(requestedPrice))
+                return;
+
+            DateTime now = DateTime.UtcNow;
+            if (isStop)
+            {
+                state.LastAutoStopRequestPrice = requestedPrice;
+                state.LastAutoStopRequestAtUtc = now;
+                return;
+            }
+
+            state.LastAutoTargetRequestPrice = requestedPrice;
+            state.LastAutoTargetRequestAtUtc = now;
+        }
+
+        private bool ShouldSuppressDuplicateManagedProtectionRequest(TradeRuntimeState state, bool isStop, double desiredPrice)
+        {
+            if (state == null || desiredPrice <= 0 || double.IsNaN(desiredPrice) || double.IsInfinity(desiredPrice))
+                return false;
+
+            double lastRequestedPrice = isStop ? state.LastAutoStopRequestPrice : state.LastAutoTargetRequestPrice;
+            DateTime lastRequestedAt = isStop ? state.LastAutoStopRequestAtUtc : state.LastAutoTargetRequestAtUtc;
+            if (lastRequestedPrice <= 0 || lastRequestedAt == DateTime.MinValue)
+                return false;
+            if (!PricesClose(lastRequestedPrice, desiredPrice))
+                return false;
+            if ((DateTime.UtcNow - lastRequestedAt).TotalMilliseconds > ManagedProtectionDuplicateSuppressMs)
+                return false;
+
+            Order trackedOrder = isStop ? state.StopOrder : state.TargetOrder;
+            if (trackedOrder != null && !IsTerminalState(trackedOrder.OrderState))
+                return true;
+
+            return isStop ? state.PendingAutoStopUpdate : state.PendingAutoTargetUpdate;
+        }
+
         private static bool IsProtectionPriceSettled(OrderState orderState)
         {
             switch (orderState)
@@ -3142,6 +3832,159 @@ namespace NinjaTrader.NinjaScript.Strategies
                 default:
                     return false;
             }
+        }
+
+        private static bool IsEntryOrderPriceSettled(OrderState orderState)
+        {
+            switch (orderState)
+            {
+                case OrderState.Working:
+                case OrderState.PartFilled:
+                case OrderState.Filled:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool IsEntryOrderPriceChangePending(Order order)
+        {
+            if (order == null)
+                return false;
+
+            switch (order.OrderState)
+            {
+                case OrderState.ChangePending:
+                case OrderState.ChangeSubmitted:
+                case OrderState.Submitted:
+                case OrderState.Accepted:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static double GetAccountOrderChangedPrice(Order order, string propertyName)
+        {
+            if (order == null || string.IsNullOrWhiteSpace(propertyName))
+                return 0;
+
+            try
+            {
+                var prop = order.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+                if (prop == null)
+                    return 0;
+
+                object value = prop.GetValue(order, null);
+                if (value is double d)
+                    return d;
+                if (value is IConvertible convertible)
+                    return convertible.ToDouble(CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+            }
+
+            return 0;
+        }
+
+        private static bool TrySetAccountOrderChangedPrice(Order order, string propertyName, double price)
+        {
+            if (order == null || string.IsNullOrWhiteSpace(propertyName))
+                return false;
+
+            try
+            {
+                var prop = order.GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public);
+                if (prop == null || !prop.CanWrite)
+                    return false;
+
+                prop.SetValue(order, price, null);
+                return true;
+            }
+            catch
+            {
+            }
+
+            return false;
+        }
+
+        private static double GetAccountOrderRequestedStopPrice(Order order)
+        {
+            return GetAccountOrderChangedPrice(order, "StopPriceChanged");
+        }
+
+        private static double GetAccountOrderRequestedLimitPrice(Order order)
+        {
+            return GetAccountOrderChangedPrice(order, "LimitPriceChanged");
+        }
+
+        private static bool IsManualAccountEntryChangePending(Order order)
+        {
+            if (order == null)
+                return false;
+
+            switch (order.OrderState)
+            {
+                case OrderState.ChangePending:
+                case OrderState.ChangeSubmitted:
+                case OrderState.CancelPending:
+                case OrderState.CancelSubmitted:
+                    return true;
+                case OrderState.Accepted:
+                case OrderState.Submitted:
+                    double requestedStop = GetAccountOrderRequestedStopPrice(order);
+                    if (requestedStop > 0 && order.StopPrice > 0 && Math.Abs(requestedStop - order.StopPrice) > 1e-9)
+                        return true;
+
+                    double requestedLimit = GetAccountOrderRequestedLimitPrice(order);
+                    if (requestedLimit > 0 && order.LimitPrice > 0 && Math.Abs(requestedLimit - order.LimitPrice) > 1e-9)
+                        return true;
+                    return false;
+                default:
+                    return false;
+            }
+        }
+
+        private bool IsStraddlePendingStopThroughMarket(MarketPosition side, double stopPrice)
+        {
+            if (stopPrice <= 0)
+                return false;
+
+            double ask = lastAsk > 0 ? lastAsk : GetCurrentAsk();
+            double bid = lastBid > 0 ? lastBid : GetCurrentBid();
+            double realtime = GetRealtimePrice();
+            double lastTrade = lastLast > 0 ? lastLast : lastStraddleTrackingPrice;
+            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
+            if (tickSize <= 0)
+                tickSize = 0.25;
+            double minBuffer = tickSize;
+
+            if (side == MarketPosition.Long)
+            {
+                double marketReference = 0;
+                if (ask > 0)
+                    marketReference = Math.Max(marketReference, ask);
+                if (realtime > 0)
+                    marketReference = Math.Max(marketReference, realtime);
+                if (lastTrade > 0)
+                    marketReference = Math.Max(marketReference, lastTrade);
+                return marketReference > 0 && stopPrice <= marketReference + minBuffer;
+            }
+
+            if (side == MarketPosition.Short)
+            {
+                double marketReference = 0;
+                if (bid > 0)
+                    marketReference = marketReference == 0 ? bid : Math.Min(marketReference, bid);
+                if (realtime > 0)
+                    marketReference = marketReference == 0 ? realtime : Math.Min(marketReference, realtime);
+                if (lastTrade > 0)
+                    marketReference = marketReference == 0 ? lastTrade : Math.Min(marketReference, lastTrade);
+                return marketReference > 0 && stopPrice >= marketReference - minBuffer;
+            }
+
+            return false;
         }
 
         /*
@@ -3667,7 +4510,170 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool IsScaleInConfigured()
         {
-            return EnableScaleInTrades && ScaleInTradesToAdd > 0 && ScaleInDrawdownTicks > 0;
+            EnsureRuntimeScaleInLevelsSeeded();
+            return EnableScaleInTrades
+                && GetScaleInMaxAddCount() > 0
+                && GetScaleInLevelCount() > 0
+                && runtimeScaleInLevelSpacingTicks.All(ticks => ticks > 0);
+        }
+
+        private int GetScaleInContractsPerLevel()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (runtimeScaleInLevelEntries.Count <= 0)
+                return runtimeScaleInLevelsInitialized ? 0 : Math.Max(1, ScaleInTradesToAdd);
+
+            return runtimeScaleInLevelEntries.Max();
+        }
+
+        private int GetScaleInLevelCount()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (runtimeScaleInLevelEntries.Count <= 0)
+                return runtimeScaleInLevelsInitialized ? 0 : (ScaleInMaxTrades > 0 ? ScaleInMaxTrades : 5);
+
+            return runtimeScaleInLevelEntries.Count;
+        }
+
+        private int GetScaleInMaxAddCount()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (runtimeScaleInLevelEntries.Count <= 0)
+                return runtimeScaleInLevelsInitialized ? 0 : (Math.Max(1, ScaleInTradesToAdd) * (ScaleInMaxTrades > 0 ? ScaleInMaxTrades : 5));
+
+            return runtimeScaleInLevelEntries.Sum(qty => Math.Max(MinScaleInLevelEntries, qty));
+        }
+
+        private void ResetRuntimeScaleInLevelsToDefaults()
+        {
+            runtimeScaleInLevelEntries.Clear();
+            runtimeScaleInLevelSpacingTicks.Clear();
+
+            int levelCount = Math.Min(MaxRuntimeScaleInLevelCount, Math.Max(MinRuntimeScaleInLevelCount, ScaleInMaxTrades > 0 ? ScaleInMaxTrades : 5));
+            int defaultEntries = Math.Min(MaxScaleInLevelEntries, Math.Max(MinScaleInLevelEntries, ScaleInTradesToAdd));
+            int defaultSpacingTicks = Math.Min(MaxScaleInLevelSpacingTicks, Math.Max(MinScaleInLevelSpacingTicks, ScaleInDrawdownTicks));
+            for (int i = 0; i < levelCount; i++)
+            {
+                runtimeScaleInLevelEntries.Add(defaultEntries);
+                runtimeScaleInLevelSpacingTicks.Add(defaultSpacingTicks);
+            }
+
+            runtimeScaleInLevelsInitialized = true;
+            lastRuntimeScaleInLevelSignature = int.MinValue;
+        }
+
+        private void EnsureRuntimeScaleInLevelsSeeded()
+        {
+            if (!runtimeScaleInLevelsInitialized || runtimeScaleInLevelEntries.Count != runtimeScaleInLevelSpacingTicks.Count)
+                ResetRuntimeScaleInLevelsToDefaults();
+        }
+
+        private int GetRuntimeScaleInLevelEntriesValue(int ladderIndex)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (ladderIndex < 0 || ladderIndex >= runtimeScaleInLevelEntries.Count)
+                return Math.Min(MaxScaleInLevelEntries, Math.Max(MinScaleInLevelEntries, ScaleInTradesToAdd));
+
+            return runtimeScaleInLevelEntries[ladderIndex];
+        }
+
+        private int GetRuntimeScaleInLevelSpacingTicksValue(int ladderIndex)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (ladderIndex < 0 || ladderIndex >= runtimeScaleInLevelSpacingTicks.Count)
+                return Math.Min(MaxScaleInLevelSpacingTicks, Math.Max(MinScaleInLevelSpacingTicks, ScaleInDrawdownTicks));
+
+            return runtimeScaleInLevelSpacingTicks[ladderIndex];
+        }
+
+        private int GetRuntimeScaleInLevelSignature()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+
+            unchecked
+            {
+                int hash = 17;
+                foreach (int quantity in runtimeScaleInLevelEntries)
+                    hash = (hash * 31) + quantity;
+                foreach (int ticks in runtimeScaleInLevelSpacingTicks)
+                    hash = (hash * 31) + ticks;
+                return hash;
+            }
+        }
+
+        private int GetScaleInCurrentAddCount()
+        {
+            return Math.Max(0, scaleInTradesExecuted + scaleInTradesPending);
+        }
+
+        private int GetScaleInConsumedLevelCount()
+        {
+            return GetScaleInConsumedLevelCount(GetScaleInCurrentAddCount());
+        }
+
+        private int GetScaleInConsumedLevelCount(int currentAdds)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            currentAdds = Math.Max(0, currentAdds);
+
+            int consumedLevels = 0;
+            int cumulativeAdds = 0;
+            for (int i = 0; i < runtimeScaleInLevelEntries.Count; i++)
+            {
+                cumulativeAdds += Math.Max(MinScaleInLevelEntries, runtimeScaleInLevelEntries[i]);
+                if (currentAdds < cumulativeAdds)
+                    break;
+
+                consumedLevels++;
+            }
+
+            return consumedLevels;
+        }
+
+        private int GetScaleInCumulativeAddCountForLevel(int levelNumber)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (levelNumber <= 0)
+                return 0;
+
+            int maxLevel = Math.Min(levelNumber, runtimeScaleInLevelEntries.Count);
+            int total = 0;
+            for (int i = 0; i < maxLevel; i++)
+                total += Math.Max(MinScaleInLevelEntries, runtimeScaleInLevelEntries[i]);
+            return total;
+        }
+
+        private int GetScaleInCumulativeSpacingTicksForLevel(int levelNumber)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (levelNumber <= 0)
+                return 0;
+
+            int maxLevel = Math.Min(levelNumber, runtimeScaleInLevelSpacingTicks.Count);
+            int total = 0;
+            for (int i = 0; i < maxLevel; i++)
+                total += Math.Max(MinScaleInLevelSpacingTicks, runtimeScaleInLevelSpacingTicks[i]);
+            return total;
+        }
+
+        private int GetScaleInVisibleLevelCountByStopTicks(int stopTicks)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (stopTicks <= 0)
+                return runtimeScaleInLevelSpacingTicks.Count;
+
+            int cumulativeTicks = 0;
+            int visibleLevels = 0;
+            for (int i = 0; i < runtimeScaleInLevelSpacingTicks.Count; i++)
+            {
+                cumulativeTicks += Math.Max(MinScaleInLevelSpacingTicks, runtimeScaleInLevelSpacingTicks[i]);
+                if (cumulativeTicks > stopTicks)
+                    break;
+
+                visibleLevels++;
+            }
+
+            return visibleLevels;
         }
 
         private bool HasActiveScaleInTrades()
@@ -3686,20 +4692,24 @@ namespace NinjaTrader.NinjaScript.Strategies
             return scaleInTradesExecuted > 0;
         }
 
-        private double GetDefaultScaleInTriggerPrice(double entryPrice, bool isLong, int stepIndex, int stepTicks, double tickSize)
+        private double GetDefaultScaleInTriggerPrice(double entryPrice, bool isLong, int stepIndex, double tickSize)
         {
-            if (entryPrice <= 0 || stepIndex <= 0 || stepTicks <= 0 || tickSize <= 0)
+            if (entryPrice <= 0 || stepIndex <= 0 || tickSize <= 0)
+                return 0;
+
+            int cumulativeTicks = GetScaleInCumulativeSpacingTicksForLevel(stepIndex);
+            if (cumulativeTicks <= 0)
                 return 0;
 
             double price = isLong
-                ? entryPrice - (stepIndex * stepTicks * tickSize)
-                : entryPrice + (stepIndex * stepTicks * tickSize);
+                ? entryPrice - (cumulativeTicks * tickSize)
+                : entryPrice + (cumulativeTicks * tickSize);
             return RoundToInstrumentTick(price);
         }
 
-        private double ResolveScaleInTriggerPrice(double entryPrice, bool isLong, int stepIndex, int stepTicks, double tickSize)
+        private double ResolveScaleInTriggerPrice(double entryPrice, bool isLong, int stepIndex, double tickSize)
         {
-            double defaultPrice = GetDefaultScaleInTriggerPrice(entryPrice, isLong, stepIndex, stepTicks, tickSize);
+            double defaultPrice = GetDefaultScaleInTriggerPrice(entryPrice, isLong, stepIndex, tickSize);
             double manualPrice;
             if (scaleInManualTriggerPrices.TryGetValue(stepIndex, out manualPrice) &&
                 manualPrice > 0 &&
@@ -3710,6 +4720,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             return defaultPrice;
+        }
+
+        private string GetScaleInDrawdownTag(int stepIndex)
+        {
+            return ScaleInDrawdownTagPrefix + stepIndex.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private string GetScaleInConsumedReferenceTag(int stepIndex)
+        {
+            return ScaleInDrawdownTagPrefix + "consumed_" + stepIndex.ToString(CultureInfo.InvariantCulture);
         }
 
         private bool IsScaleInTriggerTouched(MarketPosition side, double currentPrice, double triggerPrice)
@@ -3758,8 +4778,66 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 scaleInManualTriggerPrices[stepIndex] = linePrice;
                 if (Debug)
-                    StrategyLogDebug(string.Format("[SCALE_IN] Step {0} trigger moved to {1:F2}.", stepIndex, linePrice));
+                StrategyLogDebug(string.Format("[SCALE_IN] Step {0} trigger moved to {1:F2}.", stepIndex, linePrice));
             }
+        }
+
+        private void EnsureScaleInConsumedReferenceLine(int stepIndex, double price)
+        {
+            if (stepIndex <= 0 || price <= 0 || double.IsNaN(price) || double.IsInfinity(price))
+                return;
+
+            string tag = GetScaleInConsumedReferenceTag(stepIndex);
+            HorizontalLine line = FindHorizontalLine(tag);
+            if (line == null)
+                line = Draw.HorizontalLine(this, tag, price, ScaleInConsumedReferenceBrush);
+
+            ApplyScaleInConsumedReferenceLineStyle(line);
+            if (line?.StartAnchor != null)
+                line.StartAnchor.Price = price;
+
+            scaleInConsumedReferenceLines[stepIndex] = line;
+            scaleInConsumedTriggerPrices[stepIndex] = RoundToInstrumentTick(price);
+        }
+
+        private void RemoveScaleInConsumedReferenceLine(int stepIndex, bool removeStoredPrice = true)
+        {
+            if (stepIndex <= 0)
+                return;
+
+            RemoveDrawObject(GetScaleInConsumedReferenceTag(stepIndex));
+            scaleInConsumedReferenceLines.Remove(stepIndex);
+            if (removeStoredPrice)
+                scaleInConsumedTriggerPrices.Remove(stepIndex);
+        }
+
+        private void ClearScaleInConsumedReferenceLines(bool clearStoredPrices = true)
+        {
+            for (int i = 1; i <= MaxScaleInDrawdownLines; i++)
+                RemoveScaleInConsumedReferenceLine(i, clearStoredPrices);
+        }
+
+        private void ApplyScaleInConsumedReferenceLineStyle(HorizontalLine line)
+        {
+            if (line?.Stroke == null)
+                return;
+
+            line.IsLocked = false;
+            line.Stroke.Brush = ScaleInConsumedReferenceBrush;
+            line.Stroke.Width = 1;
+
+            var stroke = line.Stroke;
+            var helperProp = stroke.GetType().GetProperty("DashStyleHelper");
+            if (helperProp != null)
+            {
+                object dashValue = Enum.Parse(helperProp.PropertyType, "Solid");
+                helperProp.SetValue(stroke, dashValue, null);
+                return;
+            }
+
+            var dashProp = stroke.GetType().GetProperty("DashStyle");
+            if (dashProp != null && dashProp.PropertyType == typeof(DashStyle))
+                dashProp.SetValue(stroke, DashStyles.Solid, null);
         }
 
         private void TryTriggerScaleIn(double currentPrice)
@@ -3817,47 +4895,34 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return;
             }
 
-            int stepTicks = Math.Max(1, ScaleInDrawdownTicks);
             int stopTicks = ResolveProtectionTicks(true, ResolveProtectionQuantity(referenceState), GetLatestAtrValue());
-            if (stopTicks <= 0)
-                stopTicks = stepTicks;
+            int levelCount = GetScaleInLevelCount();
+            int maxAllowedAdds = GetScaleInMaxAddCount();
+            int maxSteps = Math.Min(levelCount, GetScaleInVisibleLevelCountByStopTicks(stopTicks));
 
-            int maxSteps = Math.Max(1, stopTicks / stepTicks);
-            maxSteps = Math.Min(maxSteps, MaxScaleInDrawdownLines);
-            if (ScaleInMaxTrades > 0)
+            int currentAdds = GetScaleInCurrentAddCount();
+            int consumedLevels = GetScaleInConsumedLevelCount(currentAdds);
+
+            int highestTouchedStep = consumedLevels;
+            for (int i = consumedLevels + 1; i <= maxSteps; i++)
             {
-                int maxStepsByTrades = (int)Math.Ceiling(ScaleInMaxTrades / (double)Math.Max(1, ScaleInTradesToAdd));
-                maxSteps = Math.Min(maxSteps, Math.Max(1, maxStepsByTrades));
-            }
-
-            int currentAdds = scaleInTradesExecuted + scaleInTradesPending;
-            int placedSteps = 0;
-            if (ScaleInTradesToAdd > 0)
-                placedSteps = currentAdds / ScaleInTradesToAdd;
-
-            int highestTouchedStep = placedSteps;
-            for (int i = placedSteps + 1; i <= maxSteps; i++)
-            {
-                double triggerPrice = ResolveScaleInTriggerPrice(entryPrice, Position.MarketPosition == MarketPosition.Long, i, stepTicks, tickSize);
+                double triggerPrice = ResolveScaleInTriggerPrice(entryPrice, Position.MarketPosition == MarketPosition.Long, i, tickSize);
                 if (!IsScaleInTriggerTouched(Position.MarketPosition, currentPrice, triggerPrice))
                     break;
 
                 highestTouchedStep = i;
             }
 
-            if (highestTouchedStep <= placedSteps)
+            if (highestTouchedStep <= consumedLevels)
                 return;
 
             int steps = highestTouchedStep;
-            int targetAdds = steps * ScaleInTradesToAdd;
+            int targetAdds = GetScaleInCumulativeAddCountForLevel(steps);
             int addsNeeded = targetAdds - currentAdds;
-            if (ScaleInMaxTrades > 0)
-            {
-                int remainingAllowed = ScaleInMaxTrades - currentAdds;
-                if (remainingAllowed <= 0)
-                    return;
-                addsNeeded = Math.Min(addsNeeded, remainingAllowed);
-            }
+            int remainingAllowed = maxAllowedAdds - currentAdds;
+            if (remainingAllowed <= 0)
+                return;
+            addsNeeded = Math.Min(addsNeeded, remainingAllowed);
             if (addsNeeded <= 0)
                 return;
 
@@ -3870,7 +4935,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             SubmitScaleInEntries(Position.MarketPosition, addsNeeded, qty, false);
 
             scaleInTriggered = true;
-            double triggerPriceForLog = ResolveScaleInTriggerPrice(entryPrice, Position.MarketPosition == MarketPosition.Long, steps, stepTicks, tickSize);
+            double triggerPriceForLog = ResolveScaleInTriggerPrice(entryPrice, Position.MarketPosition == MarketPosition.Long, steps, tickSize);
             StrategyLogInfo(string.Format("[SCALE_IN] DCA add {0} at drawdown {1:F1} ticks (step {2}, trigger={3:F2}, entry={4:F2})", addsNeeded, drawdownTicks, steps, triggerPriceForLog, entryPrice));
         }
 
@@ -3912,15 +4977,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateScaleInDrawdownVisuals(double currentPrice)
         {
-            if (!EnableScaleInTrades || ScaleInDrawdownTicks <= 0)
+            if (!EnableScaleInTrades)
             {
                 ClearScaleInDrawdownLines(true);
+                ClearScaleInConsumedReferenceLines();
                 return;
             }
 
             if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
             {
                 ClearScaleInDrawdownLines(true);
+                ClearScaleInConsumedReferenceLines();
                 return;
             }
 
@@ -3935,47 +5002,65 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (tickSize <= 0)
                 tickSize = 1e-6;
 
-            int stepTicks = Math.Max(1, ScaleInDrawdownTicks);
             TradeRuntimeState referenceState = GetScaleInReferenceState();
             int stopTicks = ResolveProtectionTicks(true, ResolveProtectionQuantity(referenceState), GetLatestAtrValue());
-            if (stopTicks <= 0)
-                stopTicks = stepTicks;
+            int levelCount = GetScaleInLevelCount();
+            int maxAllowedAdds = GetScaleInMaxAddCount();
+            int maxSteps = Math.Min(levelCount, GetScaleInVisibleLevelCountByStopTicks(stopTicks));
 
-            int maxSteps = Math.Max(1, stopTicks / stepTicks);
-            maxSteps = Math.Min(maxSteps, MaxScaleInDrawdownLines);
-            int maxStepsByTrades = 0;
-            if (ScaleInMaxTrades > 0)
-            {
-                maxStepsByTrades = (int)Math.Ceiling(ScaleInMaxTrades / (double)Math.Max(1, ScaleInTradesToAdd));
-                maxSteps = Math.Min(maxSteps, Math.Max(1, maxStepsByTrades));
-            }
-
-            int placedSteps = 0;
-            int currentAdds = scaleInTradesExecuted + scaleInTradesPending;
-            if (ScaleInTradesToAdd > 0)
-                placedSteps = currentAdds / ScaleInTradesToAdd;
-            if (ScaleInMaxTrades > 0 && currentAdds >= ScaleInMaxTrades && maxStepsByTrades > 0)
-                placedSteps = Math.Max(placedSteps, maxStepsByTrades);
+            int currentAdds = GetScaleInCurrentAddCount();
+            int consumedLevels = GetScaleInConsumedLevelCount(currentAdds);
+            if (currentAdds >= maxAllowedAdds)
+                consumedLevels = Math.Max(consumedLevels, maxSteps);
 
             bool isLong = Position.MarketPosition == MarketPosition.Long;
             Brush lineBrush = Brushes.Aqua;
 
             for (int i = 1; i <= MaxScaleInDrawdownLines; i++)
             {
-                string tag = ScaleInDrawdownTagPrefix + i;
-                if (i <= placedSteps || i > maxSteps)
+                string tag = GetScaleInDrawdownTag(i);
+                if (i > levelCount)
                 {
                     RemoveDrawObject(tag);
                     scaleInDrawdownLines.Remove(i);
-                    if (i <= placedSteps)
-                        scaleInManualTriggerPrices.Remove(i);
+                    RemoveScaleInConsumedReferenceLine(i);
+                    scaleInManualTriggerPrices.Remove(i);
                     continue;
                 }
 
-                double defaultPrice = GetDefaultScaleInTriggerPrice(entryPrice, isLong, i, stepTicks, tickSize);
+                if (i <= consumedLevels)
+                {
+                    double consumedPrice = 0;
+                    HorizontalLine consumedActiveLine;
+                    if (scaleInDrawdownLines.TryGetValue(i, out consumedActiveLine) && consumedActiveLine != null)
+                        consumedPrice = GetScaleInDrawdownLineAnchorPrice(consumedActiveLine);
+                    if (consumedPrice <= 0 && scaleInConsumedTriggerPrices.TryGetValue(i, out consumedPrice) && consumedPrice > 0)
+                    {
+                    }
+                    if (consumedPrice <= 0)
+                        consumedPrice = ResolveScaleInTriggerPrice(entryPrice, isLong, i, tickSize);
+
+                    if (consumedPrice > 0)
+                        EnsureScaleInConsumedReferenceLine(i, consumedPrice);
+
+                    RemoveDrawObject(tag);
+                    scaleInDrawdownLines.Remove(i);
+                    scaleInManualTriggerPrices.Remove(i);
+                    continue;
+                }
+
+                if (i > maxSteps)
+                {
+                    RemoveDrawObject(tag);
+                    scaleInDrawdownLines.Remove(i);
+                    continue;
+                }
+
+                RemoveScaleInConsumedReferenceLine(i, false);
+                double defaultPrice = GetDefaultScaleInTriggerPrice(entryPrice, isLong, i, tickSize);
                 SyncScaleInTriggerOverrideFromChart(i, defaultPrice);
 
-                double price = ResolveScaleInTriggerPrice(entryPrice, isLong, i, stepTicks, tickSize);
+                double price = ResolveScaleInTriggerPrice(entryPrice, isLong, i, tickSize);
                 if (price <= 0 || double.IsNaN(price))
                 {
                     RemoveDrawObject(tag);
@@ -4031,7 +5116,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private void ClearScaleInDrawdownLines(bool resetOverrides = false)
         {
             for (int i = 1; i <= MaxScaleInDrawdownLines; i++)
-                RemoveDrawObject(ScaleInDrawdownTagPrefix + i);
+                RemoveDrawObject(GetScaleInDrawdownTag(i));
 
             scaleInDrawdownLines.Clear();
             if (resetOverrides)
@@ -4079,7 +5164,82 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private double GetProtectionValue(bool isStop)
         {
-            return Math.Max(0.0, isStop ? AtrStopMult : AtrTargetMult);
+            double configuredValue = isStop ? AtrStopMult : AtrTargetMult;
+            double? runtimeValue = isStop ? runtimeStopLossValueOverride : runtimeTargetValueOverride;
+            return Math.Max(0.0, runtimeValue ?? configuredValue);
+        }
+
+        private bool SupportsRuntimeProtectionControls()
+        {
+            return ProtectionControlMode == ProtectionControlModeOption.ContinuouslyLocked;
+        }
+
+        private string GetProtectionUnitLabel(bool isStop)
+        {
+            if (isStop)
+            {
+                switch (StopType)
+                {
+                    case StopKind.ATR:
+                        return "ATR";
+                    case StopKind.Dollars:
+                        return "Dollars";
+                    default:
+                        return "Ticks";
+                }
+            }
+
+            switch (TargetType)
+            {
+                case TargetKind.ATR:
+                    return "ATR";
+                case TargetKind.Dollars:
+                    return "Dollars";
+                default:
+                    return "Ticks";
+            }
+        }
+
+        private string GetRuntimeProtectionToolTip(bool isStop)
+        {
+            string label = isStop ? "stoploss" : "target";
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "Runtime {0} override in {1}. This is not an exact price.",
+                label,
+                GetProtectionUnitLabel(isStop));
+        }
+
+        private string FormatProtectionInputValue(bool isStop)
+        {
+            double value = GetProtectionValue(isStop);
+            if (value <= 0 || double.IsNaN(value) || double.IsInfinity(value))
+                return string.Empty;
+
+            bool isTickMode = isStop ? StopType == StopKind.Ticks : TargetType == TargetKind.Ticks;
+            if (isTickMode)
+                return Math.Max(1, (int)Math.Round(value)).ToString(CultureInfo.InvariantCulture);
+
+            return value.ToString("0.########", CultureInfo.InvariantCulture);
+        }
+
+        private void UpdateRuntimeProtectionInputs()
+        {
+            if (ChartControl == null)
+                return;
+
+            Action apply = () =>
+            {
+                if (runtimeStopLossTextBox != null)
+                    runtimeStopLossTextBox.Text = FormatProtectionInputValue(true);
+                if (runtimeTargetTextBox != null)
+                    runtimeTargetTextBox.Text = FormatProtectionInputValue(false);
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
         }
 
         private bool IsAtrProtectionMode(bool isStop)
@@ -4278,22 +5438,21 @@ namespace NinjaTrader.NinjaScript.Strategies
             return states;
         }
 
-        private static bool ShouldShowSyntheticTargetLine(TradeRuntimeState state)
+        private bool ShouldShowSyntheticTargetLine(TradeRuntimeState state)
         {
-            return state != null && !state.IsStraddleEntry;
+            if (state == null)
+                return false;
+
+            if (state.IsStraddleEntry)
+                return StraddlePreserveTarget;
+
+            return true;
         }
 
         private double? ResolveSyntheticStopSeedPrice(TradeRuntimeState state)
         {
             if (state == null)
                 return null;
-
-            if (state.IsStraddleEntry)
-            {
-                double? hardStop = GetStraddleHardStopPrice(state.EntrySide);
-                if (hardStop.HasValue && hardStop.Value > 0)
-                    return RoundToInstrumentTick(hardStop.Value);
-            }
 
             double candidate = 0;
             if (state.PendingAutoStopPrice > 0)
@@ -4306,6 +5465,19 @@ namespace NinjaTrader.NinjaScript.Strategies
                 candidate = state.VwapTrailLastStopPrice.Value;
             else if (state.LastStopPrice > 0)
                 candidate = state.LastStopPrice;
+
+            if (candidate <= 0 && state.IsStraddleEntry)
+            {
+                double? configuredStop = ResolveStraddleConfiguredProtectionPrice(true, state, new[] { state }, GetRealtimePrice());
+                if (configuredStop.HasValue && configuredStop.Value > 0)
+                    candidate = configuredStop.Value;
+                else
+                {
+                    double? hardStop = GetStraddleHardStopPrice(state.EntrySide);
+                    if (hardStop.HasValue && hardStop.Value > 0)
+                        candidate = hardStop.Value;
+                }
+            }
 
             if (candidate <= 0)
                 return null;
@@ -4325,6 +5497,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 candidate = state.TargetOrder.LimitPrice;
             else if (state.LastTargetPrice > 0)
                 candidate = state.LastTargetPrice;
+
+            if (candidate <= 0 && state.IsStraddleEntry && StraddlePreserveTarget)
+            {
+                double? configuredTarget = ResolveStraddleConfiguredProtectionPrice(false, state, new[] { state }, GetRealtimePrice());
+                if (configuredTarget.HasValue && configuredTarget.Value > 0)
+                    candidate = configuredTarget.Value;
+            }
 
             if (candidate <= 0)
             {
@@ -4766,20 +5945,15 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (desiredPrice <= 0)
                 return null;
 
-            if (syntheticOriginalEntryLine == null)
-                syntheticOriginalEntryLine = Draw.HorizontalLine(this, SyntheticOriginalEntryLineTag, desiredPrice, Brushes.DodgerBlue);
+            // Redraw with the same tag instead of only mutating the existing anchor.
+            // NinjaTrader will reliably refresh the rendered line position this way,
+            // while in-place anchor updates can leave the visible line stale.
+            syntheticOriginalEntryLine = Draw.HorizontalLine(this, SyntheticOriginalEntryLineTag, desiredPrice, Brushes.DodgerBlue);
 
             if (syntheticOriginalEntryLine == null)
                 return null;
 
             ApplySyntheticOriginalEntryLineStyle(syntheticOriginalEntryLine);
-
-            double currentLinePrice = GetSyntheticLineAnchorPrice(syntheticOriginalEntryLine);
-            if (currentLinePrice <= 0 || !PricesClose(currentLinePrice, desiredPrice))
-            {
-                if (syntheticOriginalEntryLine.StartAnchor != null)
-                    syntheticOriginalEntryLine.StartAnchor.Price = desiredPrice;
-            }
 
             return syntheticOriginalEntryLine;
         }
@@ -4992,20 +6166,14 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (desiredPrice <= 0)
                 return null;
 
-            if (line == null)
-                line = Draw.HorizontalLine(this, tag, desiredPrice, brush);
+            // Redraw with the same tag on every refresh so the horizontal line
+            // stays visually aligned with the latest managed protection price.
+            line = Draw.HorizontalLine(this, tag, desiredPrice, brush);
 
             if (line == null)
                 return null;
 
             ApplySyntheticProtectionLineStyle(line, brush);
-
-            double currentLinePrice = GetSyntheticLineAnchorPrice(line);
-            if (currentLinePrice <= 0 || !PricesClose(currentLinePrice, desiredPrice))
-            {
-                if (line.StartAnchor != null)
-                    line.StartAnchor.Price = desiredPrice;
-            }
 
             return line;
         }
@@ -5115,11 +6283,13 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool IsSyntheticProtectionSettling(bool isStop)
         {
-            DateTime lastMove = isStop ? syntheticStopLastManualMoveAt : syntheticTargetLastManualMoveAt;
-            if (lastMove == DateTime.MinValue)
+            DateTime lastManualMove = isStop ? syntheticStopLastManualMoveAt : syntheticTargetLastManualMoveAt;
+            DateTime lastOrderSync = isStop ? syntheticStopLastOrderSyncAt : syntheticTargetLastOrderSyncAt;
+            DateTime lastActivity = lastManualMove > lastOrderSync ? lastManualMove : lastOrderSync;
+            if (lastActivity == DateTime.MinValue)
                 return false;
 
-            return (DateTime.UtcNow - lastMove).TotalMilliseconds < SyntheticProtectionSettleMs;
+            return (DateTime.UtcNow - lastActivity).TotalMilliseconds < SyntheticProtectionSettleMs;
         }
 
         private bool CanIssueSyntheticProtectionUpdate(List<TradeRuntimeState> states, bool isStop)
@@ -5201,12 +6371,18 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (syntheticStopPrice > 0 && IsSyntheticTouchConditionMet(true, side, syntheticStopPrice, marketPrice))
             {
+                if (IsSyntheticProtectionSettling(true))
+                    return false;
+
                 TriggerSyntheticProtectionExitAll("BS", "stop", syntheticStopPrice, marketPrice);
                 return true;
             }
 
             if (syntheticTargetPrice > 0 && IsSyntheticTouchConditionMet(false, side, syntheticTargetPrice, marketPrice))
             {
+                if (IsSyntheticProtectionSettling(false))
+                    return false;
+
                 TriggerSyntheticProtectionExitAll("BT", "target", syntheticTargetPrice, marketPrice);
                 return true;
             }
@@ -6977,10 +8153,23 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool TryGetStraddleTrackingPrice(out double price)
         {
             price = double.NaN;
-            double bid = !double.IsNaN(lastBid) ? lastBid : 0;
-            double ask = !double.IsNaN(lastAsk) ? lastAsk : 0;
 
-            if (lastLast > 0)
+            // Use the most recent tick/last-trade sample captured by the straddle path first.
+            // That keeps pre-start zone tracking independent from stale bid/ask snapshots and
+            // from any lag in secondary-series Close caching during replay.
+            if (lastStraddleTrackingPrice > 0 && !double.IsNaN(lastStraddleTrackingPrice))
+            {
+                price = lastStraddleTrackingPrice;
+                return true;
+            }
+
+            double realtime = GetRealtimePrice();
+            double bid = (!double.IsNaN(lastBid) && lastBid > 0) ? lastBid : GetCurrentBid();
+            double ask = (!double.IsNaN(lastAsk) && lastAsk > 0) ? lastAsk : GetCurrentAsk();
+
+            if (realtime > 0)
+                price = realtime;
+            else if (lastLast > 0)
                 price = lastLast;
             else if (bid > 0 && ask > 0)
                 price = (bid + ask) * 0.5;
@@ -6989,10 +8178,78 @@ namespace NinjaTrader.NinjaScript.Strategies
             else if (ask > 0)
                 price = ask;
 
-            if (price <= 0 || double.IsNaN(price))
-                price = GetRealtimePrice();
-
             return price > 0 && !double.IsNaN(price);
+        }
+
+        private double GetStraddleEntryLinePrice(MarketPosition side)
+        {
+            if (side == MarketPosition.Long)
+                return straddleLongZoneLower;
+            if (side == MarketPosition.Short)
+                return straddleShortZoneUpper;
+            return 0;
+        }
+
+        private bool TryGetLiveStraddlePendingStopPrice(MarketPosition side, out double stopPrice)
+        {
+            stopPrice = 0;
+
+            List<string> tradeIds = side == MarketPosition.Long
+                ? straddlePendingLongTradeIds
+                : (side == MarketPosition.Short ? straddlePendingShortTradeIds : null);
+            if (tradeIds == null || tradeIds.Count == 0)
+                return false;
+
+            foreach (string tradeId in tradeIds)
+            {
+                TradeRuntimeState state;
+                if (!TryGetTradeState(tradeId, out state) || state == null)
+                    continue;
+
+                Order entryOrder = GetLiveTrackedEntryOrder(state);
+                double workingStop = entryOrder != null && entryOrder.StopPrice > 0
+                    ? entryOrder.StopPrice
+                    : state.EntryPrice;
+                if (workingStop > 0 && !double.IsNaN(workingStop) && !double.IsInfinity(workingStop))
+                {
+                    stopPrice = workingStop;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private void GetDisplayedStraddleZonePrices(out double longLower, out double longUpper, out double shortUpper, out double shortLower)
+        {
+            longLower = straddleLongZoneLower;
+            longUpper = straddleLongZoneUpper;
+            shortUpper = straddleShortZoneUpper;
+            shortLower = straddleShortZoneLower;
+
+            if (!IsStraddlePendingOrderMode() || !straddleZonesFrozen)
+                return;
+
+            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
+            if (tickSize <= 0)
+                tickSize = TickSize;
+            if (tickSize <= 0)
+                return;
+
+            double zoneHeight = Math.Max(1, StraddleZoneTicks) * tickSize;
+            double liveLongStop;
+            if (TryGetLiveStraddlePendingStopPrice(MarketPosition.Long, out liveLongStop) && liveLongStop > 0)
+            {
+                longLower = liveLongStop;
+                longUpper = liveLongStop + zoneHeight;
+            }
+
+            double liveShortStop;
+            if (TryGetLiveStraddlePendingStopPrice(MarketPosition.Short, out liveShortStop) && liveShortStop > 0)
+            {
+                shortUpper = liveShortStop;
+                shortLower = liveShortStop - zoneHeight;
+            }
         }
 
         private int GetVwapMrTimeframeMinutes()
@@ -7814,6 +9071,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 RemoveDrawObject(StraddleRangeTag);
                 RemoveDrawObject(StraddleLongZoneTag);
                 RemoveDrawObject(StraddleShortZoneTag);
+                RemoveDrawObject(StraddleLongTriggerTag);
+                RemoveDrawObject(StraddleShortTriggerTag);
                 RemoveDrawObject(StraddleStatusTag);
                 RemoveDrawObject(StraddleCountdownTag);
                 RemoveDrawObject(StraddleHardStopLongTag);
@@ -8006,6 +9265,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (canDrawZones)
                 {
                     UpdateStraddleZones();
+                    double displayLongLower, displayLongUpper, displayShortUpper, displayShortLower;
+                    GetDisplayedStraddleZonePrices(out displayLongLower, out displayLongUpper, out displayShortUpper, out displayShortLower);
                     int startBarsAgo = FindBarsAgoForTime(straddleRangeStart);
                     int endBarsAgo = 0;
                     if (startBarsAgo >= 0 && endBarsAgo >= 0)
@@ -8016,18 +9277,48 @@ namespace NinjaTrader.NinjaScript.Strategies
                             startBarsAgo = endBarsAgo;
                             endBarsAgo = tmp;
                         }
-                        var longRect = Draw.Rectangle(this, StraddleLongZoneTag, false, startBarsAgo, straddleLongZoneUpper, endBarsAgo, straddleLongZoneLower, Brushes.DarkOrange, Brushes.Transparent, 8);
+                        var longRect = Draw.Rectangle(this, StraddleLongZoneTag, false, startBarsAgo, displayLongUpper, endBarsAgo, displayLongLower, Brushes.DarkOrange, Brushes.Transparent, 8);
                         if (longRect != null)
                         {
                             longRect.IsLocked = true;
+                            if (longRect.StartAnchor != null)
+                                longRect.StartAnchor.Price = displayLongUpper;
+                            if (longRect.EndAnchor != null)
+                                longRect.EndAnchor.Price = displayLongLower;
                             straddleLongZoneRect = longRect;
                         }
 
-                        var shortRect = Draw.Rectangle(this, StraddleShortZoneTag, false, startBarsAgo, straddleShortZoneUpper, endBarsAgo, straddleShortZoneLower, Brushes.DeepSkyBlue, Brushes.Transparent, 8);
+                        var shortRect = Draw.Rectangle(this, StraddleShortZoneTag, false, startBarsAgo, displayShortUpper, endBarsAgo, displayShortLower, Brushes.DeepSkyBlue, Brushes.Transparent, 8);
                         if (shortRect != null)
                         {
                             shortRect.IsLocked = true;
+                            if (shortRect.StartAnchor != null)
+                                shortRect.StartAnchor.Price = displayShortUpper;
+                            if (shortRect.EndAnchor != null)
+                                shortRect.EndAnchor.Price = displayShortLower;
                             straddleShortZoneRect = shortRect;
+                        }
+
+                        double longEntryLinePrice = displayLongLower;
+                        var longTriggerLine = Draw.HorizontalLine(this, StraddleLongTriggerTag, longEntryLinePrice, Brushes.DarkOrange);
+                        if (longTriggerLine != null)
+                        {
+                            longTriggerLine.IsLocked = true;
+                            longTriggerLine.Stroke.Width = 2;
+                            if (longTriggerLine.StartAnchor != null)
+                                longTriggerLine.StartAnchor.Price = longEntryLinePrice;
+                            straddleLongTriggerLine = longTriggerLine;
+                        }
+
+                        double shortEntryLinePrice = displayShortUpper;
+                        var shortTriggerLine = Draw.HorizontalLine(this, StraddleShortTriggerTag, shortEntryLinePrice, Brushes.DeepSkyBlue);
+                        if (shortTriggerLine != null)
+                        {
+                            shortTriggerLine.IsLocked = true;
+                            shortTriggerLine.Stroke.Width = 2;
+                            if (shortTriggerLine.StartAnchor != null)
+                                shortTriggerLine.StartAnchor.Price = shortEntryLinePrice;
+                            straddleShortTriggerLine = shortTriggerLine;
                         }
                     }
 
@@ -8061,12 +9352,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     RemoveDrawObject(StraddleLongZoneTag);
                     RemoveDrawObject(StraddleShortZoneTag);
+                    RemoveDrawObject(StraddleLongTriggerTag);
+                    RemoveDrawObject(StraddleShortTriggerTag);
                     RemoveDrawObject(StraddleHardStopLongTag);
                     RemoveDrawObject(StraddleHardStopShortTag);
                     RemoveDrawObject(StraddleHardStopLongLabelTag);
                     RemoveDrawObject(StraddleHardStopShortLabelTag);
                     straddleLongZoneRect = null;
                     straddleShortZoneRect = null;
+                    straddleLongTriggerLine = null;
+                    straddleShortTriggerLine = null;
                     straddleHardStopLongLine = null;
                     straddleHardStopShortLine = null;
                 }
@@ -8084,6 +9379,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 RemoveDrawObject(StraddleRangeTag);
                 RemoveDrawObject(StraddleLongZoneTag);
                 RemoveDrawObject(StraddleShortZoneTag);
+                RemoveDrawObject(StraddleLongTriggerTag);
+                RemoveDrawObject(StraddleShortTriggerTag);
                 RemoveDrawObject(StraddleStatusTag);
                 RemoveDrawObject(StraddleCountdownTag);
                 RemoveDrawObject(StraddleHardStopLongTag);
@@ -8980,8 +10277,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualBuyButton.Background = enabled ? Brushes.DarkGreen : Brushes.DimGray;
                     manualBuyButton.Foreground = enabled ? Brushes.White : Brushes.LightGray;
                     manualBuyButton.Opacity = enabled ? 1.0 : 0.6;
+                    manualBuyButton.Content = "Buy MKT";
                     manualBuyButton.ToolTip = enabled
-                        ? "Manual trades enabled while strategy is halted."
+                        ? "Submit an immediate market buy. If a short is open, this can close or reduce it immediately."
                         : "Enable by clicking Flatten + Halt.";
                 }
 
@@ -8991,8 +10289,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualSellButton.Background = enabled ? Brushes.DarkRed : Brushes.DimGray;
                     manualSellButton.Foreground = enabled ? Brushes.White : Brushes.LightGray;
                     manualSellButton.Opacity = enabled ? 1.0 : 0.6;
+                    manualSellButton.Content = "Sell MKT";
                     manualSellButton.ToolTip = enabled
-                        ? "Manual trades enabled while strategy is halted."
+                        ? "Submit an immediate market sell. If a long is open, this can close or reduce it immediately."
                         : "Enable by clicking Flatten + Halt.";
                 }
 
@@ -9005,7 +10304,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualLimitButton.Content = "Buy Pend";
                     OrderType buyOrderType = ResolveManualPendingOrderType(MarketPosition.Long);
                     manualLimitButton.ToolTip = enabled
-                        ? $"Place a pending buy order {ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()} current price. Strategy will use a {GetManualPendingOrderTypeText(buyOrderType)} order automatically."
+                        ? $"Place a pending buy order {ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()} current price. If short is open, this becomes a pending buy-to-cover exit. Strategy will use a {GetManualPendingOrderTypeText(buyOrderType)} order automatically."
                         : "Enable by clicking Flatten + Halt.";
                 }
 
@@ -9018,7 +10317,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     manualStopButton.Content = "Sell Pend";
                     OrderType sellOrderType = ResolveManualPendingOrderType(MarketPosition.Short);
                     manualStopButton.ToolTip = enabled
-                        ? $"Place a pending sell order {ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()} current price. Strategy will use a {GetManualPendingOrderTypeText(sellOrderType)} order automatically."
+                        ? $"Place a pending sell order {ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()} current price. If long is open, this becomes a pending sell exit. Strategy will use a {GetManualPendingOrderTypeText(sellOrderType)} order automatically."
                         : "Enable by clicking Flatten + Halt.";
                 }
 
@@ -9125,7 +10424,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateChopTradesPerEntryInput(bool force = false)
         {
-            if (chopTradesPerEntryTextBox == null || ChartControl == null)
+            if (ChartControl == null)
+                return;
+
+            UpdateChopTradesPerEntryVisibility(force);
+
+            if (chopTradesPerEntryTextBox == null || !IsChopRangeTradingEnabled())
                 return;
 
             if (!force && chopTradesPerEntryTextBox.IsKeyboardFocusWithin)
@@ -9143,6 +10447,31 @@ namespace NinjaTrader.NinjaScript.Strategies
                     return;
 
                 chopTradesPerEntryTextBox.Text = desiredValue.ToString();
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
+        }
+
+        private void UpdateChopTradesPerEntryVisibility(bool force = false)
+        {
+            if (chopTradesPerEntryPanel == null || ChartControl == null)
+                return;
+
+            bool visible = IsChopRangeTradingEnabled();
+            if (!force && lastChopTradesPerEntryVisible.HasValue && lastChopTradesPerEntryVisible.Value == visible)
+                return;
+
+            lastChopTradesPerEntryVisible = visible;
+
+            Action apply = () =>
+            {
+                if (chopTradesPerEntryPanel == null)
+                    return;
+
+                chopTradesPerEntryPanel.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
             };
 
             if (ChartControl.Dispatcher.CheckAccess())
@@ -9280,6 +10609,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 barTime >= armTime && barTime <= straddleWindowEnd;
             if (barTime > straddleWindowEnd && !IsStraddleTradeOpen())
                 straddleArmed = false;
+            if (straddleSessionConsumed && !IsStraddleTradeOpen())
+                straddleArmed = false;
             if (straddleLongTriggered && straddleShortTriggered && !IsStraddleTradeOpen())
                 straddleArmed = false;
         }
@@ -9308,6 +10639,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             straddleArmed = false;
             straddleLongTriggered = false;
             straddleShortTriggered = false;
+            straddleSessionConsumed = false;
             straddleLongManualOffsetTicks = null;
             straddleShortManualOffsetTicks = null;
             straddleLongAutoCenter = null;
@@ -9318,12 +10650,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             straddleHardStopShortAutoPrice = null;
             straddleLongZoneRect = null;
             straddleShortZoneRect = null;
+            straddleLongTriggerLine = null;
+            straddleShortTriggerLine = null;
             straddleHardStopLongLine = null;
             straddleHardStopShortLine = null;
             straddlePendingLongTradeIds.Clear();
             straddlePendingShortTradeIds.Clear();
+            lastStraddleTrackingPrice = double.NaN;
+            lastStraddleTrackingTime = DateTime.MinValue;
+            CancelAllAccountStraddlePendingOrders("straddle_session_init");
+            ResetStraddleDelayedEntryCandidate();
             straddleZonesFrozen = false;
-            straddleRangeShift = 0;
             UpdateStraddleZones();
         }
 
@@ -9347,12 +10684,88 @@ namespace NinjaTrader.NinjaScript.Strategies
             return armTime;
         }
 
+        private DateTime GetStraddleZoneFreezeTime()
+        {
+            if (straddleEventTime != DateTime.MinValue)
+                return straddleEventTime;
+            return straddleRangeEnd;
+        }
+
+        private void ResetStraddleDelayedEntryCandidate()
+        {
+            straddleDelayedEntryCandidateSide = MarketPosition.Flat;
+            straddleDelayedEntryCandidateStart = DateTime.MinValue;
+        }
+
+        private void CancelAllAccountStraddlePendingOrders(string reason, bool onlyWhenFlat = true)
+        {
+            if (Account == null || Account.Orders == null)
+                return;
+
+            if (onlyWhenFlat && Position != null && Position.MarketPosition != MarketPosition.Flat)
+                return;
+
+            int cancelled = 0;
+            foreach (Order accountOrder in Account.Orders.ToList())
+            {
+                if (accountOrder == null)
+                    continue;
+                if (!IsEntryOrderAction(accountOrder.OrderAction))
+                    continue;
+                if (IsTerminalState(accountOrder.OrderState))
+                    continue;
+
+                string pendingTradeId;
+                if (!TryExtractStraddlePendingTradeId(accountOrder.Oco, out pendingTradeId))
+                    continue;
+
+                try
+                {
+                    Account.Cancel(new[] { accountOrder });
+                    cancelled++;
+                }
+                catch
+                {
+                }
+            }
+
+            if (cancelled > 0)
+                StrategyLogInfo($"[STRADDLE] Cancelled {cancelled} leftover pending straddle order(s) due to {reason}.");
+        }
+
+        private MarketPosition ResolveStraddleCandidateSide(bool allowLong, bool allowShort, double currentBid, double currentAsk, double referencePrice, double longLower, double shortUpper)
+        {
+            bool longActive = allowLong && currentAsk > 0 && currentAsk >= longLower;
+            bool shortActive = allowShort && currentBid > 0 && currentBid <= shortUpper;
+
+            if (longActive && shortActive)
+            {
+                if (Math.Abs(referencePrice - longLower) <= Math.Abs(referencePrice - shortUpper))
+                    shortActive = false;
+                else
+                    longActive = false;
+            }
+
+            if (longActive)
+                return MarketPosition.Long;
+            if (shortActive)
+                return MarketPosition.Short;
+            return MarketPosition.Flat;
+        }
+
         private void BackfillStraddleRange(DateTime endTime)
         {
             int startBarsAgo = FindBarsAgoForTime(straddleRangeStart);
             int endBarsAgo = FindBarsAgoForTime(endTime);
             if (startBarsAgo < 0 || endBarsAgo < 0)
                 return;
+
+            int maxBarsAgo = GetPrimarySeriesMaxBarsAgo();
+            if (maxBarsAgo < 0)
+                return;
+
+            startBarsAgo = Math.Min(startBarsAgo, maxBarsAgo);
+            endBarsAgo = Math.Min(endBarsAgo, maxBarsAgo);
 
             if (startBarsAgo < endBarsAgo)
             {
@@ -9386,58 +10799,31 @@ namespace NinjaTrader.NinjaScript.Strategies
                 straddleWindowEnd != DateTime.MinValue &&
                 now >= straddleRangeStart && now <= straddleWindowEnd;
 
-            DateTime armTime = GetStraddleArmTime();
-            if (!straddleZonesFrozen && armTime != DateTime.MinValue && now >= armTime)
-                straddleZonesFrozen = true;
-
+            DateTime freezeTime = GetStraddleZoneFreezeTime();
             double referencePrice;
-            if (!straddleZonesFrozen && inWindow && armTime != DateTime.MinValue && now < armTime &&
-                straddleRangeHigh > double.MinValue && straddleRangeLow < double.MaxValue &&
+            if (!straddleZonesFrozen && inWindow && freezeTime != DateTime.MinValue && now <= freezeTime &&
                 TryGetStraddleTrackingPrice(out referencePrice))
             {
                 double longOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Long);
                 double shortOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Short);
-                double baseLongCenter = straddleRangeHigh + longOffsetTicks * tickSize;
-                double baseShortCenter = straddleRangeLow - shortOffsetTicks * tickSize;
-                double baseLongLower = baseLongCenter - halfZone;
-                double baseLongUpper = baseLongCenter + halfZone;
-                double baseShortUpper = baseShortCenter + halfZone;
-                double baseShortLower = baseShortCenter - halfZone;
+                double longTrigger = referencePrice + longOffsetTicks * tickSize;
+                double shortTrigger = referencePrice - shortOffsetTicks * tickSize;
 
-                double shift = straddleRangeShift;
-
-                double currentLongLower = baseLongLower + shift;
-                double currentShortUpper = baseShortUpper + shift;
-                double buffer = 5 * tickSize;
-                double shiftUp = 0;
-                double shiftDown = 0;
-                if (referencePrice >= currentLongLower - buffer)
-                    shiftUp = (referencePrice + buffer) - currentLongLower;
-                if (referencePrice <= currentShortUpper + buffer)
-                    shiftDown = (referencePrice - buffer) - currentShortUpper;
-
-                if (shiftUp != 0 && shiftDown != 0)
-                    shift += Math.Abs(shiftUp) >= Math.Abs(shiftDown) ? shiftUp : shiftDown;
-                else if (shiftUp != 0)
-                    shift += shiftUp;
-                else if (shiftDown != 0)
-                    shift += shiftDown;
-
-                straddleLongZoneUpper = baseLongUpper + shift;
-                straddleLongZoneLower = baseLongLower + shift;
-                straddleShortZoneUpper = baseShortUpper + shift;
-                straddleShortZoneLower = baseShortLower + shift;
+                straddleLongZoneLower = longTrigger;
+                straddleLongZoneUpper = longTrigger + zoneHeight;
+                straddleShortZoneUpper = shortTrigger;
+                straddleShortZoneLower = shortTrigger - zoneHeight;
                 straddleLongAutoCenter = (straddleLongZoneUpper + straddleLongZoneLower) * 0.5;
                 straddleShortAutoCenter = (straddleShortZoneUpper + straddleShortZoneLower) * 0.5;
                 straddleHardStopLongAutoPrice = straddleShortZoneUpper + tickSize;
                 straddleHardStopShortAutoPrice = straddleLongZoneLower - tickSize;
-                straddleRangeShift = shift;
-                straddleLongManualOffsetTicks = null;
-                straddleShortManualOffsetTicks = null;
-                straddleHardStopLongManualOffsetTicks = null;
-                straddleHardStopShortManualOffsetTicks = null;
+                if (now >= freezeTime)
+                    straddleZonesFrozen = true;
                 return;
             }
+
+            if (!straddleZonesFrozen && freezeTime != DateTime.MinValue && now >= freezeTime)
+                straddleZonesFrozen = true;
 
             if (straddleZonesFrozen && straddleLongAutoCenter.HasValue && straddleShortAutoCenter.HasValue)
             {
@@ -9453,29 +10839,29 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            if (straddleRangeHigh == double.MinValue || straddleRangeLow == double.MaxValue)
-                return;
+            if (TryGetStraddleTrackingPrice(out referencePrice))
+            {
+                double fallbackLongOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Long);
+                double fallbackShortOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Short);
+                double longTrigger = referencePrice + fallbackLongOffsetTicks * tickSize;
+                double shortTrigger = referencePrice - fallbackShortOffsetTicks * tickSize;
 
-            double fallbackLongOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Long);
-            double fallbackShortOffsetTicks = GetEffectiveStraddleZoneOffsetTicks(MarketPosition.Short);
-            double fallbackShift = straddleRangeShift;
-            double longCenter = straddleRangeHigh + fallbackLongOffsetTicks * tickSize + fallbackShift;
-            double shortCenter = straddleRangeLow - fallbackShortOffsetTicks * tickSize + fallbackShift;
-
-            straddleLongZoneUpper = longCenter + halfZone;
-            straddleLongZoneLower = longCenter - halfZone;
-            straddleShortZoneUpper = shortCenter + halfZone;
-            straddleShortZoneLower = shortCenter - halfZone;
-
-            straddleLongAutoCenter = (straddleLongZoneUpper + straddleLongZoneLower) * 0.5;
-            straddleShortAutoCenter = (straddleShortZoneUpper + straddleShortZoneLower) * 0.5;
-
-            straddleHardStopLongAutoPrice = straddleShortZoneUpper + tickSize;
-            straddleHardStopShortAutoPrice = straddleLongZoneLower - tickSize;
+                straddleLongZoneLower = longTrigger;
+                straddleLongZoneUpper = longTrigger + zoneHeight;
+                straddleShortZoneUpper = shortTrigger;
+                straddleShortZoneLower = shortTrigger - zoneHeight;
+                straddleLongAutoCenter = (straddleLongZoneUpper + straddleLongZoneLower) * 0.5;
+                straddleShortAutoCenter = (straddleShortZoneUpper + straddleShortZoneLower) * 0.5;
+                straddleHardStopLongAutoPrice = straddleShortZoneUpper + tickSize;
+                straddleHardStopShortAutoPrice = straddleLongZoneLower - tickSize;
+            }
         }
 
         private double GetEffectiveStraddleZoneOffsetTicks(MarketPosition side)
         {
+            if (!straddleZonesFrozen)
+                return StraddleZoneOffsetTicks;
+
             if (side == MarketPosition.Long)
                 return straddleLongManualOffsetTicks ?? StraddleZoneOffsetTicks;
             if (side == MarketPosition.Short)
@@ -9523,7 +10909,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (TryGetTradeState(tradeId, out state) && state != null)
                 {
                     state.EntryCancelRequested = true;
-                    TryCancelOrder(tradeId, state.EntryOrder, null, reason);
+                    TryCancelOrder(tradeId, GetLiveTrackedEntryOrder(state), null, reason);
                     state.EntryOrderPending = false;
                 }
             }
@@ -9540,10 +10926,17 @@ namespace NinjaTrader.NinjaScript.Strategies
             double longUpper = straddleLongZoneUpper;
             double shortLower = straddleShortZoneLower;
             double shortUpper = straddleShortZoneUpper;
-            double longStop = longLower;
-            double shortStop = shortUpper;
+            double longStop = GetStraddleEntryLinePrice(MarketPosition.Long);
+            double shortStop = GetStraddleEntryLinePrice(MarketPosition.Short);
             if (longStop <= 0 || shortStop <= 0)
                 return;
+
+            if (IsStraddlePendingOrderMode())
+            {
+                ResetStraddleDelayedEntryCandidate();
+                EnsureStraddlePendingStopEntries(entriesToSubmit, quantityPerEntry, longStop, shortStop, now);
+                return;
+            }
 
             double currentAsk = lastAsk > 0 ? lastAsk : GetCurrentAsk();
             double currentBid = lastBid > 0 ? lastBid : GetCurrentBid();
@@ -9556,30 +10949,70 @@ namespace NinjaTrader.NinjaScript.Strategies
                 currentBid = referencePrice;
 
             if (!allowMarketFallback)
-                return;
-
-            bool longTouched = currentAsk > 0 && currentAsk >= longLower && currentAsk <= longUpper;
-            bool shortTouched = currentBid > 0 && currentBid <= shortUpper && currentBid >= shortLower;
-            if (longTouched && shortTouched)
             {
-                if (Math.Abs(referencePrice - longStop) <= Math.Abs(referencePrice - shortStop))
-                    shortTouched = false;
+                ResetStraddleDelayedEntryCandidate();
+                return;
+            }
+            bool allowLong = !straddleLongTriggered && straddlePendingLongTradeIds.Count == 0;
+            bool allowShort = !straddleShortTriggered && straddlePendingShortTradeIds.Count == 0;
+            MarketPosition candidateSide = ResolveStraddleCandidateSide(allowLong, allowShort, currentBid, currentAsk, referencePrice, longLower, shortUpper);
+
+            bool longTriggeredNow = false;
+            bool shortTriggeredNow = false;
+            DateTime freezeTime = GetStraddleZoneFreezeTime();
+            bool delayedEntryEnabled = StraddleDelayedEntryMilliseconds > 0;
+            if (delayedEntryEnabled)
+            {
+                if (freezeTime == DateTime.MinValue || now < freezeTime || !straddleZonesFrozen)
+                {
+                    ResetStraddleDelayedEntryCandidate();
+                    return;
+                }
+
+                if (candidateSide == MarketPosition.Flat)
+                    ResetStraddleDelayedEntryCandidate();
                 else
-                    longTouched = false;
+                {
+                    if (straddleDelayedEntryCandidateSide != candidateSide || straddleDelayedEntryCandidateStart == DateTime.MinValue)
+                    {
+                        straddleDelayedEntryCandidateSide = candidateSide;
+                        straddleDelayedEntryCandidateStart = now;
+                        if (Debug)
+                            StrategyLogDebug($"[STRADDLE] Delay candidate {candidateSide} started @ {now:HH:mm:ss.fff}");
+                    }
+
+                    bool timerElapsed = (now - straddleDelayedEntryCandidateStart).TotalMilliseconds >= StraddleDelayedEntryMilliseconds;
+                    bool longConfirmed = currentAsk > 0 && currentAsk >= longUpper;
+                    bool shortConfirmed = currentBid > 0 && currentBid <= shortLower;
+                    if (timerElapsed)
+                    {
+                        if (candidateSide == MarketPosition.Long && longConfirmed)
+                            longTriggeredNow = true;
+                        else if (candidateSide == MarketPosition.Short && shortConfirmed)
+                            shortTriggeredNow = true;
+                    }
+                }
+            }
+            else
+            {
+                ResetStraddleDelayedEntryCandidate();
+                longTriggeredNow = candidateSide == MarketPosition.Long;
+                shortTriggeredNow = candidateSide == MarketPosition.Short;
             }
 
             MultiEntrySyncGroup longGroup = null;
             MultiEntrySyncGroup shortGroup = null;
             if (TreatMultiEntryAsSingleTrade)
             {
-                if (!straddleLongTriggered && straddlePendingLongTradeIds.Count == 0 && longTouched)
+                if (longTriggeredNow)
                     longGroup = StartMultiEntrySyncGroup(MarketPosition.Long, entriesToSubmit, quantityPerEntry, true);
-                if (!straddleShortTriggered && straddlePendingShortTradeIds.Count == 0 && shortTouched)
+                if (shortTriggeredNow)
                     shortGroup = StartMultiEntrySyncGroup(MarketPosition.Short, entriesToSubmit, quantityPerEntry, true);
             }
 
-            if (!straddleLongTriggered && straddlePendingLongTradeIds.Count == 0 && longTouched)
+            if (longTriggeredNow)
             {
+                ResetStraddleDelayedEntryCandidate();
                 for (int i = 0; i < entriesToSubmit; i++)
                 {
                     string tradeId = CreateTradeId(MarketPosition.Long);
@@ -9604,8 +11037,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
             }
 
-            if (!straddleShortTriggered && straddlePendingShortTradeIds.Count == 0 && shortTouched)
+            if (shortTriggeredNow)
             {
+                ResetStraddleDelayedEntryCandidate();
                 for (int i = 0; i < entriesToSubmit; i++)
                 {
                     string tradeId = CreateTradeId(MarketPosition.Short);
@@ -9631,6 +11065,134 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private void EnsureStraddlePendingStopEntries(int entriesToSubmit, int quantityPerEntry, double longStop, double shortStop, DateTime now)
+        {
+            UpdateStraddlePendingEntryStops(longStop, shortStop);
+
+            if (!straddleLongTriggered && straddlePendingLongTradeIds.Count == 0)
+            {
+                MultiEntrySyncGroup longGroup = null;
+                if (TreatMultiEntryAsSingleTrade)
+                    longGroup = StartMultiEntrySyncGroup(MarketPosition.Long, entriesToSubmit, quantityPerEntry, true);
+
+                for (int i = 0; i < entriesToSubmit; i++)
+                {
+                    string tradeId = CreateTradeId(MarketPosition.Long);
+                    var state = PrepareTradeState(tradeId, MarketPosition.Long, quantityPerEntry);
+                    state.IsStraddleEntry = true;
+                    state.EntryContext = "STRADDLE";
+                    state.EntrySignalTime = now;
+                    state.EntryPrice = longStop;
+                    state.StraddleEntryTime = DateTime.MinValue;
+                    state.StraddleProfitStart = DateTime.MinValue;
+                    state.StraddleProfitGatePassed = false;
+                    state.StraddleTrailingActive = false;
+                    state.StraddleTrailHighWater = 0;
+                    state.StraddleTrailLowWater = 0;
+                    state.EntryOrderPending = true;
+                    state.EntryCancelRequested = false;
+                    AttachTradeStateToSyncGroup(state, longGroup);
+
+                    StrategyLogInfo($"[STRADDLE] Stage Long pending {tradeId} @ {longStop:F2} ({i + 1}/{entriesToSubmit})");
+                    if (SubmitStraddlePendingStopEntry(state, quantityPerEntry, longStop, tradeId))
+                        straddlePendingLongTradeIds.Add(tradeId);
+                }
+            }
+
+            if (!straddleShortTriggered && straddlePendingShortTradeIds.Count == 0)
+            {
+                MultiEntrySyncGroup shortGroup = null;
+                if (TreatMultiEntryAsSingleTrade)
+                    shortGroup = StartMultiEntrySyncGroup(MarketPosition.Short, entriesToSubmit, quantityPerEntry, true);
+
+                for (int i = 0; i < entriesToSubmit; i++)
+                {
+                    string tradeId = CreateTradeId(MarketPosition.Short);
+                    var state = PrepareTradeState(tradeId, MarketPosition.Short, quantityPerEntry);
+                    state.IsStraddleEntry = true;
+                    state.EntryContext = "STRADDLE";
+                    state.EntrySignalTime = now;
+                    state.EntryPrice = shortStop;
+                    state.StraddleEntryTime = DateTime.MinValue;
+                    state.StraddleProfitStart = DateTime.MinValue;
+                    state.StraddleProfitGatePassed = false;
+                    state.StraddleTrailingActive = false;
+                    state.StraddleTrailHighWater = 0;
+                    state.StraddleTrailLowWater = 0;
+                    state.EntryOrderPending = true;
+                    state.EntryCancelRequested = false;
+                    AttachTradeStateToSyncGroup(state, shortGroup);
+
+                    StrategyLogInfo($"[STRADDLE] Stage Short pending {tradeId} @ {shortStop:F2} ({i + 1}/{entriesToSubmit})");
+                    if (SubmitStraddlePendingStopEntry(state, quantityPerEntry, shortStop, tradeId))
+                        straddlePendingShortTradeIds.Add(tradeId);
+                }
+            }
+        }
+
+        private bool SubmitStraddlePendingStopEntry(TradeRuntimeState state, int quantity, double stopPrice, string tradeId)
+        {
+            if (state == null || quantity <= 0 || stopPrice <= 0 || string.IsNullOrWhiteSpace(tradeId))
+                return false;
+
+            if (Account == null || Instrument == null)
+            {
+                StrategyLogError($"[STRADDLE] Pending stop submit skipped for {tradeId}: account or instrument unavailable.");
+                state.EntryOrderPending = false;
+                state.EntryCancelRequested = false;
+                return false;
+            }
+
+            if (IsStraddlePendingStopThroughMarket(state.EntrySide, stopPrice))
+            {
+                if (Debug)
+                    StrategyLogDebug($"[STRADDLE] Skip pending stop submit for {tradeId} @ {stopPrice:F2}: stop already through market.");
+                state.EntryOrderPending = false;
+                state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
+                return false;
+            }
+
+            try
+            {
+                OrderAction action = state.EntrySide == MarketPosition.Short ? OrderAction.SellShort : OrderAction.Buy;
+                string manualOco = BuildStraddlePendingOrderOco(tradeId);
+                var order = Account.CreateOrder(
+                    Instrument,
+                    action,
+                    OrderType.StopMarket,
+                    OrderEntry.Manual,
+                    TimeInForce.Day,
+                    Math.Abs(quantity),
+                    0,
+                    stopPrice,
+                    manualOco,
+                    tradeId.Trim(),
+                    default(DateTime),
+                    null);
+
+                state.EntryOrder = order;
+                state.EntryPrice = stopPrice;
+                state.UsesAccountEntryOrders = true;
+                state.EntryOrderPending = true;
+                state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
+                state.LastAutoEntryLimitPrice = stopPrice;
+                state.LastEntryOrderAdjustAt = DateTime.UtcNow;
+                Account.Submit(new[] { order });
+                return true;
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[STRADDLE] Failed to submit pending stop {tradeId} @ {stopPrice:F2}: {ex.Message}");
+                state.EntryOrder = null;
+                state.EntryOrderPending = false;
+                state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
+                return false;
+            }
+        }
+
         private void UpdateStraddlePendingEntryStops(double longStop, double shortStop)
         {
             double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
@@ -9640,68 +11202,218 @@ namespace NinjaTrader.NinjaScript.Strategies
             foreach (string tradeId in straddlePendingLongTradeIds.ToList())
             {
                 TradeRuntimeState state;
-                if (!TryGetTradeState(tradeId, out state) || state == null || state.EntryOrder == null)
+                if (!TryGetTradeState(tradeId, out state) || state == null)
                     continue;
 
-                if (IsTerminalState(state.EntryOrder.OrderState))
-                    continue;
-                if (state.EntryOrder.OrderType != OrderType.StopMarket)
-                    continue;
-
-                if (!PricesClose(state.EntryOrder.StopPrice, longStop))
+                Order entryOrder = GetLiveTrackedEntryOrder(state);
+                bool isManualAccountOrder = entryOrder != null && state.UsesAccountEntryOrders && entryOrder.OrderEntry == OrderEntry.Manual;
+                if (entryOrder == null)
                 {
-                    try
-                    {
-                        ChangeOrder(state.EntryOrder, state.EntryOrder.Quantity, state.EntryOrder.LimitPrice, longStop);
-                        state.EntryPrice = longStop;
-                        if (Debug)
-                            StrategyLogDebug($"[STRADDLE] Adjust Long stop {tradeId} -> {longStop:F2}");
-                    }
-                    catch (Exception ex)
-                    {
-                        if (Debug)
-                            StrategyLogDebug($"[STRADDLE] Failed adjust Long stop {tradeId}: {ex.Message}");
-                    }
+                    if (state.UsesAccountEntryOrders &&
+                        (state.PendingEntryPriceUpdate || state.EntryPrice <= 0 || !PricesClose(state.EntryPrice, longStop)))
+                        TryChangePendingEntryStop(state, longStop, tradeId, "Long");
+                    continue;
+                }
+                if (!isManualAccountOrder && IsTerminalState(entryOrder.OrderState))
+                    continue;
+                if (entryOrder.OrderType != OrderType.StopMarket)
+                    continue;
+
+                double currentStop = entryOrder.StopPrice > 0
+                    ? entryOrder.StopPrice
+                    : (isManualAccountOrder
+                        ? state.EntryPrice
+                        : state.LastAutoEntryLimitPrice);
+                if (currentStop <= 0 || !PricesClose(currentStop, longStop))
+                {
+                    TryChangePendingEntryStop(state, longStop, tradeId, "Long");
                 }
             }
 
             foreach (string tradeId in straddlePendingShortTradeIds.ToList())
             {
                 TradeRuntimeState state;
-                if (!TryGetTradeState(tradeId, out state) || state == null || state.EntryOrder == null)
+                if (!TryGetTradeState(tradeId, out state) || state == null)
                     continue;
 
-                if (IsTerminalState(state.EntryOrder.OrderState))
-                    continue;
-                if (state.EntryOrder.OrderType != OrderType.StopMarket)
-                    continue;
-
-                if (!PricesClose(state.EntryOrder.StopPrice, shortStop))
+                Order entryOrder = GetLiveTrackedEntryOrder(state);
+                bool isManualAccountOrder = entryOrder != null && state.UsesAccountEntryOrders && entryOrder.OrderEntry == OrderEntry.Manual;
+                if (entryOrder == null)
                 {
+                    if (state.UsesAccountEntryOrders &&
+                        (state.PendingEntryPriceUpdate || state.EntryPrice <= 0 || !PricesClose(state.EntryPrice, shortStop)))
+                        TryChangePendingEntryStop(state, shortStop, tradeId, "Short");
+                    continue;
+                }
+                if (!isManualAccountOrder && IsTerminalState(entryOrder.OrderState))
+                    continue;
+                if (entryOrder.OrderType != OrderType.StopMarket)
+                    continue;
+
+                double currentStop = entryOrder.StopPrice > 0
+                    ? entryOrder.StopPrice
+                    : (isManualAccountOrder
+                        ? state.EntryPrice
+                        : state.LastAutoEntryLimitPrice);
+                if (currentStop <= 0 || !PricesClose(currentStop, shortStop))
+                {
+                    TryChangePendingEntryStop(state, shortStop, tradeId, "Short");
+                }
+            }
+        }
+
+        private void TryChangePendingEntryStop(TradeRuntimeState state, double desiredStop, string tradeId, string sideLabel)
+        {
+            if (state == null || desiredStop <= 0)
+                return;
+
+            if (Instrument?.MasterInstrument != null)
+                desiredStop = Instrument.MasterInstrument.RoundToTickSize(desiredStop);
+
+            Order entryOrder = GetLiveTrackedEntryOrder(state);
+
+            bool isManualAccountOrder = state.UsesAccountEntryOrders && Account != null &&
+                (entryOrder == null || entryOrder.OrderEntry == OrderEntry.Manual);
+            if (entryOrder == null && !isManualAccountOrder)
+                return;
+            if (!isManualAccountOrder && IsTerminalState(entryOrder.OrderState))
+                return;
+            if (isManualAccountOrder)
+            {
+                TimeSpan adjustThrottle = TimeSpan.FromMilliseconds(75);
+                DateTime nowUtc = DateTime.UtcNow;
+                if (entryOrder == null)
+                {
+                    // Do not trust the cached CreateOrder shell for repricing. Wait until
+                    // the live account order can be resolved, otherwise the strategy can
+                    // think the stop moved while the actual pending order stayed static.
+                    return;
+                }
+                double requestedStop = GetAccountOrderRequestedStopPrice(entryOrder);
+                if (requestedStop > 0 && PricesClose(requestedStop, desiredStop) && IsManualAccountEntryChangePending(entryOrder))
+                    return;
+
+                double currentStop = entryOrder != null && entryOrder.StopPrice > 0
+                    ? entryOrder.StopPrice
+                    : (state.EntryPrice > 0 ? state.EntryPrice : state.LastAutoEntryLimitPrice);
+                if (!state.EntryCancelRequested && entryOrder != null && currentStop > 0 && PricesClose(currentStop, desiredStop))
+                {
+                    state.PendingEntryPriceUpdate = false;
+                    state.PendingEntryLimitPrice = 0;
+                    state.LastAutoEntryLimitPrice = desiredStop;
+                    state.EntryCancelOrderId = null;
+                    return;
+                }
+
+                if (state.LastEntryOrderAdjustAt != DateTime.MinValue &&
+                    (nowUtc - state.LastEntryOrderAdjustAt) < adjustThrottle)
+                {
+                    return;
+                }
+
+                state.PendingEntryPriceUpdate = true;
+                state.PendingEntryLimitPrice = desiredStop;
+                state.LastAutoEntryLimitPrice = desiredStop;
+                state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
+
+                if (entryOrder != null)
+                {
+                    if (IsManualAccountEntryChangePending(entryOrder))
+                        return;
+
+                    if (IsStraddlePendingStopThroughMarket(state.EntrySide, desiredStop))
+                    {
+                        state.PendingEntryPriceUpdate = false;
+                        state.PendingEntryLimitPrice = 0;
+                        return;
+                    }
+
                     try
                     {
-                        ChangeOrder(state.EntryOrder, state.EntryOrder.Quantity, state.EntryOrder.LimitPrice, shortStop);
-                        state.EntryPrice = shortStop;
-                        if (Debug)
-                            StrategyLogDebug($"[STRADDLE] Adjust Short stop {tradeId} -> {shortStop:F2}");
+                        double priorStop = entryOrder.StopPrice > 0
+                            ? entryOrder.StopPrice
+                            : currentStop;
+                        if (!TrySetAccountOrderChangedPrice(entryOrder, "StopPriceChanged", desiredStop))
+                            entryOrder.StopPrice = desiredStop;
+                        state.LastEntryOrderAdjustAt = nowUtc;
+                        Account.Change(new[] { entryOrder });
+                        state.LastAutoEntryLimitPrice = desiredStop;
+                        StrategyLogInfo($"[STRADDLE] Move {sideLabel} pending {tradeId} {priorStop:F2} -> {desiredStop:F2}");
                     }
                     catch (Exception ex)
                     {
+                        state.PendingEntryPriceUpdate = false;
+                        state.PendingEntryLimitPrice = 0;
                         if (Debug)
-                            StrategyLogDebug($"[STRADDLE] Failed adjust Short stop {tradeId}: {ex.Message}");
+                            StrategyLogDebug($"[STRADDLE] Failed change {sideLabel} pending {tradeId}: {ex.Message}");
                     }
+                    return;
                 }
+
+                if (HasActiveTrackedEntryOrders(state))
+                    return;
+                if (IsStraddlePendingStopThroughMarket(state.EntrySide, desiredStop))
+                {
+                    state.PendingEntryPriceUpdate = false;
+                    state.PendingEntryLimitPrice = 0;
+                    return;
+                }
+
+                int restageQty = Math.Max(1, state.OriginalQuantity);
+                state.LastEntryOrderAdjustAt = nowUtc;
+                if (SubmitStraddlePendingStopEntry(state, restageQty, desiredStop, tradeId))
+                {
+                    state.PendingEntryPriceUpdate = false;
+                    state.PendingEntryLimitPrice = 0;
+                    state.EntryCancelOrderId = null;
+                    state.EntryPrice = desiredStop;
+                }
+                return;
+            }
+            else
+            {
+                if (state.PendingEntryPriceUpdate)
+                    return;
+                if (IsEntryOrderPriceChangePending(entryOrder))
+                    return;
+            }
+
+            try
+            {
+                state.PendingEntryPriceUpdate = true;
+                state.PendingEntryLimitPrice = desiredStop;
+                state.LastAutoEntryLimitPrice = desiredStop;
+
+                if (!isManualAccountOrder)
+                {
+                    ChangeOrder(entryOrder, entryOrder.Quantity, entryOrder.LimitPrice, desiredStop);
+                }
+
+                state.EntryPrice = desiredStop;
+                if (Debug)
+                    StrategyLogDebug($"[STRADDLE] Adjust {sideLabel} stop {tradeId} -> {desiredStop:F2}");
+            }
+            catch (Exception ex)
+            {
+                state.PendingEntryPriceUpdate = false;
+                state.PendingEntryLimitPrice = 0;
+                if (Debug)
+                    StrategyLogDebug($"[STRADDLE] Failed adjust {sideLabel} stop {tradeId}: {ex.Message}");
             }
         }
 
         private void SyncStraddleManualOffsetsFromChart()
         {
-            if (straddleRangeHigh == double.MinValue || straddleRangeLow == double.MaxValue)
+            if (!straddleLongAutoCenter.HasValue && !straddleShortAutoCenter.HasValue)
                 return;
 
             double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
             if (tickSize <= 0)
                 return;
+
+            double referencePrice = double.NaN;
+            bool hasReferencePrice = !straddleZonesFrozen && TryGetStraddleTrackingPrice(out referencePrice);
 
             if (straddleLongZoneRect != null)
             {
@@ -9712,7 +11424,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     double? autoCenter = straddleLongAutoCenter;
                     if (autoCenter.HasValue && Math.Abs(longCenter - autoCenter.Value) > tickSize * 0.25)
-                        straddleLongManualOffsetTicks = (longCenter - straddleRangeHigh) / tickSize;
+                    {
+                        if (hasReferencePrice)
+                            straddleLongManualOffsetTicks = (longBottom - referencePrice) / tickSize;
+                        else if (straddleZonesFrozen)
+                            straddleLongAutoCenter = longCenter;
+                    }
                 }
             }
 
@@ -9725,7 +11442,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     double? autoCenter = straddleShortAutoCenter;
                     if (autoCenter.HasValue && Math.Abs(shortCenter - autoCenter.Value) > tickSize * 0.25)
-                        straddleShortManualOffsetTicks = (straddleRangeLow - shortCenter) / tickSize;
+                    {
+                        if (hasReferencePrice)
+                            straddleShortManualOffsetTicks = (referencePrice - shortTop) / tickSize;
+                        else if (straddleZonesFrozen)
+                            straddleShortAutoCenter = shortCenter;
+                    }
                 }
             }
         }
@@ -9800,7 +11522,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateStraddleVisualsIntrabar(DateTime now)
         {
-            if (!ShowFilterVisuals || BarsInProgress != 0 || !EnableStraddleTrades)
+            if (!ShowFilterVisuals || !EnableStraddleTrades)
                 return;
             if (straddleRangeStart == DateTime.MinValue)
                 return;
@@ -9817,10 +11539,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
 
             UpdateStraddleZones();
+            double displayLongLower, displayLongUpper, displayShortUpper, displayShortLower;
+            GetDisplayedStraddleZonePrices(out displayLongLower, out displayLongUpper, out displayShortUpper, out displayShortLower);
             bool liveStraddleOpen = IsStraddleTradeOpen();
 
             int startBarsAgo = FindBarsAgoForTime(straddleRangeStart);
             int endBarsAgo = 0;
+            int maxBarsAgo = GetPrimarySeriesMaxBarsAgo();
+            if (maxBarsAgo < 0)
+                return;
+
+            startBarsAgo = Math.Min(startBarsAgo, maxBarsAgo);
+            endBarsAgo = Math.Min(endBarsAgo, maxBarsAgo);
             if (startBarsAgo < 0 || endBarsAgo < 0)
                 return;
             if (startBarsAgo < endBarsAgo)
@@ -9830,18 +11560,48 @@ namespace NinjaTrader.NinjaScript.Strategies
                 endBarsAgo = tmp;
             }
 
-            var longRect = Draw.Rectangle(this, StraddleLongZoneTag, false, startBarsAgo, straddleLongZoneUpper, endBarsAgo, straddleLongZoneLower, Brushes.DarkOrange, Brushes.Transparent, 8);
+            var longRect = Draw.Rectangle(this, StraddleLongZoneTag, false, startBarsAgo, displayLongUpper, endBarsAgo, displayLongLower, Brushes.DarkOrange, Brushes.Transparent, 8);
             if (longRect != null)
             {
                 longRect.IsLocked = true;
+                if (longRect.StartAnchor != null)
+                    longRect.StartAnchor.Price = displayLongUpper;
+                if (longRect.EndAnchor != null)
+                    longRect.EndAnchor.Price = displayLongLower;
                 straddleLongZoneRect = longRect;
             }
 
-            var shortRect = Draw.Rectangle(this, StraddleShortZoneTag, false, startBarsAgo, straddleShortZoneUpper, endBarsAgo, straddleShortZoneLower, Brushes.DeepSkyBlue, Brushes.Transparent, 8);
+            var shortRect = Draw.Rectangle(this, StraddleShortZoneTag, false, startBarsAgo, displayShortUpper, endBarsAgo, displayShortLower, Brushes.DeepSkyBlue, Brushes.Transparent, 8);
             if (shortRect != null)
             {
                 shortRect.IsLocked = true;
+                if (shortRect.StartAnchor != null)
+                    shortRect.StartAnchor.Price = displayShortUpper;
+                if (shortRect.EndAnchor != null)
+                    shortRect.EndAnchor.Price = displayShortLower;
                 straddleShortZoneRect = shortRect;
+            }
+
+            double longEntryLinePrice = displayLongLower;
+            var longTriggerLine = Draw.HorizontalLine(this, StraddleLongTriggerTag, longEntryLinePrice, Brushes.DarkOrange);
+            if (longTriggerLine != null)
+            {
+                longTriggerLine.IsLocked = true;
+                longTriggerLine.Stroke.Width = 2;
+                if (longTriggerLine.StartAnchor != null)
+                    longTriggerLine.StartAnchor.Price = longEntryLinePrice;
+                straddleLongTriggerLine = longTriggerLine;
+            }
+
+            double shortEntryLinePrice = displayShortUpper;
+            var shortTriggerLine = Draw.HorizontalLine(this, StraddleShortTriggerTag, shortEntryLinePrice, Brushes.DeepSkyBlue);
+            if (shortTriggerLine != null)
+            {
+                shortTriggerLine.IsLocked = true;
+                shortTriggerLine.Stroke.Width = 2;
+                if (shortTriggerLine.StartAnchor != null)
+                    shortTriggerLine.StartAnchor.Price = shortEntryLinePrice;
+                straddleShortTriggerLine = shortTriggerLine;
             }
 
             double? longHard = GetStraddleHardStopPrice(MarketPosition.Long);
@@ -9882,7 +11642,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void UpdateStraddleCountdownVisual(DateTime now, double currentPrice)
         {
-            if (!ShowFilterVisuals || !EnableStraddleTrades || BarsInProgress != 0)
+            if (!ShowFilterVisuals || !EnableStraddleTrades)
             {
                 RemoveDrawObject(StraddleCountdownTag);
                 return;
@@ -9936,6 +11696,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return false;
             if (IsStraddleTradeOpen())
                 return true;
+            if (straddleSessionConsumed)
+                return false;
             if (straddleLongTriggered && straddleShortTriggered)
                 return false;
             return now >= straddleRangeStart && now <= straddleWindowEnd;
@@ -9952,8 +11714,9 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (!EnableStraddleTrades || price <= 0 || shutdownInProgress)
                 return false;
-            if (manualHaltActive || dailyPnLLimitHalted || desyncHoldActive)
+            if ((manualHaltActive && !ShouldAllowStraddleWhileManualHalted()) || dailyPnLLimitHalted || desyncHoldActive)
             {
+                ResetStraddleDelayedEntryCandidate();
                 CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_halted");
                 CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_halted");
                 return false;
@@ -9990,9 +11753,18 @@ namespace NinjaTrader.NinjaScript.Strategies
             straddleArmed = straddleRangeReady && armTime != DateTime.MinValue &&
                 now >= armTime && now <= straddleWindowEnd;
 
-            bool allowStaging = straddleArmed;
+            bool pendingOrderMode = IsStraddlePendingOrderMode();
+            bool allowStaging = pendingOrderMode
+                ? (straddleRangeStart != DateTime.MinValue && now >= straddleRangeStart && now <= straddleWindowEnd)
+                : straddleArmed;
+            if (!pendingOrderMode && !IsStraddleTradeOpen() && HasWorkingStraddlePendingEntryOrders())
+            {
+                CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_mode_market");
+                CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_mode_market");
+            }
             if (!allowStaging || !IsStraddleWindowActive(now))
             {
+                ResetStraddleDelayedEntryCandidate();
                 CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_window_closed");
                 CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_window_closed");
                 return false;
@@ -10001,6 +11773,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool isFlat = Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0;
             if (!isFlat)
             {
+                ResetStraddleDelayedEntryCandidate();
                 if (Position.MarketPosition == MarketPosition.Long)
                     CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_long_open");
                 else if (Position.MarketPosition == MarketPosition.Short)
@@ -10154,6 +11927,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (startBarsAgo < 0 || endBarsAgo < 0)
                 return;
 
+            int maxBarsAgo = GetPrimarySeriesMaxBarsAgo();
+            if (maxBarsAgo < 0)
+                return;
+
+            startBarsAgo = Math.Min(startBarsAgo, maxBarsAgo);
+            endBarsAgo = Math.Min(endBarsAgo, maxBarsAgo);
+
             if (startBarsAgo < endBarsAgo)
             {
                 int tmp = startBarsAgo;
@@ -10168,9 +11948,36 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private int GetPrimarySeriesMaxBarsAgo()
+        {
+            int maxBarsAgo = -1;
+
+            if (Times != null && Times.Length > 0 && Times[0] != null && Times[0].Count > 0)
+                maxBarsAgo = Times[0].Count - 1;
+            else if (BarsArray != null && BarsArray.Length > 0 && BarsArray[0] != null && BarsArray[0].Count > 0)
+                maxBarsAgo = BarsArray[0].Count - 1;
+            else if (Time != null && Time.Count > 0)
+                maxBarsAgo = Time.Count - 1;
+
+            if (maxBarsAgo < 0)
+                return -1;
+
+            int currentPrimaryBar = (CurrentBars != null && CurrentBars.Length > 0) ? CurrentBars[0] : CurrentBar;
+            if (currentPrimaryBar >= 0)
+                maxBarsAgo = Math.Min(maxBarsAgo, currentPrimaryBar);
+
+            return maxBarsAgo;
+        }
+
         private int FindBarsAgoForTime(DateTime target)
         {
-            int last = (CurrentBars != null && CurrentBars.Length > 0) ? CurrentBars[0] : CurrentBar;
+            if (target == DateTime.MinValue)
+                return -1;
+
+            int last = GetPrimarySeriesMaxBarsAgo();
+            if (last < 0)
+                return -1;
+
             if (Times != null && Times.Length > 0 && Times[0] != null)
             {
                 for (int i = 0; i <= last; i++)
@@ -11106,6 +12913,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             scaleInSide = MarketPosition.Flat;
             scaleInHoldUntil = DateTime.MinValue;
             ClearScaleInDrawdownLines(true);
+            ClearScaleInConsumedReferenceLines();
         }
 
         private double CalculateDemaAtrActivationMetric(double entryPrice, double activationPrice)
@@ -11458,7 +13266,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void BootstrapExistingPositionState(bool allowWhileHalted = false)
         {
-            if (manualHaltActive && !allowWhileHalted)
+            if (manualHaltActive && !allowWhileHalted && !ShouldAllowStraddleWhileManualHalted())
                 return;
             if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
                 return;
@@ -11480,6 +13288,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             MarketPosition side = Position.MarketPosition;
             int qty = Math.Abs(Position.Quantity);
             string tradeId = CreateTradeId(side);
+            bool treatAsManualHaltUserTrade = ShouldBootstrapAsManualHaltUserTrade(side);
 
             var state = new TradeRuntimeState
             {
@@ -11532,7 +13341,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 BreakEvenActivated = false,
                 SyntheticLogEmitted = false,
                 Bootstrapped = true,
-                IsManualEntry = false,
+                IsManualEntry = treatAsManualHaltUserTrade,
                 ExitAllTriggered = false,
                 AllowOpenPublish = State == State.Realtime,
                 EntryVolExpEnabled = false,
@@ -11561,6 +13370,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 StraddleTrailHighWater = 0,
                 StraddleTrailLowWater = 0
             };
+            state.EntryContext = treatAsManualHaltUserTrade ? "MANUAL" : "BOOTSTRAP";
+            state.EntrySignalTime = Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow;
 
             if (scaleInInitialEntryPrice <= 0 || double.IsNaN(scaleInInitialEntryPrice))
                 scaleInInitialEntryPrice = state.EntryPrice;
@@ -11632,6 +13443,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             ResetGlobalTrailingState();
             ResetScaleInState();
             ResetSyntheticProtectionState();
+            lastStraddleTrackingPrice = double.NaN;
+            lastStraddleTrackingTime = DateTime.MinValue;
             lastStatusText = null;
             lastStatusHealthy = false;
             lastStatusHasPnLLines = false;
@@ -11658,9 +13471,8 @@ namespace NinjaTrader.NinjaScript.Strategies
             capacity = Math.Max(capacity, TradesPerEntry);
             capacity = Math.Max(capacity, ChopTradesPerEntry);
             capacity = Math.Max(capacity, TradesPerStraddleEntry);
-            capacity = Math.Max(capacity, ScaleInTradesToAdd);
-            if (ScaleInMaxTrades > 0)
-                capacity = Math.Max(capacity, ScaleInMaxTrades);
+            capacity = Math.Max(capacity, GetScaleInContractsPerLevel());
+            capacity = Math.Max(capacity, GetScaleInMaxAddCount());
             if (tradesPerEntryOverride > 0)
                 capacity = Math.Max(capacity, tradesPerEntryOverride);
             if (chopTradesPerEntryOverride > 0)
@@ -11737,6 +13549,31 @@ namespace NinjaTrader.NinjaScript.Strategies
             TryEnsureEntriesPerDirectionCapacity(effective);
 
             return effective;
+        }
+
+        private bool IsStraddlePendingOrderMode()
+        {
+            return StraddleExecutionMode == StraddleExecutionModeOption.PendingOrders;
+        }
+
+        private bool HasWorkingStraddlePendingEntryOrders()
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return false;
+
+            foreach (string tradeId in straddlePendingLongTradeIds.Concat(straddlePendingShortTradeIds))
+            {
+                TradeRuntimeState state;
+                if (!TryGetTradeState(tradeId, out state) || state == null)
+                    continue;
+                Order entryOrder = GetLiveTrackedEntryOrder(state);
+                if (entryOrder == null || IsTerminalState(entryOrder.OrderState))
+                    continue;
+                if (entryOrder.OrderType == OrderType.StopMarket || entryOrder.OrderType == OrderType.StopLimit)
+                    return true;
+            }
+
+            return false;
         }
 
         private bool IsMultiEntrySyncEnabled
@@ -12411,6 +14248,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     state.InstrumentName = execution.Instrument != null ? execution.Instrument.FullName : state.InstrumentName;
                 if (string.IsNullOrEmpty(state.AccountName))
                     state.AccountName = execution.Account != null ? execution.Account.Name : state.AccountName;
+                if (isEntryAction && !state.IsManualEntry && ShouldBootstrapAsManualHaltUserTrade(inferredSide))
+                {
+                    state.IsManualEntry = true;
+                    if (string.IsNullOrEmpty(state.EntryContext) ||
+                        string.Equals(state.EntryContext, "AUTO", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(state.EntryContext, "BOOTSTRAP", StringComparison.OrdinalIgnoreCase))
+                    {
+                        state.EntryContext = "MANUAL";
+                    }
+                }
 
                 // Mark sync-start fills as bootstrapped so we use explicit stop/target orders (global signal)
                 // instead of SetStopLoss/SetProfitTarget that require a matching entry signal.
@@ -12431,6 +14278,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                     HandleEntryExecution(execution, state, isSyncEntryFill, allowHistoricalManagement);
                     if (state.IsStraddleEntry)
                     {
+                        ResetStraddleDelayedEntryCandidate();
+                        bool consumingFirstFill = !straddleSessionConsumed;
+                        straddleSessionConsumed = true;
                         if (state.StraddleEntryTime == DateTime.MinValue)
                             state.StraddleEntryTime = time;
                         if (state.EntrySide == MarketPosition.Long)
@@ -12445,6 +14295,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                             straddlePendingShortTradeIds.Remove(state.TradeId);
                             CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_opposite_filled");
                         }
+                        if (consumingFirstFill)
+                            StrategyLogInfo($"[STRADDLE] Session consumed by filled {state.EntrySide} entry {state.TradeId}; blocking additional straddle re-entry until next session.");
                     }
                     if (!isLive && !allowHistoricalManagement && !isSyncEntryFill)
                         state.IsSynthetic = true; // keep publishes suppressed for historical markers
@@ -12597,12 +14449,21 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             bool isFlatPosition = marketPosition == MarketPosition.Flat || quantity == 0;
 
-            if (State == State.Realtime && manualHaltActive)
+            if (State == State.Realtime && manualHaltActive && !ShouldAllowStraddleWhileManualHalted())
             {
-                TryEnforceManualHaltFlat();
+                if (!HasManualHaltProtectedExposure())
+                {
+                    TryEnforceManualHaltFlat();
+                    if (isFlatPosition)
+                        CleanupFlatPositionState(false);
+                    return;
+                }
+
                 if (isFlatPosition)
+                {
                     CleanupFlatPositionState(false);
-                return;
+                    return;
+                }
             }
 
             // For start-behavior sync entries the account can move from flat to live between bar closes.
@@ -12640,6 +14501,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool CleanupFlatPositionState(bool updateScanningStatus)
         {
             bool pending = false;
+            CancelManualPendingExitOrders("position_flat");
 
             if (tradeStates != null && tradeStates.Count > 0)
             {
@@ -12659,6 +14521,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (!pending)
                     {
                         ResetTradeState();
+                        ClearManualHaltUserTradeProtection();
                         if (updateScanningStatus)
                             UpdateStatusLabel("Active: scanning (position flat)", true);
                     }
@@ -12668,6 +14531,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     // Preserve runtime state for pending entries (manual or auto).
                     pending = PublishPendingCloses();
                 }
+            }
+            else
+            {
+                ClearManualHaltUserTradeProtection();
             }
 
             ResetScaleInState();
@@ -12692,6 +14559,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 state.EntryOrder = execution != null ? execution.Order : state.EntryOrder;
                 state.EntryOrderPending = false;
                 state.EntryCancelRequested = false;
+                state.EntryCancelOrderId = null;
             }
 
             int orderQty = Math.Max(1, Math.Abs((int)execution.Order.Quantity));
@@ -12798,12 +14666,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MarketPosition opposite = state.EntrySide == MarketPosition.Long ? MarketPosition.Short : MarketPosition.Long;
                 CancelWorkingChopEntryOrders(opposite, "chop_entry_filled");
             }
+
+            if (state.IsStraddleEntry)
+            {
+                if (state.EntrySide == MarketPosition.Long)
+                    CancelStraddlePendingEntries(straddlePendingShortTradeIds, "straddle_long_filled");
+                else if (state.EntrySide == MarketPosition.Short)
+                    CancelStraddlePendingEntries(straddlePendingLongTradeIds, "straddle_short_filled");
+            }
         }
 
         private string GetExitSignalSuffixForExecution(Execution execution, TradeRuntimeState state)
         {
             if (execution != null && execution.Order != null)
             {
+                if (IsManualPendingExitOrder(execution.Order))
+                {
+                    string manualSuffix = GetManualPendingExitSignalSuffix(execution.Order);
+                    if (!string.IsNullOrWhiteSpace(manualSuffix))
+                        return manualSuffix;
+                }
+
                 string suffix = TryGetExitSignalSuffix(execution.Order.Name);
                 if (string.IsNullOrEmpty(suffix))
                     suffix = TryGetExitSignalSuffix(execution.Order.FromEntrySignal);
@@ -12880,6 +14763,14 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void HandleExitExecution(Execution execution, TradeRuntimeState state)
         {
+            if (execution != null)
+            {
+                if (IsStopLossExecution(execution))
+                    syntheticStopLastOrderSyncAt = DateTime.UtcNow;
+                else if (execution.Order != null && LooksLikeTargetOrder(execution.Order))
+                    syntheticTargetLastOrderSyncAt = DateTime.UtcNow;
+            }
+
             int execQty = Math.Max(1, Math.Abs((int)execution.Quantity));
             if (execQty > state.RemainingQuantity)
                 execQty = state.RemainingQuantity;
@@ -13200,7 +15091,9 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (execution == null || execution.Order == null)
                 return "UNKNOWN";
 
-            string suffix = TryGetExitSignalSuffix(execution.Order.Name);
+            string suffix = IsManualPendingExitOrder(execution.Order)
+                ? GetManualPendingExitSignalSuffix(execution.Order)
+                : TryGetExitSignalSuffix(execution.Order.Name);
             if (string.IsNullOrEmpty(suffix))
                 suffix = TryGetExitSignalSuffix(execution.Order.FromEntrySignal);
 
@@ -13244,6 +15137,67 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return null;
 
             return signal.Substring(idx + 1);
+        }
+
+        private static bool IsManualPendingExitOrderName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return false;
+
+            if (name.StartsWith(ManualPendingExitOrderPrefix, StringComparison.OrdinalIgnoreCase))
+                return true;
+
+            return name.IndexOf("_" + ManualPendingExitOrderPrefix, StringComparison.OrdinalIgnoreCase) > 0;
+        }
+
+        private static bool IsManualPendingExitOrder(Order order)
+        {
+            return order != null && IsManualPendingExitOrderName(order.Name);
+        }
+
+        private static string GetManualPendingExitSignalSuffix(Order order)
+        {
+            if (order == null)
+                return null;
+
+            switch (order.OrderAction)
+            {
+                case OrderAction.Sell:
+                    return "MANSELL";
+                case OrderAction.BuyToCover:
+                    return "MANBUY";
+                default:
+                    return null;
+            }
+        }
+
+        private static string BuildManualPendingExitOrderName(string tradeId, MarketPosition side, OrderType orderType)
+        {
+            string suffix = string.Format(CultureInfo.InvariantCulture,
+                "{0}{1}_{2}_{3:X}",
+                ManualPendingExitOrderPrefix,
+                side == MarketPosition.Long ? "L" : "S",
+                orderType == OrderType.StopMarket ? "STP" : "LMT",
+                DateTime.UtcNow.Ticks & 0xFFFFFF);
+
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return suffix;
+
+            return string.Format(CultureInfo.InvariantCulture, "{0}_{1}", tradeId.Trim(), suffix);
+        }
+
+        private static string TryExtractTaggedManualPendingExitTradeId(string orderName)
+        {
+            if (string.IsNullOrWhiteSpace(orderName))
+                return null;
+
+            string marker = "_" + ManualPendingExitOrderPrefix;
+            int idx = orderName.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (idx <= 0)
+                return null;
+
+            string tradeId = orderName.Substring(0, idx).Trim();
+            return string.IsNullOrWhiteSpace(tradeId) ? null : tradeId;
         }
 
         private static bool LooksLikeTargetOrder(Order order)
@@ -13604,6 +15558,50 @@ namespace NinjaTrader.NinjaScript.Strategies
                 || state == OrderState.Unknown;
         }
 
+        private static string BuildStraddlePendingOrderOco(string tradeId)
+        {
+            if (string.IsNullOrWhiteSpace(tradeId))
+                return StraddlePendingOrderOcoPrefix;
+
+            long uniqueSuffix = Interlocked.Increment(ref straddlePendingOcoSequence);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}{1}|{2:X}",
+                StraddlePendingOrderOcoPrefix,
+                tradeId.Trim(),
+                uniqueSuffix);
+        }
+
+        private static bool TryExtractStraddlePendingTradeId(string value, out string tradeId)
+        {
+            tradeId = null;
+            if (string.IsNullOrWhiteSpace(value) || !value.StartsWith(StraddlePendingOrderOcoPrefix, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            string suffix = value.Substring(StraddlePendingOrderOcoPrefix.Length).Trim();
+            if (string.IsNullOrWhiteSpace(suffix))
+                return false;
+
+            int separator = suffix.IndexOf('|');
+            if (separator >= 0)
+                suffix = suffix.Substring(0, separator).Trim();
+            if (string.IsNullOrWhiteSpace(suffix))
+                return false;
+
+            tradeId = suffix;
+            return true;
+        }
+
+        private static bool IsAccountBackedEntryOrderUsable(Order order)
+        {
+            if (order == null || !IsEntryOrderAction(order.OrderAction))
+                return false;
+
+            return order.OrderState != OrderState.Cancelled
+                && order.OrderState != OrderState.Filled
+                && order.OrderState != OrderState.Rejected;
+        }
+
         private bool ShouldSuppressProtectionRearm()
         {
             if (shutdownInProgress)
@@ -13630,7 +15628,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     looksManual = name.StartsWith("L", StringComparison.OrdinalIgnoreCase) ||
                                   name.StartsWith("S", StringComparison.OrdinalIgnoreCase) ||
-                                  name.IndexOf("MAN", StringComparison.OrdinalIgnoreCase) >= 0;
+                                  name.IndexOf("MAN", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                  IsManualPendingExitOrderName(name);
                 }
 
                 if (looksManual || Debug)
@@ -13649,41 +15648,101 @@ namespace NinjaTrader.NinjaScript.Strategies
                         string.IsNullOrEmpty(nativeError) ? "<none>" : nativeError));
                 }
 
-            if (!string.IsNullOrEmpty(name) &&
-                (orderState == OrderState.Cancelled || orderState == OrderState.Rejected || orderState == OrderState.Unknown))
-            {
-                if (straddlePendingLongTradeIds.Contains(name))
-                    straddlePendingLongTradeIds.Remove(name);
-                if (straddlePendingShortTradeIds.Contains(name))
-                    straddlePendingShortTradeIds.Remove(name);
-            }
-
-            string resolvedTradeId = ResolveTradeIdFromOrder(order);
-            if (string.IsNullOrEmpty(order.FromEntrySignal))
-            {
-                string entryKey = order.Name;
-                TradeRuntimeState entryState;
-                if (!string.IsNullOrEmpty(entryKey) &&
-                    tradeStates != null &&
-                    tradeStates.TryGetValue(entryKey, out entryState))
+                if (!string.IsNullOrEmpty(name) &&
+                    (orderState == OrderState.Cancelled || orderState == OrderState.Rejected || orderState == OrderState.Unknown))
                 {
-                    bool isEntryAction = order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.SellShort;
-                    if (isEntryAction)
+                    string pendingTradeId = ResolveTradeIdFromOrder(order) ?? name;
+                    TradeRuntimeState pendingState;
+                    bool preservePendingTrade = !string.IsNullOrEmpty(pendingTradeId) &&
+                        tradeStates != null &&
+                        tradeStates.TryGetValue(pendingTradeId, out pendingState) &&
+                        pendingState != null &&
+                        pendingState.IsStraddleEntry &&
+                        pendingState.UsesAccountEntryOrders &&
+                        pendingState.PendingEntryPriceUpdate &&
+                        pendingState.EntryCancelRequested;
+
+                    if (!preservePendingTrade)
                     {
-                        entryState.EntryOrder = order;
-                        if (IsTerminalState(orderState))
-                            entryState.EntryOrder = null;
-                        if (IsTerminalState(orderState))
+                        if (straddlePendingLongTradeIds.Contains(name))
+                            straddlePendingLongTradeIds.Remove(name);
+                        if (straddlePendingShortTradeIds.Contains(name))
+                            straddlePendingShortTradeIds.Remove(name);
+                        if (!string.IsNullOrEmpty(pendingTradeId))
                         {
-                            entryState.EntryOrderPending = false;
-                            entryState.EntryCancelRequested = false;
+                            if (straddlePendingLongTradeIds.Contains(pendingTradeId))
+                                straddlePendingLongTradeIds.Remove(pendingTradeId);
+                            if (straddlePendingShortTradeIds.Contains(pendingTradeId))
+                                straddlePendingShortTradeIds.Remove(pendingTradeId);
                         }
                     }
                 }
-            }
-            TradeRuntimeState state;
-            if (!string.IsNullOrEmpty(resolvedTradeId) && TryGetTradeState(resolvedTradeId, out state))
-            {
+
+                string resolvedTradeId = ResolveTradeIdFromOrder(order);
+                if (string.IsNullOrEmpty(order.FromEntrySignal))
+                {
+                    string entryKey = order.Name;
+                    TradeRuntimeState entryState;
+                    if (!string.IsNullOrEmpty(entryKey) &&
+                        tradeStates != null &&
+                        tradeStates.TryGetValue(entryKey, out entryState))
+                    {
+                        bool isEntryAction = order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.SellShort;
+                        if (isEntryAction)
+                        {
+                            bool preservePendingRestage = entryState.IsStraddleEntry &&
+                                entryState.UsesAccountEntryOrders &&
+                                entryState.PendingEntryPriceUpdate &&
+                                entryState.EntryCancelRequested;
+                            entryState.EntryOrder = order;
+                            if (entryState.PendingEntryPriceUpdate && !IsTerminalState(orderState) && !preservePendingRestage)
+                            {
+                                double effectiveEntryPrice = order.OrderType == OrderType.StopMarket || order.OrderType == OrderType.StopLimit
+                                    ? (stopPrice > 0 ? stopPrice : order.StopPrice)
+                                    : (limitPrice > 0 ? limitPrice : order.LimitPrice);
+
+                                if (effectiveEntryPrice > 0 && IsEntryOrderPriceSettled(orderState))
+                                {
+                                    if (PricesClose(entryState.PendingEntryLimitPrice, effectiveEntryPrice))
+                                    {
+                                        entryState.PendingEntryPriceUpdate = false;
+                                        entryState.PendingEntryLimitPrice = 0;
+                                        entryState.LastAutoEntryLimitPrice = effectiveEntryPrice;
+                                        entryState.EntryPrice = effectiveEntryPrice;
+                                    }
+                                    else
+                                    {
+                                        // Treat mismatched settled price as stale and allow the next desired update through.
+                                        entryState.PendingEntryPriceUpdate = false;
+                                        entryState.PendingEntryLimitPrice = 0;
+                                        entryState.LastAutoEntryLimitPrice = effectiveEntryPrice;
+                                        entryState.EntryPrice = effectiveEntryPrice;
+                                    }
+                                }
+                            }
+                            if (IsTerminalState(orderState))
+                                entryState.EntryOrder = null;
+                            if (IsTerminalState(orderState))
+                            {
+                                if (preservePendingRestage)
+                                {
+                                    entryState.EntryOrderPending = true;
+                                }
+                                else
+                                {
+                                    entryState.PendingEntryPriceUpdate = false;
+                                    entryState.PendingEntryLimitPrice = 0;
+                                    entryState.EntryOrderPending = false;
+                                    entryState.EntryCancelRequested = false;
+                                    entryState.EntryCancelOrderId = null;
+                                }
+                            }
+                        }
+                    }
+                }
+                TradeRuntimeState state;
+                if (!string.IsNullOrEmpty(resolvedTradeId) && TryGetTradeState(resolvedTradeId, out state))
+                {
                 bool isEntryAction = order.OrderAction == OrderAction.Buy || order.OrderAction == OrderAction.SellShort;
                 if (state.IsChopEntry && isEntryAction && order.OrderType == OrderType.Limit)
                 {
@@ -13759,9 +15818,17 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 if (!state.IsChopEntry && !state.IsScaleInEntry && isEntryAction && IsTerminalState(orderState) && order.Filled == 0)
                 {
+                    if (state.IsStraddleEntry && state.UsesAccountEntryOrders && state.PendingEntryPriceUpdate && state.EntryCancelRequested)
+                    {
+                        state.EntryOrder = null;
+                        state.EntryOrderPending = true;
+                        return;
+                    }
+
                     state.EntryOrder = null;
                     state.EntryOrderPending = false;
                     state.EntryCancelRequested = false;
+                    state.EntryCancelOrderId = null;
                     tradeStates.Remove(state.TradeId);
                     openTradeOrder.Remove(state.TradeId);
                     CleanupMultiEntrySyncGroup(state.SyncTradeId);
@@ -13799,6 +15866,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (!isTargetOrder && order.OrderType == OrderType.Limit)
                     isTargetOrder = name.IndexOf("target", StringComparison.OrdinalIgnoreCase) >= 0 ||
                                     name.IndexOf("profit", StringComparison.OrdinalIgnoreCase) >= 0;
+
+                if (isStopOrder)
+                    syntheticStopLastOrderSyncAt = DateTime.UtcNow;
+                if (isTargetOrder)
+                    syntheticTargetLastOrderSyncAt = DateTime.UtcNow;
 
                 DateTime now = Time != null && Time.Count > 0 ? Time[0] : DateTime.UtcNow;
                 if (orderState == OrderState.Cancelled && error == ErrorCode.NoError && Position != null && Position.MarketPosition != MarketPosition.Flat)
@@ -13928,12 +16000,60 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private string ResolveManualPendingExitTradeId(Order order)
+        {
+            if (!IsManualPendingExitOrder(order))
+                return null;
+
+            string taggedTradeId = TryExtractTaggedManualPendingExitTradeId(order.Name);
+            if (!string.IsNullOrWhiteSpace(taggedTradeId))
+                return taggedTradeId;
+
+            MarketPosition entrySide = MarketPosition.Flat;
+            if (order.OrderAction == OrderAction.Sell)
+                entrySide = MarketPosition.Long;
+            else if (order.OrderAction == OrderAction.BuyToCover)
+                entrySide = MarketPosition.Short;
+
+            if (entrySide != MarketPosition.Flat)
+            {
+                if (!string.IsNullOrWhiteSpace(activeTradeId))
+                {
+                    TradeRuntimeState activeState;
+                    if (tradeStates != null &&
+                        tradeStates.TryGetValue(activeTradeId, out activeState) &&
+                        activeState != null &&
+                        activeState.EntrySide == entrySide &&
+                        activeState.RemainingQuantity > 0)
+                    {
+                        return activeState.TradeId;
+                    }
+                }
+
+                foreach (var state in EnumerateOpenTrades(entrySide))
+                {
+                    if (state != null && state.RemainingQuantity > 0)
+                        return state.TradeId;
+                }
+            }
+
+            return string.IsNullOrWhiteSpace(activeTradeId) ? null : activeTradeId;
+        }
+
         private string ResolveTradeIdFromOrder(Order order)
         {
             if (order == null)
                 return null;
             if (!string.IsNullOrEmpty(order.FromEntrySignal))
                 return order.FromEntrySignal;
+
+            string manualPendingExitTradeId = ResolveManualPendingExitTradeId(order);
+            if (!string.IsNullOrEmpty(manualPendingExitTradeId))
+                return manualPendingExitTradeId;
+
+            string ocoTradeId;
+            if (TryExtractStraddlePendingTradeId(order.Oco, out ocoTradeId))
+                return ocoTradeId;
 
             string name = order.Name;
             if (string.IsNullOrEmpty(name))
@@ -14321,6 +16441,20 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (effectivePrice <= 0)
                     return;
 
+                if (ShouldSuppressDuplicateManagedProtectionRequest(state, true, effectivePrice))
+                {
+                    state.LastStopPrice = effectivePrice;
+                    if (state.RunUpActive)
+                        state.RunUpLastStopPrice = effectivePrice;
+                    stopSet = true;
+                    if (IsProtectionPriceSettled(orderState))
+                    {
+                        state.PendingAutoStopUpdate = false;
+                        state.PendingAutoStopPrice = 0;
+                    }
+                    return;
+                }
+
                 if (IsSyntheticManagedProtectionPrice(true, effectivePrice))
                 {
                     state.LastStopPrice = effectivePrice;
@@ -14354,6 +16488,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                         return;
                     }
 
+                    if (ShouldIgnoreStraddleStopRegression(state, effectivePrice))
+                    {
+                        if (Debug)
+                            StrategyLogDebug(string.Format("[STRADDLE][STOP] Ignoring regressive stop update for {0}: tracked={1:F2} incoming={2:F2}",
+                                tradeId,
+                                state.LastStopPrice,
+                                effectivePrice));
+                        return;
+                    }
+
                     if (IsManualProtectionOverrideEnabled(state, true) && state.PendingAutoStopPrice > 0)
                     {
                         if (Debug)
@@ -14367,6 +16511,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     state.PendingAutoStopUpdate = false;
                     state.PendingAutoStopPrice = 0;
                     pendingMismatch = true;
+                }
+
+                if (ShouldIgnoreStraddleStopRegression(state, effectivePrice))
+                {
+                    if (Debug)
+                        StrategyLogDebug(string.Format("[STRADDLE][STOP] Ignoring stale regressive stop sync for {0}: tracked={1:F2} incoming={2:F2}",
+                            tradeId,
+                            state.LastStopPrice,
+                            effectivePrice));
+                    return;
                 }
 
                 if (state.LastStopPrice <= 0)
@@ -14466,6 +16620,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                     effectivePrice = order.LimitPrice;
                 if (effectivePrice <= 0)
                     return;
+
+                if (ShouldSuppressDuplicateManagedProtectionRequest(state, false, effectivePrice))
+                {
+                    state.LastTargetPrice = effectivePrice;
+                    targetSet = true;
+                    if (IsProtectionPriceSettled(orderState))
+                    {
+                        state.PendingAutoTargetUpdate = false;
+                        state.PendingAutoTargetPrice = 0;
+                    }
+                    return;
+                }
 
                 if (IsSyntheticManagedProtectionPrice(false, effectivePrice))
                 {
@@ -14636,6 +16802,8 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             try
             {
+                CancelManualPendingExitOrders(reason);
+
                 if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity <= 0)
                     return;
 
@@ -14853,14 +17021,59 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
-        private void CancelWorkingEntryOrders(string reason)
+        private void CancelManualPendingExitOrders(string reason)
+        {
+            if (Account == null || Instrument == null)
+                return;
+
+            int cancelled = 0;
+
+            try
+            {
+                var orders = Account.Orders != null ? new List<Order>(Account.Orders) : new List<Order>();
+                foreach (var order in orders)
+                {
+                    if (order == null || !IsOrderWorking(order))
+                        continue;
+
+                    string name = order.Name ?? string.Empty;
+                    if (!IsManualPendingExitOrderName(name))
+                        continue;
+
+                    if (order.Instrument == null ||
+                        !string.Equals(order.Instrument.FullName, Instrument.FullName, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    try
+                    {
+                        Account.Cancel(new[] { order });
+                        cancelled++;
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+
+            if (cancelled > 0)
+                StrategyLogInfo($"[MANUAL][PEND_EXIT] Cancelled {cancelled} pending exit order(s) due to {reason}.");
+        }
+
+        private void CancelWorkingEntryOrders(string reason, bool allowStraddlePreservation = true)
         {
             if (tradeStates == null || tradeStates.Count == 0)
                 return;
 
+            bool preserveStraddle = allowStraddlePreservation &&
+                !string.IsNullOrEmpty(reason) &&
+                reason.IndexOf("manual_halt", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                IsStraddleManualHaltOverrideEnabled();
+
             foreach (var state in tradeStates.Values.ToList())
             {
                 if (state == null)
+                    continue;
+
+                if (preserveStraddle && state.IsStraddleEntry)
                     continue;
 
                 bool skipManual = false;
@@ -14879,13 +17092,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                         continue;
                 }
 
-                var order = state.EntryOrder;
+                var order = GetLiveTrackedEntryOrder(state);
                 if (order == null || IsTerminalState(order.OrderState))
                     continue;
 
                 try
                 {
-                    CancelOrder(order);
+                    if (order.OrderEntry == OrderEntry.Manual && Account != null)
+                        Account.Cancel(new[] { order });
+                    else
+                        CancelOrder(order);
                     StrategyLogInfo($"[SAFETY] Cancelled entry {order.Name ?? state.TradeId ?? "<entry>"} due to {reason}");
                 }
                 catch (Exception ex)
@@ -15775,7 +17991,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             state.PendingAutoStopPrice = price;
             try
             {
-                SetStopLoss(tradeId, CalculationMode.Price, price, false);
+                IssueStopLoss(tradeId, CalculationMode.Price, price, false, ProtectionUpdateOrigin.SyntheticManual);
             }
             catch (Exception ex)
             {
@@ -15801,7 +18017,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             state.PendingAutoTargetPrice = price;
             try
             {
-                SetProfitTarget(tradeId, CalculationMode.Price, price);
+                IssueProfitTarget(tradeId, CalculationMode.Price, price, ProtectionUpdateOrigin.SyntheticManual);
             }
             catch (Exception ex)
             {
@@ -15829,6 +18045,165 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             Order order = GetLiveNativeProtectionOrder(state, isStop);
             return order != null && !IsTerminalState(order.OrderState);
+        }
+
+        private static bool IsEntryOrderAction(OrderAction action)
+        {
+            return action == OrderAction.Buy || action == OrderAction.SellShort;
+        }
+
+        private bool HasActiveTrackedEntryOrders(TradeRuntimeState state)
+        {
+            if (state == null)
+                return false;
+
+            if (state.UsesAccountEntryOrders)
+                return GetLiveAccountBackedEntryOrder(state) != null;
+
+            Order trackedOrder = state.EntryOrder;
+            if (trackedOrder != null && IsEntryOrderAction(trackedOrder.OrderAction) && !IsTerminalState(trackedOrder.OrderState))
+                return true;
+
+            if (Account == null || Account.Orders == null)
+                return false;
+
+            foreach (Order accountOrder in Account.Orders)
+            {
+                if (accountOrder == null || !IsEntryOrderAction(accountOrder.OrderAction))
+                    continue;
+                if (IsTerminalState(accountOrder.OrderState))
+                    continue;
+
+                string resolvedTradeId = ResolveTradeIdFromOrder(accountOrder);
+                if (!string.Equals(resolvedTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private Order GetLiveAccountBackedEntryOrder(TradeRuntimeState state)
+        {
+            if (state == null || Account == null || Account.Orders == null)
+                return null;
+
+            Order trackedOrder = state.EntryOrder;
+            string trackedOrderId = trackedOrder != null ? trackedOrder.OrderId : null;
+            string trackedOco = trackedOrder != null ? trackedOrder.Oco : null;
+            foreach (Order accountOrder in Account.Orders)
+            {
+                if (accountOrder == null || !IsAccountBackedEntryOrderUsable(accountOrder))
+                    continue;
+
+                if (!string.IsNullOrWhiteSpace(trackedOrderId) &&
+                    string.Equals(accountOrder.OrderId, trackedOrderId, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.EntryOrder = accountOrder;
+                    return accountOrder;
+                }
+
+                if (!string.IsNullOrWhiteSpace(trackedOco) &&
+                    string.Equals(accountOrder.Oco, trackedOco, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.EntryOrder = accountOrder;
+                    return accountOrder;
+                }
+
+                string resolvedTradeId = ResolveTradeIdFromOrder(accountOrder);
+                if (!string.Equals(resolvedTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                state.EntryOrder = accountOrder;
+                return accountOrder;
+            }
+
+            if (trackedOrder != null && IsAccountBackedEntryOrderUsable(trackedOrder))
+                return trackedOrder;
+
+            return null;
+        }
+
+        private Order GetLiveTrackedEntryOrder(TradeRuntimeState state)
+        {
+            if (state == null)
+                return null;
+
+            if (state.UsesAccountEntryOrders)
+                return GetLiveAccountBackedEntryOrder(state);
+
+            Order trackedOrder = state.EntryOrder;
+            bool trackedUsable = trackedOrder != null &&
+                (state.UsesAccountEntryOrders ? IsAccountBackedEntryOrderUsable(trackedOrder) : (!IsTerminalState(trackedOrder.OrderState) && IsEntryOrderAction(trackedOrder.OrderAction)));
+
+            bool shouldPreferAccountRefresh = state.UsesAccountEntryOrders || (trackedUsable && trackedOrder.OrderEntry == OrderEntry.Manual);
+            if (shouldPreferAccountRefresh && Account != null && Account.Orders != null)
+            {
+                foreach (Order accountOrder in Account.Orders)
+                {
+                    if (accountOrder == null)
+                        continue;
+                    if (state.UsesAccountEntryOrders)
+                    {
+                        if (!IsAccountBackedEntryOrderUsable(accountOrder))
+                            continue;
+                    }
+                    else if (IsTerminalState(accountOrder.OrderState))
+                        continue;
+                    if (!IsEntryOrderAction(accountOrder.OrderAction))
+                        continue;
+                    if (!string.IsNullOrWhiteSpace(trackedOrder?.OrderId) &&
+                        string.Equals(accountOrder.OrderId, trackedOrder.OrderId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        state.EntryOrder = accountOrder;
+                        return accountOrder;
+                    }
+
+                    string resolvedTradeId = ResolveTradeIdFromOrder(accountOrder);
+                    if (!string.Equals(resolvedTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    state.EntryOrder = accountOrder;
+                    return accountOrder;
+                }
+            }
+
+            if (trackedUsable)
+                return trackedOrder;
+
+            if (Account == null || Account.Orders == null)
+                return trackedOrder;
+
+            foreach (Order accountOrder in Account.Orders)
+            {
+                if (accountOrder == null)
+                    continue;
+                if (state.UsesAccountEntryOrders)
+                {
+                    if (!IsAccountBackedEntryOrderUsable(accountOrder))
+                        continue;
+                }
+                else if (IsTerminalState(accountOrder.OrderState))
+                    continue;
+                if (!IsEntryOrderAction(accountOrder.OrderAction))
+                    continue;
+                if (!string.IsNullOrWhiteSpace(trackedOrder?.OrderId) &&
+                    string.Equals(accountOrder.OrderId, trackedOrder.OrderId, StringComparison.OrdinalIgnoreCase))
+                {
+                    state.EntryOrder = accountOrder;
+                    return accountOrder;
+                }
+
+                string resolvedTradeId = ResolveTradeIdFromOrder(accountOrder);
+                if (!string.Equals(resolvedTradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                state.EntryOrder = accountOrder;
+                return accountOrder;
+            }
+
+            return trackedOrder;
         }
 
         private bool IsNativeProtectionOrderCoveringSyntheticTouch(TradeRuntimeState state, bool isStop, double linePrice)
@@ -15936,7 +18311,10 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             try
             {
-                CancelOrder(order);
+                if (order.OrderEntry == OrderEntry.Manual && Account != null)
+                    Account.Cancel(new[] { order });
+                else
+                    CancelOrder(order);
                 if (Debug)
                     StrategyLogDebug(string.Format("[AUTO][CANCEL] Cancelled {0} for {1} (state={2})", label, tradeId ?? "<unknown>", order.OrderState));
             }
@@ -16366,7 +18744,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     var manualTradePanel = new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
-                        HorizontalAlignment = HorizontalAlignment.Stretch
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        Margin = new Thickness(0, 0, 0, 6)
                     };
 
                     var biasTogglePanel = new StackPanel
@@ -16388,11 +18767,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                         HorizontalAlignment = HorizontalAlignment.Stretch
                     };
 
-                    var manualOffsetPanel = new WrapPanel
+                    var manualOffsetPanel = new StackPanel
+                    {
+                        Orientation = Orientation.Vertical,
+                        HorizontalAlignment = HorizontalAlignment.Stretch,
+                        Margin = new Thickness(0, 6, 0, 2)
+                    };
+
+                    var manualOffsetButtonsPanel = new WrapPanel
                     {
                         Orientation = Orientation.Horizontal,
-                        HorizontalAlignment = HorizontalAlignment.Stretch,
-                        Margin = new Thickness(0, 2, 0, 2)
+                        HorizontalAlignment = HorizontalAlignment.Stretch
                     };
 
                     var visualTogglePanel = new StackPanel
@@ -16415,7 +18800,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Margin = new Thickness(0, 2, 0, 0)
                     };
 
-                    var chopTradesPerEntryPanel = new StackPanel
+                    chopTradesPerEntryPanel = new StackPanel
                     {
                         Orientation = Orientation.Horizontal,
                         HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -16429,6 +18814,15 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Margin = new Thickness(0, 2, 0, 0)
                     };
 
+                    var runtimeProtectionPanel = SupportsRuntimeProtectionControls()
+                        ? new StackPanel
+                        {
+                            Orientation = Orientation.Vertical,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            Margin = new Thickness(0, 2, 0, 0)
+                        }
+                        : null;
+
                     manualFlattenButton = new Button
                     {
                         Content = "Flatten + Halt",
@@ -16439,23 +18833,23 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                     manualBuyButton = new Button
                     {
-                        Content = "Manual Buy",
+                        Content = "Buy MKT",
                         Margin = new Thickness(2),
                         Padding = new Thickness(6, 2, 6, 2),
                         Background = Brushes.DarkGreen,
                         Foreground = Brushes.White,
-                        ToolTip = "Enabled only while manual halt is active."
+                        ToolTip = "Immediate market buy. Enabled only while manual halt is active."
                     };
                     manualBuyButton.Click += ManualBuyButton_Click;
 
                     manualSellButton = new Button
                     {
-                        Content = "Manual Sell",
+                        Content = "Sell MKT",
                         Margin = new Thickness(2),
                         Padding = new Thickness(6, 2, 6, 2),
                         Background = Brushes.DarkRed,
                         Foreground = Brushes.White,
-                        ToolTip = "Enabled only while manual halt is active."
+                        ToolTip = "Immediate market sell. Enabled only while manual halt is active."
                     };
                     manualSellButton.Click += ManualSellButton_Click;
 
@@ -16547,7 +18941,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Padding = new Thickness(6, 2, 6, 2),
                         Background = Brushes.DarkGreen,
                         Foreground = Brushes.White,
-                        ToolTip = "Place a pending buy order offset below current price."
+                        ToolTip = "Place a pending buy order. If short is open, this becomes a pending buy-to-cover exit."
                     };
                     manualLimitButton.Click += ManualLimitButton_Click;
 
@@ -16558,7 +18952,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Padding = new Thickness(6, 2, 6, 2),
                         Background = Brushes.DarkRed,
                         Foreground = Brushes.White,
-                        ToolTip = "Place a pending sell order offset below current price."
+                        ToolTip = "Place a pending sell order. If long is open, this becomes a pending sell exit."
                     };
                     manualStopButton.Click += ManualStopButton_Click;
 
@@ -16687,10 +19081,105 @@ namespace NinjaTrader.NinjaScript.Strategies
                     chopTradesPerEntryTextBox.PreviewKeyDown += ChopTradesPerEntryTextBox_PreviewKeyDown;
                     chopTradesPerEntryTextBox.LostFocus += ChopTradesPerEntryTextBox_LostFocus;
 
+                    if (runtimeProtectionPanel != null)
+                    {
+                        var runtimeProtectionHeader = new TextBlock
+                        {
+                            Text = "Runtime SL/TP",
+                            Margin = new Thickness(2, 6, 2, 4),
+                            Foreground = Brushes.White,
+                            FontWeight = FontWeights.SemiBold
+                        };
+
+                        var runtimeStopLossRow = new StackPanel
+                        {
+                            Orientation = Orientation.Horizontal,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            Margin = new Thickness(0, 0, 0, 2)
+                        };
+
+                        var runtimeStopLossLabel = new TextBlock
+                        {
+                            Text = string.Format(CultureInfo.InvariantCulture, "Stoploss ({0})", GetProtectionUnitLabel(true)),
+                            Width = 115,
+                            Margin = new Thickness(2, 4, 8, 2),
+                            VerticalAlignment = VerticalAlignment.Center,
+                            Foreground = Brushes.White
+                        };
+
+                        runtimeStopLossTextBox = new TextBox
+                        {
+                            Width = 90,
+                            Margin = new Thickness(2),
+                            Padding = new Thickness(4, 1, 4, 1),
+                            HorizontalContentAlignment = HorizontalAlignment.Center,
+                            ToolTip = GetRuntimeProtectionToolTip(true),
+                            Text = FormatProtectionInputValue(true)
+                        };
+                        runtimeStopLossTextBox.PreviewMouseDown += RuntimeProtectionTextBox_PreviewMouseDown;
+                        runtimeStopLossTextBox.PreviewKeyDown += RuntimeProtectionTextBox_PreviewKeyDown;
+
+                        var runtimeTargetRow = new StackPanel
+                        {
+                            Orientation = Orientation.Horizontal,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            Margin = new Thickness(0, 0, 0, 4)
+                        };
+
+                        var runtimeTargetLabel = new TextBlock
+                        {
+                            Text = string.Format(CultureInfo.InvariantCulture, "Target ({0})", GetProtectionUnitLabel(false)),
+                            Width = 115,
+                            Margin = new Thickness(2, 4, 8, 2),
+                            VerticalAlignment = VerticalAlignment.Center,
+                            Foreground = Brushes.White
+                        };
+
+                        runtimeTargetTextBox = new TextBox
+                        {
+                            Width = 90,
+                            Margin = new Thickness(2),
+                            Padding = new Thickness(4, 1, 4, 1),
+                            HorizontalContentAlignment = HorizontalAlignment.Center,
+                            ToolTip = GetRuntimeProtectionToolTip(false),
+                            Text = FormatProtectionInputValue(false)
+                        };
+                        runtimeTargetTextBox.PreviewMouseDown += RuntimeProtectionTextBox_PreviewMouseDown;
+                        runtimeTargetTextBox.PreviewKeyDown += RuntimeProtectionTextBox_PreviewKeyDown;
+
+                        runtimeProtectionSetButton = new Button
+                        {
+                            Content = "Set SL/TP",
+                            Margin = new Thickness(2, 2, 2, 0),
+                            Padding = new Thickness(6, 2, 6, 2),
+                            Background = Brushes.SteelBlue,
+                            Foreground = Brushes.White,
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            ToolTip = "Apply the stoploss and target runtime overrides using the selected strategy units."
+                        };
+                        runtimeProtectionSetButton.Click += RuntimeProtectionSetButton_Click;
+
+                        runtimeStopLossRow.Children.Add(runtimeStopLossLabel);
+                        runtimeStopLossRow.Children.Add(runtimeStopLossTextBox);
+                        runtimeTargetRow.Children.Add(runtimeTargetLabel);
+                        runtimeTargetRow.Children.Add(runtimeTargetTextBox);
+                        runtimeProtectionPanel.Children.Add(runtimeProtectionHeader);
+                        runtimeProtectionPanel.Children.Add(runtimeStopLossRow);
+                        runtimeProtectionPanel.Children.Add(runtimeTargetRow);
+                        runtimeProtectionPanel.Children.Add(runtimeProtectionSetButton);
+                    }
+
                     manualHaltPanel.Children.Add(manualFlattenButton);
                     manualHaltPanel.Children.Add(manualResumeButton);
                     manualTradePanel.Children.Add(manualBuyButton);
                     manualTradePanel.Children.Add(manualSellButton);
+                    manualButtonsPanel.Children.Add(new TextBlock
+                    {
+                        Text = "Manual Controls",
+                        Margin = new Thickness(2, 4, 2, 2),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Foreground = Brushes.Gainsboro
+                    });
                     manualButtonsPanel.Children.Add(manualHaltPanel);
                     manualButtonsPanel.Children.Add(manualTradePanel);
                     if (ShowBiasButtons)
@@ -16714,8 +19203,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                         toggleButtonsPanel.Children.Add(reverseSignalToggleButton);
                         toggleButtonsPanel.Children.Add(syntheticAutoRetakeToggleButton);
                     }
-                    manualOffsetPanel.Children.Add(manualLimitButton);
-                    manualOffsetPanel.Children.Add(manualStopButton);
+                    manualOffsetPanel.Children.Add(new TextBlock
+                    {
+                        Text = "Pending Orders",
+                        Margin = new Thickness(2, 0, 2, 2),
+                        VerticalAlignment = VerticalAlignment.Center,
+                        Foreground = Brushes.Gainsboro
+                    });
+                    manualOffsetButtonsPanel.Children.Add(manualLimitButton);
+                    manualOffsetButtonsPanel.Children.Add(manualStopButton);
+                    manualOffsetPanel.Children.Add(manualOffsetButtonsPanel);
                     manualOffsetPanel.Children.Add(manualPendingPlacementToggleButton);
                     visualsToggleButton = new Button
                     {
@@ -16754,6 +19251,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                     chartTraderButtonPanel.Children.Add(tradesPerEntryPanel);
                     chartTraderButtonPanel.Children.Add(chopTradesPerEntryPanel);
                     chartTraderButtonPanel.Children.Add(addOnTradePanel);
+                    if (runtimeProtectionPanel != null)
+                        chartTraderButtonPanel.Children.Add(runtimeProtectionPanel);
 
                     Grid.SetRow(chartTraderButtonPanel, chartTraderGrid.RowDefinitions.Count - 1);
                     Grid.SetColumnSpan(chartTraderButtonPanel, Math.Max(1, chartTraderGrid.ColumnDefinitions.Count));
@@ -16858,6 +19357,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                         chopTradesPerEntryTextBox.PreviewKeyDown -= ChopTradesPerEntryTextBox_PreviewKeyDown;
                         chopTradesPerEntryTextBox.LostFocus -= ChopTradesPerEntryTextBox_LostFocus;
                     }
+                    if (runtimeStopLossTextBox != null)
+                    {
+                        runtimeStopLossTextBox.PreviewMouseDown -= RuntimeProtectionTextBox_PreviewMouseDown;
+                        runtimeStopLossTextBox.PreviewKeyDown -= RuntimeProtectionTextBox_PreviewKeyDown;
+                    }
+                    if (runtimeTargetTextBox != null)
+                    {
+                        runtimeTargetTextBox.PreviewMouseDown -= RuntimeProtectionTextBox_PreviewMouseDown;
+                        runtimeTargetTextBox.PreviewKeyDown -= RuntimeProtectionTextBox_PreviewKeyDown;
+                    }
+                    if (runtimeProtectionSetButton != null)
+                        runtimeProtectionSetButton.Click -= RuntimeProtectionSetButton_Click;
 
                     chartTraderButtonPanel = null;
                     manualBuyButton = null;
@@ -16890,8 +19401,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                     tradesPerEntryTextBox = null;
                     chopTradesPerEntryLabel = null;
                     chopTradesPerEntryTextBox = null;
+                    chopTradesPerEntryPanel = null;
+                    runtimeStopLossTextBox = null;
+                    runtimeTargetTextBox = null;
+                    runtimeProtectionSetButton = null;
                     lastTradesPerEntryDisplay = -1;
                     lastChopTradesPerEntryDisplay = -1;
+                    lastChopTradesPerEntryVisible = null;
                     lastManualButtonsEnabled = false;
                     lastAddOnButtonEnabled = false;
                     lastBiasToggleValue = TradeBias.Both;
@@ -16919,6 +19435,1021 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (Debug)
                     StrategyLogDebug($"[UI] Failed to remove ChartTrader buttons: {ex.Message}");
             }
+        }
+
+        private void UpdateScaleInOverlayRuntimeState()
+        {
+            if (ChartControl == null || !EnableScaleInTrades)
+            {
+                RemoveScaleInOverlayButtons();
+                return;
+            }
+
+            TryInitializeScaleInOverlayButtons();
+            TryAttachScaleInMeasurementDragHandlers();
+            UpdateScaleInOverlayButtons();
+            UpdateScaleInLadderEditorRows();
+        }
+
+        private void TryInitializeScaleInOverlayButtons()
+        {
+            if (scaleInOverlayAdded || scaleInOverlayInitializing || ChartControl == null)
+                return;
+
+            scaleInOverlayInitializing = true;
+
+            try
+            {
+                ChartControl.Dispatcher.InvokeAsync(() =>
+                {
+                    try
+                    {
+                        if (scaleInOverlayAdded || ChartControl == null || !EnableScaleInTrades)
+                            return;
+
+                        scaleInOverlayHost = FindScaleInOverlayHostPanel(ChartControl);
+                        if (scaleInOverlayHost == null)
+                            return;
+
+                        scaleInOverlayCanvas = new Canvas
+                        {
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            VerticalAlignment = VerticalAlignment.Stretch
+                        };
+                        scaleInOverlayCanvas.SizeChanged += ScaleInOverlayCanvas_SizeChanged;
+
+                        scaleInOverlayButtonPanel = new StackPanel
+                        {
+                            Orientation = Orientation.Vertical,
+                            Margin = new Thickness(0),
+                            MinWidth = 148,
+                            HorizontalAlignment = HorizontalAlignment.Stretch
+                        };
+
+                        scaleInOverlayAddLevelButton = CreateScaleInOverlayButton("Add Level", Brushes.SeaGreen, "Append one more future scale-in level.");
+                        scaleInOverlayRemoveLevelButton = CreateScaleInOverlayButton("Remove Level", Brushes.IndianRed, "Remove the farthest unfilled scale-in level.");
+                        scaleInOverlayAddLevelButton.Margin = new Thickness(0, 0, 4, 0);
+                        scaleInOverlayRemoveLevelButton.Margin = new Thickness(4, 0, 0, 0);
+                        scaleInOverlayAddLevelButton.Click += ScaleInOverlayAddLevelButton_Click;
+                        scaleInOverlayRemoveLevelButton.Click += ScaleInOverlayRemoveLevelButton_Click;
+
+                        scaleInOverlayDragThumb = new Thumb
+                        {
+                            Height = 18,
+                            Cursor = Cursors.SizeAll,
+                            Background = Brushes.Transparent,
+                            Margin = new Thickness(0)
+                        };
+                        scaleInOverlayDragThumb.DragDelta += ScaleInOverlayDragThumb_DragDelta;
+
+                        scaleInOverlayTopResizeThumb = new Thumb
+                        {
+                            Height = 8,
+                            Cursor = Cursors.SizeNS,
+                            Background = new SolidColorBrush(Color.FromArgb(95, 74, 90, 110)),
+                            Margin = new Thickness(8, 8, 8, 4),
+                            HorizontalAlignment = HorizontalAlignment.Stretch,
+                            VerticalAlignment = VerticalAlignment.Top
+                        };
+                        scaleInOverlayTopResizeThumb.DragDelta += ScaleInOverlayTopResizeThumb_DragDelta;
+
+                        scaleInOverlayButtonPanel.Children.Add(new TextBlock
+                        {
+                            Text = "Ladder Levels",
+                            Margin = new Thickness(0, 2, 0, 4),
+                            Foreground = Brushes.Gainsboro,
+                            FontWeight = FontWeights.SemiBold,
+                            FontSize = 11
+                        });
+
+                        scaleInLadderEditorRowsPanel = new StackPanel
+                        {
+                            Orientation = Orientation.Vertical,
+                            Margin = new Thickness(0, 0, 0, 4)
+                        };
+                        scaleInOverlayButtonPanel.Children.Add(scaleInLadderEditorRowsPanel);
+
+                        var ladderButtonPanel = new Grid
+                        {
+                            HorizontalAlignment = HorizontalAlignment.Stretch
+                        };
+                        ladderButtonPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                        ladderButtonPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                        ladderButtonPanel.Children.Add(scaleInOverlayAddLevelButton);
+                        ladderButtonPanel.Children.Add(scaleInOverlayRemoveLevelButton);
+                        Grid.SetColumn(scaleInOverlayAddLevelButton, 0);
+                        Grid.SetColumn(scaleInOverlayRemoveLevelButton, 1);
+                        scaleInOverlayButtonPanel.Children.Add(ladderButtonPanel);
+
+                        var overlayContentScroller = new ScrollViewer
+                        {
+                            Content = scaleInOverlayButtonPanel,
+                            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                            HorizontalContentAlignment = HorizontalAlignment.Stretch,
+                            Margin = new Thickness(0)
+                        };
+
+                        scaleInOverlayResizeThumb = new Thumb
+                        {
+                            Width = 16,
+                            Height = 16,
+                            HorizontalAlignment = HorizontalAlignment.Right,
+                            VerticalAlignment = VerticalAlignment.Bottom,
+                            Margin = new Thickness(0, 0, 2, 2),
+                            Cursor = Cursors.SizeNWSE,
+                            Background = new SolidColorBrush(Color.FromArgb(110, 74, 90, 110)),
+                            BorderBrush = Brushes.SlateGray,
+                            BorderThickness = new Thickness(1)
+                        };
+                        scaleInOverlayResizeThumb.DragDelta += ScaleInOverlayResizeThumb_DragDelta;
+
+                        var overlayHeaderBorder = new Border
+                        {
+                            Background = new SolidColorBrush(Color.FromArgb(155, 48, 58, 74)),
+                            CornerRadius = new CornerRadius(4, 4, 0, 0),
+                            Padding = new Thickness(8, 3, 8, 3),
+                            Margin = new Thickness(0, 0, 0, 8)
+                        };
+
+                        var overlayHeaderGrid = new Grid();
+                        overlayHeaderGrid.Children.Add(new TextBlock
+                        {
+                            Text = "Scale-In Ladder",
+                            Foreground = Brushes.Gainsboro,
+                            FontWeight = FontWeights.SemiBold,
+                            FontSize = 11,
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                        overlayHeaderGrid.Children.Add(scaleInOverlayDragThumb);
+                        overlayHeaderBorder.Child = overlayHeaderGrid;
+
+                        var overlayBottomGripPanel = new Grid
+                        {
+                            Height = 18,
+                            Margin = new Thickness(0, 6, 0, 0)
+                        };
+                        overlayBottomGripPanel.Children.Add(scaleInOverlayResizeThumb);
+
+                        scaleInOverlayChromeGrid = new Grid();
+                        scaleInOverlayChromeGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                        scaleInOverlayChromeGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                        scaleInOverlayChromeGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+                        scaleInOverlayChromeGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+                        scaleInOverlayChromeGrid.Children.Add(scaleInOverlayTopResizeThumb);
+                        Grid.SetRow(scaleInOverlayTopResizeThumb, 0);
+                        scaleInOverlayChromeGrid.Children.Add(overlayHeaderBorder);
+                        Grid.SetRow(overlayHeaderBorder, 1);
+                        scaleInOverlayChromeGrid.Children.Add(overlayContentScroller);
+                        Grid.SetRow(overlayContentScroller, 2);
+                        scaleInOverlayChromeGrid.Children.Add(overlayBottomGripPanel);
+                        Grid.SetRow(overlayBottomGripPanel, 3);
+
+                        scaleInOverlayBorder = new Border
+                        {
+                            HorizontalAlignment = HorizontalAlignment.Left,
+                            VerticalAlignment = VerticalAlignment.Top,
+                            Width = ScaleInOverlayPanelDefaultWidth,
+                            Height = ScaleInOverlayPanelDefaultHeight,
+                            MinWidth = ScaleInOverlayPanelMinWidth,
+                            MinHeight = ScaleInOverlayPanelMinHeight,
+                            Padding = new Thickness(10),
+                            CornerRadius = new CornerRadius(4),
+                            Background = new SolidColorBrush(Color.FromArgb(150, 12, 18, 26)),
+                            BorderBrush = new SolidColorBrush(Color.FromArgb(180, 74, 90, 110)),
+                            BorderThickness = new Thickness(1),
+                            Child = scaleInOverlayChromeGrid
+                        };
+                        scaleInOverlayBorder.Loaded += ScaleInOverlayBorder_Loaded;
+
+                        if (scaleInOverlayHost is Grid grid)
+                        {
+                            Grid.SetRow(scaleInOverlayCanvas, Grid.GetRow(ChartControl));
+                            Grid.SetColumn(scaleInOverlayCanvas, Grid.GetColumn(ChartControl));
+                            Grid.SetRowSpan(scaleInOverlayCanvas, Math.Max(1, Grid.GetRowSpan(ChartControl)));
+                            Grid.SetColumnSpan(scaleInOverlayCanvas, Math.Max(1, Grid.GetColumnSpan(ChartControl)));
+                        }
+
+                        System.Windows.Controls.Panel.SetZIndex(scaleInOverlayCanvas, ScaleInOverlayButtonZIndex);
+                        scaleInOverlayHost.Children.Add(scaleInOverlayCanvas);
+                        scaleInOverlayCanvas.Children.Add(scaleInOverlayBorder);
+
+                        scaleInOverlayAdded = true;
+                        UpdateScaleInOverlayButtons(true);
+                        UpdateScaleInLadderEditorRows(true);
+                    }
+                    finally
+                    {
+                        scaleInOverlayInitializing = false;
+                    }
+                });
+            }
+            catch
+            {
+                scaleInOverlayInitializing = false;
+            }
+        }
+
+        private Button CreateScaleInOverlayButton(string content, Brush background, string toolTip)
+        {
+            return new Button
+            {
+                Content = content,
+                MinWidth = 84,
+                Margin = new Thickness(0, 0, 0, 3),
+                Padding = new Thickness(8, 3, 8, 3),
+                FontSize = 11,
+                Background = background,
+                Foreground = Brushes.White,
+                HorizontalAlignment = HorizontalAlignment.Stretch,
+                ToolTip = toolTip
+            };
+        }
+
+        private void ScaleInOverlayBorder_Loaded(object sender, RoutedEventArgs e)
+        {
+            InitializeScaleInOverlayPanelPosition();
+        }
+
+        private void ScaleInOverlayCanvas_SizeChanged(object sender, SizeChangedEventArgs e)
+        {
+            InitializeScaleInOverlayPanelPosition();
+            ClampScaleInOverlayPanelToCanvasBounds();
+        }
+
+        private void ScaleInOverlayDragThumb_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            if (scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            scaleInOverlayPanelPositionInitialized = true;
+            SetScaleInOverlayPanelPosition(
+                GetScaleInOverlayPanelLeft() + e.HorizontalChange,
+                GetScaleInOverlayPanelTop() + e.VerticalChange);
+        }
+
+        private void ScaleInOverlayResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            if (scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            scaleInOverlayPanelPositionInitialized = true;
+            double canvasWidth = Math.Max(ScaleInOverlayPanelMinWidth, scaleInOverlayCanvas.ActualWidth);
+            double canvasHeight = Math.Max(ScaleInOverlayPanelMinHeight, scaleInOverlayCanvas.ActualHeight);
+            double currentWidth = scaleInOverlayBorder.ActualWidth > 0 ? scaleInOverlayBorder.ActualWidth : scaleInOverlayBorder.Width;
+            double currentHeight = scaleInOverlayBorder.ActualHeight > 0 ? scaleInOverlayBorder.ActualHeight : scaleInOverlayBorder.Height;
+
+            double maxWidth = Math.Max(ScaleInOverlayPanelMinWidth, canvasWidth - ScaleInOverlayPanelEdgePadding);
+            double maxHeight = Math.Max(ScaleInOverlayPanelMinHeight, canvasHeight - ScaleInOverlayPanelEdgePadding);
+            scaleInOverlayBorder.Width = Math.Max(ScaleInOverlayPanelMinWidth, Math.Min(maxWidth, currentWidth + e.HorizontalChange));
+            scaleInOverlayBorder.Height = Math.Max(ScaleInOverlayPanelMinHeight, Math.Min(maxHeight, currentHeight + e.VerticalChange));
+            ClampScaleInOverlayPanelToCanvasBounds();
+        }
+
+        private void ScaleInOverlayTopResizeThumb_DragDelta(object sender, DragDeltaEventArgs e)
+        {
+            if (scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            scaleInOverlayPanelPositionInitialized = true;
+
+            double canvasHeight = Math.Max(ScaleInOverlayPanelMinHeight, scaleInOverlayCanvas.ActualHeight);
+            double currentTop = GetScaleInOverlayPanelTop();
+            double currentHeight = scaleInOverlayBorder.ActualHeight > 0 ? scaleInOverlayBorder.ActualHeight : scaleInOverlayBorder.Height;
+            double currentBottom = currentTop + currentHeight;
+            double maxBottom = Math.Max(
+                ScaleInOverlayPanelEdgePadding + ScaleInOverlayPanelMinHeight,
+                Math.Min(canvasHeight - ScaleInOverlayPanelEdgePadding, currentBottom));
+
+            double proposedTop = currentTop + e.VerticalChange;
+            double maxTop = maxBottom - ScaleInOverlayPanelMinHeight;
+            double newTop = Math.Max(ScaleInOverlayPanelEdgePadding, Math.Min(maxTop, proposedTop));
+            double newHeight = Math.Max(ScaleInOverlayPanelMinHeight, maxBottom - newTop);
+
+            scaleInOverlayBorder.Height = newHeight;
+            Canvas.SetTop(scaleInOverlayBorder, newTop);
+            ClampScaleInOverlayPanelToCanvasBounds();
+        }
+
+        private void InitializeScaleInOverlayPanelPosition()
+        {
+            if (scaleInOverlayPanelPositionInitialized || scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            double canvasWidth = scaleInOverlayCanvas.ActualWidth;
+            double canvasHeight = scaleInOverlayCanvas.ActualHeight;
+            if (canvasWidth <= 0 || canvasHeight <= 0)
+                return;
+
+            double panelWidth = !double.IsNaN(scaleInOverlayBorder.Width) && scaleInOverlayBorder.Width > 0
+                ? scaleInOverlayBorder.Width
+                : ScaleInOverlayPanelDefaultWidth;
+            double panelHeight = !double.IsNaN(scaleInOverlayBorder.Height) && scaleInOverlayBorder.Height > 0
+                ? scaleInOverlayBorder.Height
+                : ScaleInOverlayPanelDefaultHeight;
+
+            double left = Math.Max(ScaleInOverlayPanelEdgePadding, canvasWidth - panelWidth - ScaleInOverlayPanelEdgePadding);
+            double top = Math.Max(ScaleInOverlayPanelEdgePadding, canvasHeight - panelHeight - ScaleInOverlayPanelEdgePadding);
+            Canvas.SetLeft(scaleInOverlayBorder, left);
+            Canvas.SetTop(scaleInOverlayBorder, top);
+            scaleInOverlayPanelPositionInitialized = true;
+        }
+
+        private double GetScaleInOverlayPanelLeft()
+        {
+            if (scaleInOverlayBorder == null)
+                return ScaleInOverlayPanelEdgePadding;
+
+            double left = Canvas.GetLeft(scaleInOverlayBorder);
+            return double.IsNaN(left) ? ScaleInOverlayPanelEdgePadding : left;
+        }
+
+        private double GetScaleInOverlayPanelTop()
+        {
+            if (scaleInOverlayBorder == null)
+                return ScaleInOverlayPanelEdgePadding;
+
+            double top = Canvas.GetTop(scaleInOverlayBorder);
+            return double.IsNaN(top) ? ScaleInOverlayPanelEdgePadding : top;
+        }
+
+        private void SetScaleInOverlayPanelPosition(double left, double top)
+        {
+            if (scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            double panelWidth = scaleInOverlayBorder.ActualWidth > 0 ? scaleInOverlayBorder.ActualWidth : scaleInOverlayBorder.Width;
+            double panelHeight = scaleInOverlayBorder.ActualHeight > 0 ? scaleInOverlayBorder.ActualHeight : scaleInOverlayBorder.Height;
+            double maxLeft = Math.Max(ScaleInOverlayPanelEdgePadding, scaleInOverlayCanvas.ActualWidth - panelWidth - ScaleInOverlayPanelEdgePadding);
+            double maxTop = Math.Max(ScaleInOverlayPanelEdgePadding, scaleInOverlayCanvas.ActualHeight - panelHeight - ScaleInOverlayPanelEdgePadding);
+
+            Canvas.SetLeft(scaleInOverlayBorder, Math.Max(ScaleInOverlayPanelEdgePadding, Math.Min(maxLeft, left)));
+            Canvas.SetTop(scaleInOverlayBorder, Math.Max(ScaleInOverlayPanelEdgePadding, Math.Min(maxTop, top)));
+        }
+
+        private void ClampScaleInOverlayPanelToCanvasBounds()
+        {
+            if (scaleInOverlayCanvas == null || scaleInOverlayBorder == null)
+                return;
+
+            SetScaleInOverlayPanelPosition(GetScaleInOverlayPanelLeft(), GetScaleInOverlayPanelTop());
+        }
+
+        private void UpdateScaleInOverlayButtons(bool force = false)
+        {
+            if (ChartControl == null || scaleInOverlayAddLevelButton == null || scaleInOverlayRemoveLevelButton == null)
+                return;
+
+            EnsureRuntimeScaleInLevelsSeeded();
+            int removeFloor = GetScaleInConsumedLevelCount();
+            bool addLevelEnabled = runtimeScaleInLevelEntries.Count < MaxRuntimeScaleInLevelCount;
+            bool removeLevelEnabled = runtimeScaleInLevelEntries.Count > removeFloor;
+
+            if (!force
+                && addLevelEnabled == lastScaleInOverlayAddLevelEnabled
+                && removeLevelEnabled == lastScaleInOverlayRemoveLevelEnabled)
+                return;
+
+            lastScaleInOverlayAddLevelEnabled = addLevelEnabled;
+            lastScaleInOverlayRemoveLevelEnabled = removeLevelEnabled;
+
+            Action apply = () =>
+            {
+                ApplyScaleInOverlayButtonState(scaleInOverlayAddLevelButton, addLevelEnabled, Brushes.SeaGreen);
+                ApplyScaleInOverlayButtonState(scaleInOverlayRemoveLevelButton, removeLevelEnabled, Brushes.IndianRed);
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
+        }
+
+        private void ApplyScaleInOverlayButtonState(Button button, bool enabled, Brush activeBrush)
+        {
+            if (button == null)
+                return;
+
+            button.IsEnabled = enabled;
+            button.Background = enabled ? activeBrush : Brushes.DimGray;
+            button.Foreground = enabled ? Brushes.White : Brushes.LightGray;
+            button.Opacity = enabled ? 1.0 : 0.7;
+        }
+
+        private void RemoveScaleInOverlayButtons()
+        {
+            scaleInOverlayInitializing = false;
+
+            if (!scaleInOverlayAdded
+                && scaleInOverlayBorder == null
+                && !scaleInMeasurementDragHandlersAttached)
+                return;
+
+            Action remove = () =>
+            {
+                if (scaleInOverlayAddLevelButton != null)
+                    scaleInOverlayAddLevelButton.Click -= ScaleInOverlayAddLevelButton_Click;
+                if (scaleInOverlayRemoveLevelButton != null)
+                    scaleInOverlayRemoveLevelButton.Click -= ScaleInOverlayRemoveLevelButton_Click;
+                if (scaleInOverlayDragThumb != null)
+                    scaleInOverlayDragThumb.DragDelta -= ScaleInOverlayDragThumb_DragDelta;
+                if (scaleInOverlayTopResizeThumb != null)
+                    scaleInOverlayTopResizeThumb.DragDelta -= ScaleInOverlayTopResizeThumb_DragDelta;
+                if (scaleInOverlayResizeThumb != null)
+                    scaleInOverlayResizeThumb.DragDelta -= ScaleInOverlayResizeThumb_DragDelta;
+                if (scaleInOverlayCanvas != null)
+                    scaleInOverlayCanvas.SizeChanged -= ScaleInOverlayCanvas_SizeChanged;
+                if (scaleInOverlayBorder != null)
+                    scaleInOverlayBorder.Loaded -= ScaleInOverlayBorder_Loaded;
+                if (scaleInMeasurementDragHostControl != null && scaleInMeasurementDragHandlersAttached)
+                {
+                    scaleInMeasurementDragHostControl.PreviewMouseLeftButtonDown -= ScaleInChartControl_PreviewMouseLeftButtonDown;
+                    scaleInMeasurementDragHostControl.PreviewMouseMove -= ScaleInChartControl_PreviewMouseMove;
+                    scaleInMeasurementDragHostControl.PreviewMouseLeftButtonUp -= ScaleInChartControl_PreviewMouseLeftButtonUp;
+                    scaleInMeasurementDragHostControl.LostMouseCapture -= ScaleInChartControl_LostMouseCapture;
+                }
+
+                EndScaleInMeasurementLabelDrag();
+                scaleInMeasurementDragHandlersAttached = false;
+                scaleInMeasurementDragHostControl = null;
+                scaleInOriginalMeasurementLabelBounds = Rect.Empty;
+                scaleInSpacingMeasurementLabelBounds.Clear();
+
+                ClearScaleInLadderEditorRows();
+
+                if (scaleInOverlayCanvas != null && scaleInOverlayBorder != null)
+                    scaleInOverlayCanvas.Children.Remove(scaleInOverlayBorder);
+                if (scaleInOverlayCanvas != null && scaleInOverlayHost != null)
+                    scaleInOverlayHost.Children.Remove(scaleInOverlayCanvas);
+
+                scaleInOverlayHost = null;
+                scaleInOverlayCanvas = null;
+                scaleInOverlayBorder = null;
+                scaleInOverlayChromeGrid = null;
+                scaleInOverlayButtonPanel = null;
+                scaleInLadderEditorRowsPanel = null;
+                scaleInOverlayDragThumb = null;
+                scaleInOverlayTopResizeThumb = null;
+                scaleInOverlayResizeThumb = null;
+                scaleInOverlayAddLevelButton = null;
+                scaleInOverlayRemoveLevelButton = null;
+                scaleInOverlayAdded = false;
+                lastScaleInOverlayAddLevelEnabled = false;
+                lastScaleInOverlayRemoveLevelEnabled = false;
+                lastRuntimeScaleInLevelSignature = int.MinValue;
+                scaleInOverlayPanelPositionInitialized = false;
+            };
+
+            if (ChartControl != null && !ChartControl.Dispatcher.CheckAccess())
+                ChartControl.Dispatcher.InvokeAsync(remove);
+            else
+                remove();
+        }
+
+        private Panel FindScaleInOverlayHostPanel(DependencyObject child)
+        {
+            DependencyObject current = child;
+            while (current != null)
+            {
+                current = VisualTreeHelper.GetParent(current);
+                if (current is Panel panel)
+                    return panel;
+            }
+
+            return null;
+        }
+
+        private void ScaleInOverlayAddLevelButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(_ => HandleScaleInAddLevelRequest(), null);
+        }
+
+        private void ScaleInOverlayRemoveLevelButton_Click(object sender, RoutedEventArgs e)
+        {
+            TriggerCustomEvent(_ => HandleScaleInRemoveLevelRequest(), null);
+        }
+
+        private void ScaleInLadderTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            TextBox textBox = sender as TextBox;
+            if (textBox == null || textBox.IsKeyboardFocusWithin || !textBox.IsEnabled)
+                return;
+
+            textBox.Focus();
+            Keyboard.Focus(textBox);
+            textBox.SelectAll();
+            e.Handled = true;
+        }
+
+        private void ScaleInLadderTextBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
+        {
+            e.Handled = true;
+        }
+
+        private void ScaleInLadderTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            TextBox textBox = sender as TextBox;
+            if (textBox == null || !textBox.IsEnabled)
+                return;
+
+            if (e.Key == Key.Enter || e.Key == Key.Return)
+            {
+                e.Handled = true;
+                CommitScaleInLadderTextBox(textBox);
+                return;
+            }
+
+            if (e.Key == Key.Escape)
+            {
+                e.Handled = true;
+                UpdateScaleInLadderEditorRows(true);
+                textBox.SelectAll();
+                return;
+            }
+
+            if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) != 0)
+                return;
+
+            if (e.Key == Key.Back || e.Key == Key.Delete)
+            {
+                ApplyScaleInLadderTextDelete(textBox, deleteBackward: e.Key == Key.Back);
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Tab
+                || e.Key == Key.Left
+                || e.Key == Key.Right
+                || e.Key == Key.Home
+                || e.Key == Key.End)
+                return;
+
+            string insertText;
+            if (TryGetScaleInLadderInsertText(e.Key, out insertText))
+            {
+                ApplyScaleInLadderTextEdit(textBox, insertText);
+                e.Handled = true;
+                return;
+            }
+
+            e.Handled = true;
+        }
+
+        private void ScaleInLadderTextBox_LostFocus(object sender, RoutedEventArgs e)
+        {
+            if (scaleInOverlayEditorSyncing)
+                return;
+
+            CommitScaleInLadderTextBox(sender as TextBox);
+        }
+
+        private void CommitScaleInLadderTextBox(TextBox textBox)
+        {
+            if (textBox == null)
+                return;
+
+            ScaleInOverlayTextBoxTag tag = textBox.Tag as ScaleInOverlayTextBoxTag;
+            if (tag == null)
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            string requestedText = textBox.Text;
+            if (tag.FieldKind == ScaleInOverlayFieldKind.Entries)
+                TriggerCustomEvent(_ => HandleRuntimeScaleInEntriesEdit(tag.LadderIndex, requestedText), null);
+            else
+                TriggerCustomEvent(_ => HandleRuntimeScaleInSpacingEdit(tag.LadderIndex, requestedText), null);
+        }
+
+        private bool TryGetScaleInLadderInsertText(Key key, out string insertText)
+        {
+            insertText = null;
+
+            char digit;
+            if (!TryGetDigitFromScaleInLadderKey(key, out digit))
+                return false;
+
+            insertText = digit.ToString(CultureInfo.InvariantCulture);
+            return true;
+        }
+
+        private static bool TryGetDigitFromScaleInLadderKey(Key key, out char digit)
+        {
+            digit = '\0';
+
+            if (key >= Key.D0 && key <= Key.D9)
+            {
+                digit = (char)('0' + (key - Key.D0));
+                return true;
+            }
+
+            if (key >= Key.NumPad0 && key <= Key.NumPad9)
+            {
+                digit = (char)('0' + (key - Key.NumPad0));
+                return true;
+            }
+
+            return false;
+        }
+
+        private void ApplyScaleInLadderTextDelete(TextBox textBox, bool deleteBackward)
+        {
+            if (textBox == null)
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, Math.Min(textBox.SelectionStart, current.Length));
+            int length = Math.Max(0, Math.Min(textBox.SelectionLength, current.Length - start));
+
+            if (length > 0)
+            {
+                current = current.Remove(start, length);
+            }
+            else if (deleteBackward)
+            {
+                if (start <= 0 || current.Length <= 0)
+                    return;
+
+                current = current.Remove(start - 1, 1);
+                start--;
+            }
+            else
+            {
+                if (start >= current.Length)
+                    return;
+
+                current = current.Remove(start, 1);
+            }
+
+            textBox.Text = current;
+            textBox.SelectionStart = Math.Max(0, Math.Min(start, current.Length));
+            textBox.SelectionLength = 0;
+        }
+
+        private void ApplyScaleInLadderTextEdit(TextBox textBox, string insertText)
+        {
+            if (textBox == null || string.IsNullOrEmpty(insertText))
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, Math.Min(textBox.SelectionStart, current.Length));
+            int length = Math.Max(0, Math.Min(textBox.SelectionLength, current.Length - start));
+            string updated = current.Remove(start, length).Insert(start, insertText);
+
+            textBox.Text = updated;
+            textBox.SelectionStart = Math.Min(updated.Length, start + insertText.Length);
+            textBox.SelectionLength = 0;
+        }
+
+        private bool CanEditRuntimeScaleInLevel(int ladderIndex)
+        {
+            return ladderIndex >= GetScaleInConsumedLevelCount();
+        }
+
+        private void HandleRuntimeScaleInEntriesEdit(int ladderIndex, string requestedText)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (ladderIndex < 0 || ladderIndex >= runtimeScaleInLevelEntries.Count || !CanEditRuntimeScaleInLevel(ladderIndex))
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            int parsedValue;
+            if (!int.TryParse(requestedText, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedValue)
+                || parsedValue < MinScaleInLevelEntries
+                || parsedValue > MaxScaleInLevelEntries)
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            if (runtimeScaleInLevelEntries[ladderIndex] == parsedValue)
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            runtimeScaleInLevelEntries[ladderIndex] = parsedValue;
+            HandleRuntimeScaleInConfigurationChanged();
+        }
+
+        private void HandleRuntimeScaleInSpacingEdit(int ladderIndex, string requestedText)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (ladderIndex < 0 || ladderIndex >= runtimeScaleInLevelSpacingTicks.Count || !CanEditRuntimeScaleInLevel(ladderIndex))
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            int parsedValue;
+            if (!int.TryParse(requestedText, NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedValue)
+                || parsedValue < MinScaleInLevelSpacingTicks
+                || parsedValue > MaxScaleInLevelSpacingTicks)
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            if (runtimeScaleInLevelSpacingTicks[ladderIndex] == parsedValue)
+            {
+                UpdateScaleInLadderEditorRows(true);
+                return;
+            }
+
+            runtimeScaleInLevelSpacingTicks[ladderIndex] = parsedValue;
+            HandleRuntimeScaleInConfigurationChanged(true);
+        }
+
+        private void HandleScaleInAddLevelRequest()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            if (runtimeScaleInLevelEntries.Count >= MaxRuntimeScaleInLevelCount)
+                return;
+
+            int templateIndex = runtimeScaleInLevelEntries.Count - 1;
+            int nextEntries = templateIndex >= 0
+                ? Math.Min(MaxScaleInLevelEntries, Math.Max(MinScaleInLevelEntries, runtimeScaleInLevelEntries[templateIndex]))
+                : Math.Min(MaxScaleInLevelEntries, Math.Max(MinScaleInLevelEntries, ScaleInTradesToAdd));
+            int nextSpacingTicks = templateIndex >= 0
+                ? Math.Min(MaxScaleInLevelSpacingTicks, Math.Max(MinScaleInLevelSpacingTicks, runtimeScaleInLevelSpacingTicks[templateIndex]))
+                : Math.Min(MaxScaleInLevelSpacingTicks, Math.Max(MinScaleInLevelSpacingTicks, ScaleInDrawdownTicks));
+
+            runtimeScaleInLevelEntries.Add(nextEntries);
+            runtimeScaleInLevelSpacingTicks.Add(nextSpacingTicks);
+            HandleRuntimeScaleInConfigurationChanged(true);
+        }
+
+        private void HandleScaleInRemoveLevelRequest()
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            int removeFloor = GetScaleInConsumedLevelCount();
+            if (runtimeScaleInLevelEntries.Count <= removeFloor)
+                return;
+
+            int removedLevel = runtimeScaleInLevelEntries.Count;
+            runtimeScaleInLevelEntries.RemoveAt(runtimeScaleInLevelEntries.Count - 1);
+            runtimeScaleInLevelSpacingTicks.RemoveAt(runtimeScaleInLevelSpacingTicks.Count - 1);
+            RemoveDrawObject(GetScaleInDrawdownTag(removedLevel));
+            scaleInDrawdownLines.Remove(removedLevel);
+            scaleInManualTriggerPrices.Remove(removedLevel);
+            RemoveScaleInConsumedReferenceLine(removedLevel);
+            HandleRuntimeScaleInConfigurationChanged();
+        }
+
+        private void HandleRuntimeScaleInConfigurationChanged(bool reseedFutureLevelPrices = false)
+        {
+            EnsureRuntimeScaleInLevelsSeeded();
+            TrimScaleInRuntimeStateToConfiguredLevelCount();
+            TryEnsureEntriesPerDirectionCapacity(GetConfiguredEntriesPerDirectionCapacity());
+            if (reseedFutureLevelPrices)
+                ApplyRuntimeScaleInSpacingToFutureLevels();
+
+            double currentPrice = GetRealtimePrice();
+            UpdateScaleInDrawdownVisuals(currentPrice);
+            UpdateSyntheticProtectionVisuals(currentPrice);
+            UpdateScaleInOverlayButtons(true);
+            UpdateScaleInLadderEditorRows(true);
+            RequestScaleInOverlayRefresh();
+        }
+
+        private void TrimScaleInRuntimeStateToConfiguredLevelCount()
+        {
+            int levelCount = GetScaleInLevelCount();
+            for (int i = levelCount + 1; i <= MaxScaleInDrawdownLines; i++)
+            {
+                RemoveDrawObject(GetScaleInDrawdownTag(i));
+                scaleInDrawdownLines.Remove(i);
+                scaleInManualTriggerPrices.Remove(i);
+                RemoveScaleInConsumedReferenceLine(i);
+            }
+        }
+
+        private void ApplyRuntimeScaleInSpacingToFutureLevels()
+        {
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return;
+
+            EnsureRuntimeScaleInLevelsSeeded();
+            double entryPrice = ResolveScaleInInitialEntryPrice(GetRealtimePrice());
+            if (entryPrice <= 0 || double.IsNaN(entryPrice))
+                return;
+
+            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
+            if (tickSize <= 0)
+                tickSize = 1e-6;
+
+            bool isLong = Position.MarketPosition == MarketPosition.Long;
+            int consumedLevels = GetScaleInConsumedLevelCount();
+            for (int i = consumedLevels + 1; i <= runtimeScaleInLevelEntries.Count; i++)
+            {
+                scaleInManualTriggerPrices.Remove(i);
+                HorizontalLine line;
+                if (!scaleInDrawdownLines.TryGetValue(i, out line) || line == null)
+                    continue;
+
+                double price = GetDefaultScaleInTriggerPrice(entryPrice, isLong, i, tickSize);
+                if (price > 0 && line.StartAnchor != null)
+                    line.StartAnchor.Price = price;
+            }
+        }
+
+        private void ClearScaleInLadderEditorRows()
+        {
+            foreach (TextBox textBox in scaleInLevelEntryTextBoxes)
+            {
+                if (textBox == null)
+                    continue;
+
+                textBox.PreviewMouseDown -= ScaleInLadderTextBox_PreviewMouseDown;
+                textBox.PreviewTextInput -= ScaleInLadderTextBox_PreviewTextInput;
+                textBox.PreviewKeyDown -= ScaleInLadderTextBox_PreviewKeyDown;
+                textBox.LostFocus -= ScaleInLadderTextBox_LostFocus;
+            }
+
+            scaleInLevelEntryTextBoxes.Clear();
+            foreach (TextBox textBox in scaleInLevelSpacingTextBoxes)
+            {
+                if (textBox == null)
+                    continue;
+
+                textBox.PreviewMouseDown -= ScaleInLadderTextBox_PreviewMouseDown;
+                textBox.PreviewTextInput -= ScaleInLadderTextBox_PreviewTextInput;
+                textBox.PreviewKeyDown -= ScaleInLadderTextBox_PreviewKeyDown;
+                textBox.LostFocus -= ScaleInLadderTextBox_LostFocus;
+            }
+
+            scaleInLevelSpacingTextBoxes.Clear();
+            if (scaleInLadderEditorRowsPanel != null)
+                scaleInLadderEditorRowsPanel.Children.Clear();
+        }
+
+        private void UpdateScaleInLadderEditorRows(bool force = false)
+        {
+            if (ChartControl == null || scaleInLadderEditorRowsPanel == null)
+                return;
+
+            EnsureRuntimeScaleInLevelsSeeded();
+            int consumedLevels = GetScaleInConsumedLevelCount();
+            int signature = unchecked((GetRuntimeScaleInLevelSignature() * 31) + consumedLevels);
+
+            Action apply = () =>
+            {
+                if (scaleInLadderEditorRowsPanel == null)
+                    return;
+
+                scaleInOverlayEditorSyncing = true;
+                try
+                {
+                    if (force
+                        || scaleInLevelEntryTextBoxes.Count != runtimeScaleInLevelEntries.Count
+                        || scaleInLevelSpacingTextBoxes.Count != runtimeScaleInLevelSpacingTicks.Count)
+                    {
+                        ClearScaleInLadderEditorRows();
+
+                        var headerRow = new Grid
+                        {
+                            Margin = new Thickness(0, 0, 0, 3)
+                        };
+                        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+                        headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                        headerRow.Children.Add(new TextBlock
+                        {
+                            Text = "Qty",
+                            Margin = new Thickness(24, 0, 0, 0),
+                            Foreground = Brushes.Gainsboro,
+                            FontSize = 10,
+                            FontWeight = FontWeights.SemiBold,
+                            VerticalAlignment = VerticalAlignment.Center
+                        });
+                        Grid.SetColumn(headerRow.Children[headerRow.Children.Count - 1], 1);
+                        headerRow.Children.Add(new TextBlock
+                        {
+                            Text = "Ticks",
+                            Foreground = Brushes.Gainsboro,
+                            FontSize = 10,
+                            FontWeight = FontWeights.SemiBold,
+                            VerticalAlignment = VerticalAlignment.Center,
+                            HorizontalAlignment = HorizontalAlignment.Center
+                        });
+                        Grid.SetColumn(headerRow.Children[headerRow.Children.Count - 1], 3);
+                        scaleInLadderEditorRowsPanel.Children.Add(headerRow);
+
+                        for (int i = 0; i < runtimeScaleInLevelEntries.Count; i++)
+                        {
+                            var rowPanel = new Grid
+                            {
+                                Margin = new Thickness(0, 0, 0, 2)
+                            };
+                            rowPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+                            rowPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                            rowPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
+                            rowPanel.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+                            var label = new TextBlock
+                            {
+                                Text = string.Format(CultureInfo.InvariantCulture, "L{0}", i + 1),
+                                Width = 22,
+                                Margin = new Thickness(0, 0, 6, 0),
+                                VerticalAlignment = VerticalAlignment.Center,
+                                Foreground = Brushes.White,
+                                FontSize = 11
+                            };
+
+                            var entryTextBox = new TextBox
+                            {
+                                MinWidth = 46,
+                                Padding = new Thickness(4, 1, 4, 1),
+                                HorizontalContentAlignment = HorizontalAlignment.Center,
+                                HorizontalAlignment = HorizontalAlignment.Stretch,
+                                Tag = new ScaleInOverlayTextBoxTag { LadderIndex = i, FieldKind = ScaleInOverlayFieldKind.Entries },
+                                FontSize = 11,
+                                ToolTip = string.Format(CultureInfo.InvariantCulture, "Scale-in entry count for L{0}.", i + 1)
+                            };
+                            entryTextBox.PreviewMouseDown += ScaleInLadderTextBox_PreviewMouseDown;
+                            entryTextBox.PreviewTextInput += ScaleInLadderTextBox_PreviewTextInput;
+                            entryTextBox.PreviewKeyDown += ScaleInLadderTextBox_PreviewKeyDown;
+                            entryTextBox.LostFocus += ScaleInLadderTextBox_LostFocus;
+
+                            var spacingTextBox = new TextBox
+                            {
+                                MinWidth = 56,
+                                Padding = new Thickness(4, 1, 4, 1),
+                                HorizontalContentAlignment = HorizontalAlignment.Center,
+                                HorizontalAlignment = HorizontalAlignment.Stretch,
+                                Tag = new ScaleInOverlayTextBoxTag { LadderIndex = i, FieldKind = ScaleInOverlayFieldKind.SpacingTicks },
+                                FontSize = 11,
+                                ToolTip = string.Format(CultureInfo.InvariantCulture, "Ticks from {0} to L{1}.", i == 0 ? "entry" : "L" + i.ToString(CultureInfo.InvariantCulture), i + 1)
+                            };
+                            spacingTextBox.PreviewMouseDown += ScaleInLadderTextBox_PreviewMouseDown;
+                            spacingTextBox.PreviewTextInput += ScaleInLadderTextBox_PreviewTextInput;
+                            spacingTextBox.PreviewKeyDown += ScaleInLadderTextBox_PreviewKeyDown;
+                            spacingTextBox.LostFocus += ScaleInLadderTextBox_LostFocus;
+
+                            rowPanel.Children.Add(label);
+                            Grid.SetColumn(label, 0);
+                            rowPanel.Children.Add(entryTextBox);
+                            Grid.SetColumn(entryTextBox, 1);
+                            rowPanel.Children.Add(spacingTextBox);
+                            Grid.SetColumn(spacingTextBox, 3);
+                            scaleInLadderEditorRowsPanel.Children.Add(rowPanel);
+                            scaleInLevelEntryTextBoxes.Add(entryTextBox);
+                            scaleInLevelSpacingTextBoxes.Add(spacingTextBox);
+                        }
+                    }
+
+                    for (int i = 0; i < runtimeScaleInLevelEntries.Count && i < scaleInLevelEntryTextBoxes.Count; i++)
+                    {
+                        bool editable = i >= consumedLevels;
+                        TextBox entryTextBox = scaleInLevelEntryTextBoxes[i];
+                        if (entryTextBox == null)
+                            continue;
+
+                        entryTextBox.Tag = new ScaleInOverlayTextBoxTag { LadderIndex = i, FieldKind = ScaleInOverlayFieldKind.Entries };
+                        entryTextBox.IsEnabled = editable;
+                        entryTextBox.Opacity = editable ? 1.0 : 0.72;
+                        string desiredEntriesText = runtimeScaleInLevelEntries[i].ToString(CultureInfo.InvariantCulture);
+                        if (!entryTextBox.IsKeyboardFocusWithin && !string.Equals(entryTextBox.Text, desiredEntriesText, StringComparison.Ordinal))
+                            entryTextBox.Text = desiredEntriesText;
+                    }
+
+                    for (int i = 0; i < runtimeScaleInLevelSpacingTicks.Count && i < scaleInLevelSpacingTextBoxes.Count; i++)
+                    {
+                        bool editable = i >= consumedLevels;
+                        TextBox spacingTextBox = scaleInLevelSpacingTextBoxes[i];
+                        if (spacingTextBox == null)
+                            continue;
+
+                        spacingTextBox.Tag = new ScaleInOverlayTextBoxTag { LadderIndex = i, FieldKind = ScaleInOverlayFieldKind.SpacingTicks };
+                        spacingTextBox.IsEnabled = editable;
+                        spacingTextBox.Opacity = editable ? 1.0 : 0.72;
+                        string desiredSpacingText = runtimeScaleInLevelSpacingTicks[i].ToString(CultureInfo.InvariantCulture);
+                        if (!spacingTextBox.IsKeyboardFocusWithin && !string.Equals(spacingTextBox.Text, desiredSpacingText, StringComparison.Ordinal))
+                            spacingTextBox.Text = desiredSpacingText;
+                    }
+
+                    lastRuntimeScaleInLevelSignature = signature;
+                }
+                finally
+                {
+                    scaleInOverlayEditorSyncing = false;
+                }
+            };
+
+            if (!force
+                && signature == lastRuntimeScaleInLevelSignature
+                && scaleInLevelEntryTextBoxes.Count == runtimeScaleInLevelEntries.Count
+                && scaleInLevelSpacingTextBoxes.Count == runtimeScaleInLevelSpacingTicks.Count)
+                return;
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                apply();
+            else
+                ChartControl.Dispatcher.InvokeAsync(apply);
         }
 
         private void ManualFlattenButton_Click(object sender, RoutedEventArgs e)
@@ -17259,6 +20790,183 @@ namespace NinjaTrader.NinjaScript.Strategies
             TriggerCustomEvent(o => HandleChopTradesPerEntryOverrideRequest(o as string), text);
         }
 
+        private void RuntimeProtectionTextBox_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+        {
+            TextBox textBox = sender as TextBox;
+            if (textBox == null || textBox.IsKeyboardFocusWithin)
+                return;
+
+            textBox.Focus();
+            Keyboard.Focus(textBox);
+            textBox.SelectAll();
+            e.Handled = true;
+        }
+
+        private void RuntimeProtectionTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            TextBox textBox = sender as TextBox;
+            if (textBox == null)
+                return;
+
+            if (e.Key == Key.Enter || e.Key == Key.Return)
+            {
+                SubmitRuntimeProtectionInput();
+                e.Handled = true;
+                return;
+            }
+
+            if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) != 0)
+                return;
+
+            if (e.Key == Key.Back)
+            {
+                ApplyRuntimeProtectionDelete(textBox, deleteBackward: true);
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key == Key.Delete)
+            {
+                ApplyRuntimeProtectionDelete(textBox, deleteBackward: false);
+                e.Handled = true;
+                return;
+            }
+
+            string insertText;
+            if (TryGetRuntimeProtectionInsertText(textBox, e.Key, out insertText))
+            {
+                ApplyRuntimeProtectionTextEdit(textBox, insertText);
+                e.Handled = true;
+            }
+        }
+
+        private void RuntimeProtectionSetButton_Click(object sender, RoutedEventArgs e)
+        {
+            SubmitRuntimeProtectionInput();
+        }
+
+        private void SubmitRuntimeProtectionInput()
+        {
+            var request = new RuntimeProtectionInputRequest
+            {
+                StopLossText = runtimeStopLossTextBox != null ? runtimeStopLossTextBox.Text : null,
+                TargetText = runtimeTargetTextBox != null ? runtimeTargetTextBox.Text : null
+            };
+
+            TriggerCustomEvent(o => HandleRuntimeProtectionOverrideRequest(o as RuntimeProtectionInputRequest), request);
+        }
+
+        private bool TryGetRuntimeProtectionInsertText(TextBox textBox, Key key, out string insertText)
+        {
+            insertText = null;
+            if (textBox == null)
+                return false;
+
+            char digit;
+            if (TryGetDigitFromKey(key, out digit))
+            {
+                insertText = digit.ToString();
+                return true;
+            }
+
+            if (!RuntimeProtectionAllowsDecimals(textBox))
+                return false;
+
+            if (key != Key.Decimal && key != Key.OemPeriod)
+                return false;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = Math.Max(0, textBox.SelectionStart);
+            int length = Math.Max(0, textBox.SelectionLength);
+            if (start > current.Length)
+                start = current.Length;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            string updated = current.Remove(start, length);
+            if (updated.Contains("."))
+                return false;
+
+            insertText = ".";
+            return true;
+        }
+
+        private bool RuntimeProtectionAllowsDecimals(TextBox textBox)
+        {
+            if (textBox == null)
+                return false;
+            if (textBox == runtimeStopLossTextBox)
+                return StopType != StopKind.Ticks;
+            if (textBox == runtimeTargetTextBox)
+                return TargetType != TargetKind.Ticks;
+            return false;
+        }
+
+        private void ApplyRuntimeProtectionDelete(TextBox textBox, bool deleteBackward)
+        {
+            if (textBox == null)
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = textBox.SelectionStart;
+            int length = textBox.SelectionLength;
+            if (start < 0)
+                start = 0;
+            if (start > current.Length)
+                start = current.Length;
+            if (length < 0)
+                length = 0;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            if (length > 0)
+            {
+                current = current.Remove(start, length);
+            }
+            else if (deleteBackward)
+            {
+                if (start <= 0 || current.Length <= 0)
+                    return;
+
+                current = current.Remove(start - 1, 1);
+                start--;
+            }
+            else
+            {
+                if (start >= current.Length)
+                    return;
+
+                current = current.Remove(start, 1);
+            }
+
+            textBox.Text = current;
+            textBox.SelectionStart = Math.Max(0, Math.Min(start, current.Length));
+            textBox.SelectionLength = 0;
+        }
+
+        private void ApplyRuntimeProtectionTextEdit(TextBox textBox, string insertText)
+        {
+            if (textBox == null || string.IsNullOrEmpty(insertText))
+                return;
+
+            string current = textBox.Text ?? string.Empty;
+            int start = textBox.SelectionStart;
+            int length = textBox.SelectionLength;
+            if (start < 0)
+                start = 0;
+            if (start > current.Length)
+                start = current.Length;
+            if (length < 0)
+                length = 0;
+            if (start + length > current.Length)
+                length = current.Length - start;
+
+            string updated = current.Remove(start, length).Insert(start, insertText);
+            textBox.Text = updated;
+            textBox.SelectionStart = Math.Min(updated.Length, start + insertText.Length);
+            textBox.SelectionLength = 0;
+        }
+
         private void HandleManualHaltRequest()
         {
             HandleManualHaltRequest(true);
@@ -17274,9 +20982,12 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             if (allowBootstrap)
                 EnsureManualTradeStateForPosition();
+            ClearManualHaltUserTradeProtection();
             manualHaltActive = true;
             manualHaltActivatedAt = DateTime.UtcNow;
-            manualHaltStatusText = "HALTED: manual flatten (awaiting resume)";
+            manualHaltStatusText = ShouldAllowStraddleWhileManualHalted()
+                ? "HALTED: manual (straddle override active)"
+                : "HALTED: manual flatten (awaiting resume)";
             manualHaltLastEnforceAttemptAt = DateTime.MinValue;
             manualHaltLastEnforceLogAt = DateTime.MinValue;
 
@@ -17286,11 +20997,16 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             catch { }
 
-            CancelWorkingEntryOrders("manual_halt");
-            int submitted = SubmitManualHaltExits("MHLT");
-            if (submitted == 0)
+            bool straddleOverrideActive = ShouldAllowStraddleWhileManualHalted();
+            CancelWorkingEntryOrders("manual_halt", false);
+            int submitted = SubmitManualHaltExits("MHLT", false);
+            int openPositions = 0;
+            int workingOrders = 0;
+            bool hasRiskCounts = TryGetAccountRiskCounts(out openPositions, out workingOrders);
+            bool requiresAccountFlatten = HasOpenAccountBackedTrades();
+            if (submitted == 0 || (requiresAccountFlatten && hasRiskCounts && openPositions > 0))
                 TryFlattenAccountEverything("manual_halt", activeTradeId ?? string.Empty, "MANUAL_HALT");
-            StrategyLogInfo($"[MANUAL_HALT] Flatten requested (submittedExits={submitted}).");
+            StrategyLogInfo($"[MANUAL_HALT] Halt requested (submittedExits={submitted}, straddleOverrideActive={straddleOverrideActive}).");
             UpdateStatusLabel(manualHaltStatusText, false);
             UpdateManualTradeButtons(true);
         }
@@ -17312,6 +21028,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             manualHaltActive = false;
             manualHaltStatusText = null;
             manualHaltActivatedAt = DateTime.MinValue;
+            ClearManualHaltUserTradeProtection();
             try
             {
                 MultiStratManager.Instance?.ClearManualHaltOverride(Account != null ? Account.Name : string.Empty, "manual_resume");
@@ -17336,6 +21053,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            StrategyLogInfo(string.Format("[MANUAL][BUTTON] {0} clicked.", direction == MarketPosition.Long ? "Buy MKT" : "Sell MKT"));
+            ArmManualHaltUserTradeProtection(direction);
             EnsureManualTradeStateForPosition();
             SubmitManualOrder(direction);
         }
@@ -17411,6 +21130,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             double rounded = Instrument?.MasterInstrument?.RoundToTickSize(desired)
                 ?? Math.Round(desired / tickSize) * tickSize;
 
+            StrategyLogInfo(string.Format("[MANUAL][BUTTON] {0} clicked.", direction == MarketPosition.Long ? "Buy Pend" : "Sell Pend"));
+            bool hasLivePosition = Position != null && Position.MarketPosition != MarketPosition.Flat && Position.Quantity != 0;
+            if (hasLivePosition && Position.MarketPosition != direction)
+            {
+                EnsureManualTradeStateForPosition();
+                StrategyLogInfo(string.Format("[MANUAL] Pending exit {0} {1} current (type={2}, ref={3:F2}, price={4:F2}, qty={5}).",
+                    Position.MarketPosition,
+                    $"{ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()}",
+                    GetManualPendingOrderTypeText(orderType),
+                    referencePrice,
+                    rounded,
+                    Math.Abs(Position.Quantity)));
+                SubmitManualExitAtPrice(Position.MarketPosition, Math.Abs(Position.Quantity), orderType, rounded);
+                return;
+            }
+
             StrategyLogInfo(string.Format("[MANUAL] Pending {0} {1} current (type={2}, ref={3:F2}, price={4:F2}).",
                 direction == MarketPosition.Long ? "buy" : "sell",
                 $"{ManualEntryOffsetTicks} ticks {GetManualPendingPlacementText().ToLowerInvariant()}",
@@ -17418,8 +21153,66 @@ namespace NinjaTrader.NinjaScript.Strategies
                 referencePrice,
                 rounded));
 
+            ArmManualHaltUserTradeProtection(direction);
             EnsureManualTradeStateForPosition();
             SubmitManualPriceOrder(direction, orderType, rounded);
+        }
+
+        private void ArmManualHaltUserTradeProtection(MarketPosition direction)
+        {
+            if (!manualHaltActive)
+                return;
+
+            manualHaltUserTradeProtectionActive = true;
+            manualHaltUserTradeSide = direction;
+            manualHaltUserTradeRequestedAt = DateTime.UtcNow;
+            manualHaltLastEnforceAttemptAt = DateTime.MinValue;
+        }
+
+        private void ClearManualHaltUserTradeProtection()
+        {
+            manualHaltUserTradeProtectionActive = false;
+            manualHaltUserTradeSide = MarketPosition.Flat;
+            manualHaltUserTradeRequestedAt = DateTime.MinValue;
+        }
+
+        private bool HasRecentManualHaltUserTradeIntent()
+        {
+            if (!manualHaltUserTradeProtectionActive || manualHaltUserTradeRequestedAt == DateTime.MinValue)
+                return false;
+
+            return (DateTime.UtcNow - manualHaltUserTradeRequestedAt) <= TimeSpan.FromSeconds(10);
+        }
+
+        private bool ShouldBootstrapAsManualHaltUserTrade(MarketPosition side)
+        {
+            if (!manualHaltActive || !manualHaltUserTradeProtectionActive)
+                return false;
+
+            if (manualHaltUserTradeSide == MarketPosition.Flat || manualHaltUserTradeSide == side)
+                return true;
+
+            return HasRecentManualHaltUserTradeIntent();
+        }
+
+        private bool HasManualHaltProtectedExposure()
+        {
+            if (HasManualTradesOpen())
+                return true;
+
+            if (!manualHaltActive || !manualHaltUserTradeProtectionActive)
+                return false;
+
+            if (Position != null && Position.MarketPosition != MarketPosition.Flat && Position.Quantity != 0)
+            {
+                if (manualHaltUserTradeSide == MarketPosition.Flat || manualHaltUserTradeSide == Position.MarketPosition)
+                    return true;
+
+                if (HasRecentManualHaltUserTradeIntent())
+                    return true;
+            }
+
+            return HasRecentManualHaltUserTradeIntent();
         }
 
         private void HandleAddOnTradeRequest()
@@ -17867,6 +21660,88 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private void SubmitManualExitAtPrice(MarketPosition side, int quantity, OrderType orderType, double price)
+        {
+            if (Account == null || Instrument == null)
+            {
+                StrategyLogInfo("[MANUAL][PEND_EXIT] Pending exit ignored (account or instrument unavailable).");
+                return;
+            }
+
+            if (quantity <= 0 || price <= 0 || double.IsNaN(price))
+                return;
+
+            try
+            {
+                int remaining = Math.Abs(quantity);
+                bool submitted = false;
+
+                foreach (var state in EnumerateOpenTrades(side))
+                {
+                    if (state == null)
+                        continue;
+
+                    int available = Math.Max(0, state.RemainingQuantity);
+                    if (available <= 0)
+                        continue;
+
+                    int qtyToExit = Math.Min(available, remaining);
+                    if (qtyToExit <= 0)
+                        continue;
+
+                    SubmitAccountLevelPendingExitOrder(state.TradeId, side, qtyToExit, orderType, price);
+                    submitted = true;
+                    remaining -= qtyToExit;
+                    if (remaining <= 0)
+                        break;
+                }
+
+                if (!submitted || remaining > 0)
+                {
+                    string fallbackTradeId = !string.IsNullOrWhiteSpace(activeTradeId) ? activeTradeId : null;
+                    SubmitAccountLevelPendingExitOrder(fallbackTradeId, side, !submitted ? Math.Abs(quantity) : remaining, orderType, price);
+                }
+            }
+            catch (Exception ex)
+            {
+                StrategyLogError($"[MANUAL][PEND_EXIT] Failed to submit pending exit: {ex.Message}");
+            }
+        }
+
+        private void SubmitAccountLevelPendingExitOrder(string tradeId, MarketPosition side, int quantity, OrderType orderType, double price)
+        {
+            if (Account == null || Instrument == null || quantity <= 0 || price <= 0 || double.IsNaN(price))
+                return;
+
+            OrderAction action = side == MarketPosition.Long ? OrderAction.Sell : OrderAction.BuyToCover;
+            double limitPrice = orderType == OrderType.Limit ? price : 0;
+            double stopPrice = orderType == OrderType.StopMarket ? price : 0;
+            string orderName = BuildManualPendingExitOrderName(tradeId, side, orderType);
+
+            var order = Account.CreateOrder(
+                Instrument,
+                action,
+                orderType,
+                OrderEntry.Manual,
+                TimeInForce.Day,
+                Math.Abs(quantity),
+                limitPrice,
+                stopPrice,
+                string.Empty,
+                orderName,
+                default(DateTime),
+                null);
+
+            Account.Submit(new[] { order });
+            StrategyLogInfo(string.Format("[MANUAL][PEND_EXIT] Submitted account-level pending exit {0} mappedTo={1} action={2} qty={3} price={4:F2} type={5}.",
+                orderName,
+                string.IsNullOrWhiteSpace(tradeId) ? "<unmapped>" : tradeId,
+                action,
+                Math.Abs(quantity),
+                price,
+                GetManualPendingOrderTypeText(orderType)));
+        }
+
         private IEnumerable<TradeRuntimeState> EnumerateOpenTrades(MarketPosition side)
         {
             if (tradeStates == null || tradeStates.Count == 0)
@@ -18209,6 +22084,180 @@ namespace NinjaTrader.NinjaScript.Strategies
             UpdateTradesPerEntryInput(true);
         }
 
+        private void HandleRuntimeProtectionOverrideRequest(RuntimeProtectionInputRequest request)
+        {
+            if (!SupportsRuntimeProtectionControls())
+                return;
+
+            double? stopValue;
+            if (!TryParseRuntimeProtectionInput(request != null ? request.StopLossText : null, true, out stopValue))
+            {
+                StrategyLogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[UI] Stoploss override invalid ('{0}'); keeping {1} {2}.",
+                    request != null ? (request.StopLossText ?? string.Empty).Trim() : string.Empty,
+                    FormatProtectionInputValue(true),
+                    GetProtectionUnitLabel(true)));
+                UpdateRuntimeProtectionInputs();
+                return;
+            }
+
+            double? targetValue;
+            if (!TryParseRuntimeProtectionInput(request != null ? request.TargetText : null, false, out targetValue))
+            {
+                StrategyLogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "[UI] Target override invalid ('{0}'); keeping {1} {2}.",
+                    request != null ? (request.TargetText ?? string.Empty).Trim() : string.Empty,
+                    FormatProtectionInputValue(false),
+                    GetProtectionUnitLabel(false)));
+                UpdateRuntimeProtectionInputs();
+                return;
+            }
+
+            runtimeStopLossValueOverride = stopValue;
+            runtimeTargetValueOverride = targetValue;
+            ApplyRuntimeProtectionOverridesToOpenTrades();
+            UpdateRuntimeProtectionInputs();
+
+            string stopSummary = stopValue.HasValue
+                ? string.Format(CultureInfo.InvariantCulture, "{0} {1}", FormatProtectionInputValue(true), GetProtectionUnitLabel(true))
+                : "strategy setting";
+            string targetSummary = targetValue.HasValue
+                ? string.Format(CultureInfo.InvariantCulture, "{0} {1}", FormatProtectionInputValue(false), GetProtectionUnitLabel(false))
+                : "strategy setting";
+
+            StrategyLogInfo(string.Format(
+                CultureInfo.InvariantCulture,
+                "[UI] Runtime SL/TP updated. Stoploss={0}, Target={1}.",
+                stopSummary,
+                targetSummary));
+        }
+
+        private bool TryParseRuntimeProtectionInput(string text, bool isStop, out double? value)
+        {
+            value = null;
+
+            string trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
+            if (string.IsNullOrEmpty(trimmed))
+                return true;
+
+            bool isTickMode = isStop ? StopType == StopKind.Ticks : TargetType == TargetKind.Ticks;
+            if (isTickMode)
+            {
+                int parsedTicks;
+                if (!int.TryParse(trimmed, NumberStyles.Integer | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out parsedTicks) || parsedTicks <= 0)
+                    return false;
+
+                value = parsedTicks;
+                return true;
+            }
+
+            double parsedValue;
+            if (!double.TryParse(trimmed, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out parsedValue))
+                return false;
+            if (parsedValue <= 0 || double.IsNaN(parsedValue) || double.IsInfinity(parsedValue))
+                return false;
+
+            value = parsedValue;
+            return true;
+        }
+
+        private void ApplyRuntimeProtectionOverridesToOpenTrades()
+        {
+            if (tradeStates == null || tradeStates.Count == 0)
+                return;
+
+            MarketPosition side = Position != null ? Position.MarketPosition : MarketPosition.Flat;
+            if (side == MarketPosition.Flat)
+                return;
+
+            double currentPrice = GetRealtimePrice();
+            double atrValue = GetLatestAtrValue();
+            List<TradeRuntimeState> states = GetOpenManagedStates()
+                .Where(s => s != null && !s.IsSynthetic && s.RemainingQuantity > 0 && s.EntrySide == side)
+                .ToList();
+
+            if (states.Count == 0)
+                return;
+
+            TradeRuntimeState referenceState = states.FirstOrDefault(s => s != null && !s.IsScaleInEntry) ?? states[0];
+            int protectionQty = ResolveProtectionQuantity(referenceState, states);
+            double entryRef = ResolveProtectionReferenceEntryPrice(referenceState, currentPrice, preferPositionAverage: true);
+            double? desiredStop = ResolveConfiguredProtectionPrice(true, side, entryRef, protectionQty, atrValue);
+            double? desiredTarget = ResolveConfiguredProtectionPrice(false, side, entryRef, protectionQty, atrValue);
+
+            stopSet = false;
+            targetSet = false;
+
+            foreach (TradeRuntimeState state in states)
+            {
+                state.ManualStopOverride = false;
+                state.PendingAutoStopUpdate = false;
+                state.PendingAutoStopPrice = 0;
+                ClearManualProtectionPending(state, true);
+                state.ManualTargetOverride = false;
+                state.PendingAutoTargetUpdate = false;
+                state.PendingAutoTargetPrice = 0;
+                ClearManualProtectionPending(state, false);
+
+                if (desiredStop.HasValue && desiredStop.Value > 0)
+                {
+                    bool stopIssued = IssueStopLoss(state.TradeId, CalculationMode.Price, desiredStop.Value, false);
+                    state.LastStopPrice = desiredStop.Value;
+                    state.RunUpLastStopPrice = state.RunUpActive ? (double?)desiredStop.Value : null;
+                    if (!stopIssued)
+                    {
+                        state.PendingAutoStopUpdate = false;
+                        state.PendingAutoStopPrice = 0;
+                    }
+                }
+                else
+                {
+                    state.PendingAutoStopUpdate = false;
+                    state.PendingAutoStopPrice = 0;
+                    state.LastStopPrice = 0;
+                    state.RunUpLastStopPrice = null;
+                }
+
+                if (desiredTarget.HasValue && desiredTarget.Value > 0)
+                {
+                    bool targetIssued = IssueProfitTarget(state.TradeId, CalculationMode.Price, desiredTarget.Value);
+                    state.LastTargetPrice = desiredTarget.Value;
+                    if (!targetIssued)
+                    {
+                        state.PendingAutoTargetUpdate = false;
+                        state.PendingAutoTargetPrice = 0;
+                    }
+                }
+                else
+                {
+                    state.PendingAutoTargetUpdate = false;
+                    state.PendingAutoTargetPrice = 0;
+                    state.LastTargetPrice = 0;
+                }
+            }
+
+            SyncSyntheticProtectionToManagedPrices(desiredStop, desiredTarget);
+            UpdateSyntheticProtectionVisuals(currentPrice);
+        }
+
+        private void SyncSyntheticProtectionToManagedPrices(double? desiredStop, double? desiredTarget)
+        {
+            syntheticStopManualControl = false;
+            syntheticTargetManualControl = false;
+            syntheticStopLastManualMoveAt = DateTime.MinValue;
+            syntheticTargetLastManualMoveAt = DateTime.MinValue;
+
+            syntheticStopPrice = desiredStop.HasValue && desiredStop.Value > 0
+                ? RoundToInstrumentTick(desiredStop.Value)
+                : 0;
+
+            syntheticTargetPrice = desiredTarget.HasValue && desiredTarget.Value > 0
+                ? RoundToInstrumentTick(desiredTarget.Value)
+                : 0;
+        }
+
         private void HandleChopTradesPerEntryOverrideRequest(string text)
         {
             string trimmed = string.IsNullOrWhiteSpace(text) ? string.Empty : text.Trim();
@@ -18243,17 +22292,24 @@ namespace NinjaTrader.NinjaScript.Strategies
             UpdateChopTradesPerEntryInput(true);
         }
 
-        private int SubmitManualHaltExits(string reasonSuffix)
+        private int SubmitManualHaltExits(string reasonSuffix, bool allowStraddlePreservation = true)
         {
             if (tradeStates == null || tradeStates.Count == 0)
                 return 0;
 
+            bool preserveStraddle = allowStraddlePreservation && ShouldAllowStraddleWhileManualHalted();
             int submitted = 0;
             foreach (var state in tradeStates.Values.ToList())
             {
                 if (state == null)
                     continue;
+                if (preserveStraddle && state.IsStraddleEntry)
+                    continue;
                 if (IsTradeCloseSettling(state))
+                    continue;
+                if (state.EntryOrderPending)
+                    continue;
+                if (state.UsesAccountEntryOrders)
                     continue;
 
                 int qty = Math.Max(0, state.RemainingQuantity);
@@ -18272,6 +22328,494 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
 
             return submitted;
+        }
+
+        private void RequestScaleInOverlayRefresh()
+        {
+            if (ChartControl == null)
+                return;
+
+            Action refresh = () => ChartControl.InvalidateVisual();
+            if (ChartControl.Dispatcher.CheckAccess())
+                refresh();
+            else
+                ChartControl.Dispatcher.InvokeAsync(refresh);
+        }
+
+        private HorizontalLine FindHorizontalLine(string tag)
+        {
+            if (string.IsNullOrWhiteSpace(tag) || DrawObjects == null)
+                return null;
+
+            foreach (var drawObject in DrawObjects)
+            {
+                if (drawObject == null || !string.Equals(drawObject.Tag, tag, StringComparison.Ordinal))
+                    continue;
+
+                return drawObject as HorizontalLine;
+            }
+
+            return null;
+        }
+
+        private void TryAttachScaleInMeasurementDragHandlers()
+        {
+            if (scaleInMeasurementDragHandlersAttached || ChartControl == null)
+                return;
+
+            Action attach = () =>
+            {
+                if (scaleInMeasurementDragHandlersAttached || ChartControl == null)
+                    return;
+
+                scaleInMeasurementDragHostControl = ChartControl;
+                scaleInMeasurementDragHostControl.PreviewMouseLeftButtonDown += ScaleInChartControl_PreviewMouseLeftButtonDown;
+                scaleInMeasurementDragHostControl.PreviewMouseMove += ScaleInChartControl_PreviewMouseMove;
+                scaleInMeasurementDragHostControl.PreviewMouseLeftButtonUp += ScaleInChartControl_PreviewMouseLeftButtonUp;
+                scaleInMeasurementDragHostControl.LostMouseCapture += ScaleInChartControl_LostMouseCapture;
+                scaleInMeasurementDragHandlersAttached = true;
+            };
+
+            if (ChartControl.Dispatcher.CheckAccess())
+                attach();
+            else
+                ChartControl.Dispatcher.InvokeAsync(attach);
+        }
+
+        private void ScaleInChartControl_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            if (ChartControl == null)
+                return;
+
+            Point point = e.GetPosition(ChartControl);
+            ScaleInMeasurementDragTarget dragTarget = ResolveScaleInMeasurementDragTarget(point);
+            if (dragTarget == ScaleInMeasurementDragTarget.None)
+                return;
+
+            activeScaleInMeasurementDragTarget = dragTarget;
+            activeScaleInMeasurementDragStartPoint = point;
+            activeScaleInMeasurementDragStartOffset = dragTarget == ScaleInMeasurementDragTarget.OriginalMeasurement
+                ? scaleInOriginalMeasurementXOffset
+                : scaleInSpacingMeasurementXOffset;
+
+            ChartControl.CaptureMouse();
+            e.Handled = true;
+        }
+
+        private void ScaleInChartControl_PreviewMouseMove(object sender, MouseEventArgs e)
+        {
+            if (ChartControl == null || activeScaleInMeasurementDragTarget == ScaleInMeasurementDragTarget.None)
+                return;
+
+            if (e.LeftButton != MouseButtonState.Pressed)
+            {
+                EndScaleInMeasurementLabelDrag();
+                return;
+            }
+
+            Point point = e.GetPosition(ChartControl);
+            double deltaX = point.X - activeScaleInMeasurementDragStartPoint.X;
+            if (activeScaleInMeasurementDragTarget == ScaleInMeasurementDragTarget.OriginalMeasurement)
+                scaleInOriginalMeasurementXOffset = activeScaleInMeasurementDragStartOffset + deltaX;
+            else if (activeScaleInMeasurementDragTarget == ScaleInMeasurementDragTarget.SpacingMeasurements)
+                scaleInSpacingMeasurementXOffset = activeScaleInMeasurementDragStartOffset + deltaX;
+
+            RequestScaleInOverlayRefresh();
+            e.Handled = true;
+        }
+
+        private void ScaleInChartControl_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
+        {
+            if (activeScaleInMeasurementDragTarget == ScaleInMeasurementDragTarget.None)
+                return;
+
+            EndScaleInMeasurementLabelDrag();
+            e.Handled = true;
+        }
+
+        private void ScaleInChartControl_LostMouseCapture(object sender, MouseEventArgs e)
+        {
+            EndScaleInMeasurementLabelDrag();
+        }
+
+        private ScaleInMeasurementDragTarget ResolveScaleInMeasurementDragTarget(Point point)
+        {
+            if (scaleInOriginalMeasurementLabelBounds.Contains(point))
+                return ScaleInMeasurementDragTarget.OriginalMeasurement;
+
+            for (int i = 0; i < scaleInSpacingMeasurementLabelBounds.Count; i++)
+            {
+                if (scaleInSpacingMeasurementLabelBounds[i].Contains(point))
+                    return ScaleInMeasurementDragTarget.SpacingMeasurements;
+            }
+
+            return ScaleInMeasurementDragTarget.None;
+        }
+
+        private void EndScaleInMeasurementLabelDrag()
+        {
+            activeScaleInMeasurementDragTarget = ScaleInMeasurementDragTarget.None;
+
+            if (scaleInMeasurementDragHostControl != null && Mouse.Captured == scaleInMeasurementDragHostControl)
+                scaleInMeasurementDragHostControl.ReleaseMouseCapture();
+        }
+
+        private List<ScaleInRenderableLevel> GetRenderableActiveScaleInLevels(double currentPrice)
+        {
+            var levels = new List<ScaleInRenderableLevel>();
+            if (!EnableScaleInTrades)
+                return levels;
+            if (Position == null || Position.MarketPosition == MarketPosition.Flat || Position.Quantity == 0)
+                return levels;
+
+            EnsureRuntimeScaleInLevelsSeeded();
+
+            double entryPrice = ResolveScaleInInitialEntryPrice(currentPrice);
+            if (entryPrice <= 0 || double.IsNaN(entryPrice))
+                return levels;
+
+            TradeRuntimeState referenceState = GetScaleInReferenceState();
+            int stopTicks = ResolveProtectionTicks(true, ResolveProtectionQuantity(referenceState), GetLatestAtrValue());
+            int maxLevels = Math.Min(GetScaleInLevelCount(), GetScaleInVisibleLevelCountByStopTicks(stopTicks));
+            int consumedLevels = GetScaleInConsumedLevelCount();
+            double tickSize = Instrument?.MasterInstrument?.TickSize ?? TickSize;
+            if (tickSize <= 0)
+                tickSize = 1e-6;
+
+            for (int i = consumedLevels + 1; i <= maxLevels; i++)
+            {
+                double price = 0;
+                HorizontalLine line;
+                if (scaleInDrawdownLines.TryGetValue(i, out line) && line != null)
+                    price = GetScaleInDrawdownLineAnchorPrice(line);
+                if (price <= 0)
+                    price = ResolveScaleInTriggerPrice(entryPrice, Position.MarketPosition == MarketPosition.Long, i, tickSize);
+                if (price <= 0 || double.IsNaN(price))
+                    continue;
+
+                levels.Add(new ScaleInRenderableLevel
+                {
+                    LadderIndex = i - 1,
+                    DisplayLevelNumber = i,
+                    Price = price,
+                    EntriesToAdd = GetRuntimeScaleInLevelEntriesValue(i - 1)
+                });
+            }
+
+            return levels;
+        }
+
+        private double ResolveScaleInMeasurementStopBoundaryPrice(double currentPrice)
+        {
+            TradeRuntimeState referenceState = GetScaleInReferenceState();
+            double? stopPrice = ResolveScaleInStopPrice(referenceState, currentPrice);
+            if (stopPrice.HasValue && stopPrice.Value > 0)
+                return RoundToInstrumentTick(stopPrice.Value);
+
+            TradeRuntimeState activeState;
+            if (TryGetSyntheticActiveState(out activeState))
+            {
+                double? syntheticStop = ResolveSyntheticStopSeedPrice(activeState);
+                if (syntheticStop.HasValue && syntheticStop.Value > 0)
+                    return RoundToInstrumentTick(syntheticStop.Value);
+            }
+
+            return 0;
+        }
+
+        private void RenderScaleInMeasurementOverlays(
+            ChartScale chartScale,
+            DxTextFormat textFormat,
+            SharpDX.Direct2D1.Brush originalMeasurementBrush,
+            SharpDX.Direct2D1.Brush spacingMeasurementBrush,
+            SharpDX.Direct2D1.Brush labelBackgroundBrush,
+            SharpDX.Direct2D1.Brush labelShadowBrush,
+            IList<ScaleInRenderableLevel> levels,
+            float panelLeft,
+            float panelRight,
+            float lastVisibleBarX,
+            double currentPrice)
+        {
+            if (chartScale == null
+                || textFormat == null
+                || originalMeasurementBrush == null
+                || spacingMeasurementBrush == null
+                || labelBackgroundBrush == null
+                || labelShadowBrush == null)
+                return;
+
+            scaleInOriginalMeasurementLabelBounds = Rect.Empty;
+            scaleInSpacingMeasurementLabelBounds.Clear();
+
+            float originalMeasurementX = ResolveScaleInMeasurementX(panelLeft, panelRight, lastVisibleBarX, 48f, scaleInOriginalMeasurementXOffset);
+            float spacingMeasurementX = ResolveScaleInMeasurementX(panelLeft, panelRight, lastVisibleBarX, 104f, scaleInSpacingMeasurementXOffset);
+
+            RenderScaleInOriginalEntryMeasurement(chartScale, textFormat, originalMeasurementBrush, labelBackgroundBrush, labelShadowBrush, originalMeasurementX, currentPrice);
+            RenderScaleInSpacingMeasurements(chartScale, textFormat, spacingMeasurementBrush, labelBackgroundBrush, labelShadowBrush, spacingMeasurementX, levels, currentPrice);
+        }
+
+        private float ResolveScaleInMeasurementX(float panelLeft, float panelRight, float lastVisibleBarX, float offsetFromRight, double runtimeOffset)
+        {
+            float desired = panelRight - offsetFromRight + (float)runtimeOffset;
+            float minX = panelLeft + ScaleInMeasurementLabelWidth + 18f;
+            float maxX = Math.Max(minX, panelRight - 18f);
+            return Math.Max(minX, Math.Min(maxX, desired));
+        }
+
+        private void RenderScaleInOriginalEntryMeasurement(
+            ChartScale chartScale,
+            DxTextFormat textFormat,
+            SharpDX.Direct2D1.Brush brush,
+            SharpDX.Direct2D1.Brush labelBackgroundBrush,
+            SharpDX.Direct2D1.Brush labelShadowBrush,
+            float x,
+            double currentPrice)
+        {
+            TradeRuntimeState activeState;
+            if (!TryGetSyntheticActiveState(out activeState))
+                return;
+
+            double originalEntryPrice = ResolveSyntheticOriginalEntryReferencePrice(activeState, currentPrice);
+            double liveAveragePrice = ResolveSyntheticLiveAveragePrice(activeState, currentPrice);
+            if (originalEntryPrice <= 0 || liveAveragePrice <= 0 || !HasSyntheticAverageMoved(originalEntryPrice, liveAveragePrice))
+                return;
+
+            DrawScaleInVerticalMeasurement(
+                chartScale,
+                textFormat,
+                brush,
+                x,
+                originalEntryPrice,
+                liveAveragePrice,
+                BuildScaleInChartMeasurementLabel(originalEntryPrice, liveAveragePrice),
+                chartScale.GetYByValue(originalEntryPrice) - 18f,
+                labelBackgroundBrush,
+                labelShadowBrush,
+                ScaleInMeasurementDragTarget.OriginalMeasurement);
+        }
+
+        private void RenderScaleInSpacingMeasurements(
+            ChartScale chartScale,
+            DxTextFormat textFormat,
+            SharpDX.Direct2D1.Brush brush,
+            SharpDX.Direct2D1.Brush labelBackgroundBrush,
+            SharpDX.Direct2D1.Brush labelShadowBrush,
+            float x,
+            IList<ScaleInRenderableLevel> levels,
+            double currentPrice)
+        {
+            if (levels == null || levels.Count == 0)
+                return;
+
+            TradeRuntimeState activeState;
+            if (!TryGetSyntheticActiveState(out activeState))
+                return;
+
+            double stopBoundaryPrice = ResolveScaleInMeasurementStopBoundaryPrice(currentPrice);
+            if (stopBoundaryPrice <= 0)
+                return;
+
+            List<double> measurementNodes = new List<double>();
+            measurementNodes.Add(ResolveSyntheticLiveAveragePrice(activeState, currentPrice));
+            measurementNodes.AddRange(levels.Select(level => level.Price));
+            measurementNodes.Add(stopBoundaryPrice);
+
+            for (int i = 0; i < measurementNodes.Count - 1; i++)
+            {
+                double startPrice = measurementNodes[i];
+                double endPrice = measurementNodes[i + 1];
+                if (startPrice <= 0 || endPrice <= 0 || PricesClose(startPrice, endPrice))
+                    continue;
+
+                int? levelEntries = i < levels.Count
+                    ? (int?)Math.Max(MinScaleInLevelEntries, levels[i].EntriesToAdd)
+                    : null;
+
+                DrawScaleInVerticalMeasurement(
+                    chartScale,
+                    textFormat,
+                    brush,
+                    x,
+                    startPrice,
+                    endPrice,
+                    BuildScaleInChartMeasurementLabel(startPrice, endPrice, levelEntries),
+                    null,
+                    labelBackgroundBrush,
+                    labelShadowBrush,
+                    ScaleInMeasurementDragTarget.SpacingMeasurements);
+            }
+        }
+
+        private void DrawScaleInVerticalMeasurement(
+            ChartScale chartScale,
+            DxTextFormat textFormat,
+            SharpDX.Direct2D1.Brush brush,
+            float x,
+            double startPrice,
+            double endPrice,
+            string label,
+            float? labelYOverride,
+            SharpDX.Direct2D1.Brush labelBackgroundBrush,
+            SharpDX.Direct2D1.Brush labelShadowBrush,
+            ScaleInMeasurementDragTarget dragTarget)
+        {
+            if (chartScale == null || textFormat == null || brush == null || string.IsNullOrWhiteSpace(label))
+                return;
+
+            float startY = chartScale.GetYByValue(startPrice);
+            float endY = chartScale.GetYByValue(endPrice);
+            float topY = Math.Min(startY, endY);
+            float bottomY = Math.Max(startY, endY);
+            if (bottomY - topY < ScaleInMeasurementArrowSize * 2f)
+                return;
+
+            RenderTarget.DrawLine(
+                new SharpDX.Vector2(x, topY),
+                new SharpDX.Vector2(x, bottomY),
+                brush,
+                ScaleInMeasurementLineThickness);
+
+            DrawScaleInMeasurementArrowHead(brush, x, topY, pointsDown: true);
+            DrawScaleInMeasurementArrowHead(brush, x, bottomY, pointsDown: false);
+
+            float labelY = labelYOverride ?? (((topY + bottomY) * 0.5f) - 8f);
+            labelY = Math.Max(ChartPanel.Y + 2f, Math.Min((ChartPanel.Y + ChartPanel.H) - 18f, labelY));
+            DrawScaleInMeasurementLabelBlock(
+                textFormat,
+                brush,
+                labelBackgroundBrush,
+                labelShadowBrush,
+                label,
+                x - ScaleInMeasurementLabelWidth - ScaleInMeasurementLabelXGap,
+                labelY,
+                ScaleInMeasurementLabelWidth,
+                dragTarget);
+        }
+
+        private void DrawScaleInMeasurementArrowHead(SharpDX.Direct2D1.Brush brush, float x, float y, bool pointsDown)
+        {
+            if (brush == null)
+                return;
+
+            float yOffset = pointsDown ? ScaleInMeasurementArrowSize : -ScaleInMeasurementArrowSize;
+            RenderTarget.DrawLine(
+                new SharpDX.Vector2(x, y),
+                new SharpDX.Vector2(x - ScaleInMeasurementArrowSize, y + yOffset),
+                brush,
+                ScaleInMeasurementLineThickness);
+            RenderTarget.DrawLine(
+                new SharpDX.Vector2(x, y),
+                new SharpDX.Vector2(x + ScaleInMeasurementArrowSize, y + yOffset),
+                brush,
+                ScaleInMeasurementLineThickness);
+        }
+
+        private string BuildScaleInChartMeasurementLabel(double startPrice, double endPrice, int? levelEntries = null)
+        {
+            double delta = endPrice - startPrice;
+            double tickSize = GetSyntheticTickSize();
+            double tickDelta = tickSize > 0 ? delta / tickSize : 0;
+
+            string distanceLabel = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} ({1})",
+                FormatSyntheticPriceUnitDelta(delta),
+                FormatSyntheticTickDelta(tickDelta));
+
+            if (!levelEntries.HasValue || levelEntries.Value <= 0)
+                return distanceLabel;
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}\n{1}",
+                distanceLabel,
+                FormatScaleInEntriesLabel(levelEntries.Value));
+        }
+
+        private string FormatScaleInEntriesLabel(int entries)
+        {
+            int safeEntries = Math.Max(MinScaleInLevelEntries, entries);
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} {1}",
+                safeEntries,
+                safeEntries == 1 ? "Entry" : "Entries");
+        }
+
+        private void DrawScaleInMeasurementLabelBlock(
+            DxTextFormat textFormat,
+            SharpDX.Direct2D1.Brush textBrush,
+            SharpDX.Direct2D1.Brush backgroundBrush,
+            SharpDX.Direct2D1.Brush shadowBrush,
+            string text,
+            float x,
+            float y,
+            float width,
+            ScaleInMeasurementDragTarget dragTarget)
+        {
+            if (string.IsNullOrWhiteSpace(text) || textFormat == null || textBrush == null)
+                return;
+
+            float actualX = x;
+            using (var textLayout = new DxTextLayout(
+                NinjaTrader.Core.Globals.DirectWriteFactory,
+                text,
+                textFormat,
+                width,
+                textFormat.FontSize * 1.45f))
+            {
+                float backgroundWidth = Math.Min(width, textLayout.Metrics.WidthIncludingTrailingWhitespace) + (ScaleInMeasurementLabelPaddingX * 2f);
+                float backgroundHeight = textLayout.Metrics.Height + (ScaleInMeasurementLabelPaddingY * 2f);
+                float panelMinX = ChartPanel.X + 2f;
+                float panelMaxX = (ChartPanel.X + ChartPanel.W) - backgroundWidth - 2f;
+                actualX = Math.Max(panelMinX + ScaleInMeasurementLabelPaddingX, Math.Min(panelMaxX + ScaleInMeasurementLabelPaddingX, x));
+
+                if (backgroundBrush != null)
+                {
+                    RenderTarget.FillRectangle(
+                        new SharpDX.RectangleF(
+                            actualX - ScaleInMeasurementLabelPaddingX,
+                            y - ScaleInMeasurementLabelPaddingY,
+                            backgroundWidth,
+                            backgroundHeight),
+                        backgroundBrush);
+                    RenderTarget.DrawRectangle(
+                        new SharpDX.RectangleF(
+                            actualX - ScaleInMeasurementLabelPaddingX,
+                            y - ScaleInMeasurementLabelPaddingY,
+                            backgroundWidth,
+                            backgroundHeight),
+                        textBrush,
+                        1f);
+                }
+
+                if (shadowBrush != null)
+                    RenderTarget.DrawTextLayout(new SharpDX.Vector2(actualX + 1f, y + 1f), textLayout, shadowBrush, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+                RenderTarget.DrawTextLayout(new SharpDX.Vector2(actualX, y), textLayout, textBrush, SharpDX.Direct2D1.DrawTextOptions.NoSnap);
+
+                RegisterScaleInMeasurementLabelBounds(
+                    dragTarget,
+                    new Rect(
+                        actualX - ScaleInMeasurementLabelPaddingX - ScaleInMeasurementLabelHitPaddingX,
+                        y - ScaleInMeasurementLabelPaddingY - ScaleInMeasurementLabelHitPaddingY,
+                        backgroundWidth + (ScaleInMeasurementLabelHitPaddingX * 2.0),
+                        backgroundHeight + (ScaleInMeasurementLabelHitPaddingY * 2.0)));
+            }
+        }
+
+        private void RegisterScaleInMeasurementLabelBounds(ScaleInMeasurementDragTarget dragTarget, Rect bounds)
+        {
+            if (bounds.IsEmpty)
+                return;
+
+            if (dragTarget == ScaleInMeasurementDragTarget.OriginalMeasurement)
+            {
+                scaleInOriginalMeasurementLabelBounds = bounds;
+                return;
+            }
+
+            if (dragTarget == ScaleInMeasurementDragTarget.SpacingMeasurements)
+                scaleInSpacingMeasurementLabelBounds.Add(bounds);
         }
 
         private static T FindFirstChild<T>(DependencyObject parent) where T : DependencyObject
@@ -18842,7 +23386,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!manualHaltActive || Account == null)
                 return;
 
-            if (HasManualTradesOpen())
+            if (HasManualHaltProtectedExposure())
                 return;
 
             var now = DateTime.UtcNow;
@@ -18858,6 +23402,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (!TryGetAccountRiskCounts(out openPositions, out workingOrders))
                 return;
 
+            bool preservedStraddle = ShouldAllowStraddleWhileManualHalted() && HasLiveOrPendingStraddleActivity();
+            if (preservedStraddle && openPositions == 0)
+                return;
+
             if (openPositions == 0 && workingOrders == 0)
                 return;
 
@@ -18870,10 +23418,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             CancelWorkingEntryOrders("manual_halt_enforce");
             bool hasSettlingTrades = HasTrackedTradeCloseSettling();
             int resubmitted = SubmitManualHaltExits("MHLT");
+            preservedStraddle = ShouldAllowStraddleWhileManualHalted() && HasLiveOrPendingStraddleActivity();
+            bool requiresAccountFlatten = HasOpenAccountBackedTrades();
 
             // Only fall back to account-level flatten when the strategy could not submit managed exits.
             // Otherwise the fallback cancels the MHLT market exits we just submitted and leaves state desynced.
-            bool forceFlatten = openPositions > 0 && resubmitted == 0 && !hasSettlingTrades;
+            bool forceFlatten = openPositions > 0 && !hasSettlingTrades && !preservedStraddle &&
+                (resubmitted == 0 || requiresAccountFlatten);
 
             if (forceFlatten)
                 TryFlattenAccountEverything("manual_halt_enforce", activeTradeId ?? string.Empty, "MANUAL_HALT");
@@ -19236,6 +23787,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         public enum ChopAddOnProfitModeOption { Ticks, Dollars }
         public enum VwapExitModeOption { TargetVwap, TrailOnVwapTouch }
         public enum ProtectionControlModeOption { SetOnceThenManual, ContinuouslyLocked }
+        public enum StraddleExecutionModeOption { Market, PendingOrders }
         // Legacy ATR trailing enum retained for documentation reference.
         // public enum TrailKind { None, Ticks, ATR }
 
@@ -19248,10 +23800,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(1, 10), Display(Name = "MinSignalsToEnterShort", GroupName = "01 - Bias & Voting", Order = 2)]
         public int MinSignalsToEnterShort { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "TradesPerEntry", GroupName = "01 - Bias & Voting", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "TradesPerEntry", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 0)]
         public int TradesPerEntry { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Treat Multi-Entry as 1 Trade?", GroupName = "01 - Bias & Voting", Order = 4)]
+        [NinjaScriptProperty, Display(Name = "Treat Multi-Entry as 1 Trade?", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 1)]
         public bool TreatMultiEntryAsSingleTrade { get; set; }
 
         [NinjaScriptProperty, Range(0, 1000), Display(Name = "Entry Cooldown (bars)", GroupName = "01 - Bias & Voting", Order = 5)]
@@ -19566,25 +24118,25 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(1, 50), Display(Name = "MacdSmooth", GroupName = "08 - Indicator Periods", Order = 9)]
         public int MacdSmooth { get; set; }
 
-        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 0)]
+        [NinjaScriptProperty, Range(2, 100), Display(Name = "Base Atr Period", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 15)]
         public int AtrPeriod { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 1)]
+        [NinjaScriptProperty, Display(Name = "StopType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 2)]
         public StopKind StopType { get; set; }
 
         [Browsable(false)]
         public int StopTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "StopValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 2)]
+        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "StopValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 3)]
         public double AtrStopMult { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 3)]
+        [NinjaScriptProperty, Display(Name = "TargetType", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 4)]
         public TargetKind TargetType { get; set; }
 
         [Browsable(false)]
         public int TargetTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "TargetValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 4)]
+        [NinjaScriptProperty, Range(0.01, 100000.0), Display(Name = "TargetValue", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 5)]
         public double AtrTargetMult { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Protection Control Mode", GroupName = "02 - Stops, Targets, & Global Trailing", Order = 5)]
@@ -19680,39 +24232,6 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0.0, 1000000.0), Display(Name = "Daily Profit Limit (DPL)", GroupName = "12 - Daily Limits", Order = 2)]
         public double DailyProfitLimit { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Enable Straddle Trades", GroupName = "13 - Straddle", Order = 0)]
-        public bool EnableStraddleTrades { get; set; }
-
-        [NinjaScriptProperty, Range(0, 23), Display(Name = "Straddle Start Hour (chart time)", GroupName = "13 - Straddle", Order = 1)]
-        public int StraddleStartHour { get; set; }
-
-        [NinjaScriptProperty, Range(0, 59), Display(Name = "Straddle Start Minute (chart time)", GroupName = "13 - Straddle", Order = 2)]
-        public int StraddleStartMinute { get; set; }
-
-        [NinjaScriptProperty, Range(1, 120), Display(Name = "Straddle Range Minutes", GroupName = "13 - Straddle", Order = 3)]
-        public int StraddleRangeMinutes { get; set; }
-
-        [NinjaScriptProperty, Range(1, 50), Display(Name = "Straddle Zone Size (ticks)", GroupName = "13 - Straddle", Order = 4)]
-        public int StraddleZoneTicks { get; set; }
-
-        [NinjaScriptProperty, Range(-50, 50), Display(Name = "Straddle Zone Offset (ticks)", GroupName = "13 - Straddle", Order = 5)]
-        public int StraddleZoneOffsetTicks { get; set; }
-
-        [NinjaScriptProperty, Display(Name = "Trades Per Straddle Entry", GroupName = "13 - Straddle", Order = 6)]
-        public int TradesPerStraddleEntry { get; set; }
-
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Stop Mult", GroupName = "13 - Straddle", Order = 7)]
-        public double StraddleAtrStopMult { get; set; }
-
-        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Trail Mult", GroupName = "13 - Straddle", Order = 8)]
-        public double StraddleAtrTrailMult { get; set; }
-
-        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Straddle Trail Activation ($)", GroupName = "13 - Straddle", Order = 9)]
-        public double StraddleTrailActivationDollars { get; set; }
-
-        [NinjaScriptProperty, Range(0, 120), Display(Name = "Straddle Min Profit Hold (sec)", GroupName = "13 - Straddle", Order = 10)]
-        public int StraddleMinProfitHoldSeconds { get; set; }
-
         [NinjaScriptProperty, Display(Name = "Enable Scale-In Trades", GroupName = "03 - Scale-In", Order = 0)]
         public bool EnableScaleInTrades { get; set; }
 
@@ -19725,10 +24244,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0, 400), Display(Name = "Scale-In Drawdown Step (ticks)", GroupName = "03 - Scale-In", Order = 3)]
         public int ScaleInDrawdownTicks { get; set; }
 
-        [NinjaScriptProperty, Range(0, 10), Display(Name = "Scale-In Trades to Add", GroupName = "03 - Scale-In", Order = 4)]
+        [NinjaScriptProperty, Range(1, 1000), Display(Name = "Contracts Per Scale Level", GroupName = "03 - Scale-In", Order = 4)]
         public int ScaleInTradesToAdd { get; set; }
 
-        [NinjaScriptProperty, Display(Name = "Scale-In Max Trades", GroupName = "03 - Scale-In", Order = 5)]
+        [NinjaScriptProperty, Range(1, 100), Display(Name = "Scale Level Count", GroupName = "03 - Scale-In", Order = 5)]
         public int ScaleInMaxTrades { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Scale-In Trail Activation Mode", GroupName = "03 - Scale-In", Order = 6)]
@@ -19749,8 +24268,54 @@ namespace NinjaTrader.NinjaScript.Strategies
         [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Scale-In Trail Increment Value", GroupName = "03 - Scale-In", Order = 11)]
         public double ScaleInTrailIncrementValue { get; set; }
 
+        [NinjaScriptProperty, Display(Name = "Enable Straddle Trades", GroupName = "03.5 - Straddle", Order = 0)]
+        public bool EnableStraddleTrades { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Straddle Overrides Halt Mode", GroupName = "03.5 - Straddle", Order = 1)]
+        public bool StraddleOverridesHaltMode { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Preserve Straddle TP", GroupName = "03.5 - Straddle", Order = 2)]
+        public bool StraddlePreserveTarget { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Enable Straddle Trailing", GroupName = "03.5 - Straddle", Order = 3)]
+        public bool EnableStraddleTrailing { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Straddle Execution Mode", GroupName = "03.5 - Straddle", Order = 4)]
+        public StraddleExecutionModeOption StraddleExecutionMode { get; set; }
+
+        [NinjaScriptProperty, Range(0, 10000), Display(Name = "Straddle Delayed Entry (ms)", GroupName = "03.5 - Straddle", Order = 5)]
+        public int StraddleDelayedEntryMilliseconds { get; set; }
+
+        [NinjaScriptProperty, Range(0, 23), Display(Name = "Straddle Start Hour (chart time)", GroupName = "03.5 - Straddle", Order = 6)]
+        public int StraddleStartHour { get; set; }
+
+        [NinjaScriptProperty, Range(0, 59), Display(Name = "Straddle Start Minute (chart time)", GroupName = "03.5 - Straddle", Order = 7)]
+        public int StraddleStartMinute { get; set; }
+
+        [NinjaScriptProperty, Range(1, 120), Display(Name = "Straddle Range Minutes", GroupName = "03.5 - Straddle", Order = 8)]
+        public int StraddleRangeMinutes { get; set; }
+
+        [NinjaScriptProperty, Range(1, 50), Display(Name = "Straddle Zone Size (ticks)", GroupName = "03.5 - Straddle", Order = 9)]
+        public int StraddleZoneTicks { get; set; }
+
+        [NinjaScriptProperty, Range(-50, 50), Display(Name = "Straddle Zone Offset (ticks)", GroupName = "03.5 - Straddle", Order = 10)]
+        public int StraddleZoneOffsetTicks { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Trades Per Straddle Entry", GroupName = "03.5 - Straddle", Order = 11)]
+        public int TradesPerStraddleEntry { get; set; }
+
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Stop Mult", GroupName = "03.5 - Straddle", Order = 12)]
+        public double StraddleAtrStopMult { get; set; }
+
+        [NinjaScriptProperty, Range(0.1, 10.0), Display(Name = "Straddle ATR Trail Mult", GroupName = "03.5 - Straddle", Order = 13)]
+        public double StraddleAtrTrailMult { get; set; }
+
+        [NinjaScriptProperty, Range(0.0, 100000.0), Display(Name = "Straddle Trail Activation ($)", GroupName = "03.5 - Straddle", Order = 14)]
+        public double StraddleTrailActivationDollars { get; set; }
+
+        [NinjaScriptProperty, Range(0, 120), Display(Name = "Straddle Min Profit Hold (sec)", GroupName = "03.5 - Straddle", Order = 15)]
+        public int StraddleMinProfitHoldSeconds { get; set; }
+
         #endregion
     }
 }
-
-
