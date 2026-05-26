@@ -188,6 +188,7 @@ struct MartingaleBasketState
     double level_lot[MARTINGALE_MAX_LEVELS];
     ulong level_order_tickets[MARTINGALE_MAX_LEVELS];
     bool level_filled[MARTINGALE_MAX_LEVELS];
+    bool level_triggering[MARTINGALE_MAX_LEVELS];
 };
 
 MartingaleBasketState g_martingale_baskets[];
@@ -3363,6 +3364,18 @@ double MartingaleGeneratedBasketUsdAtPrice(ENUM_POSITION_TYPE positionType,
     return total;
 }
 
+string FormatMartingaleUsd(double value)
+{
+    if(value >= 0.0)
+        return StringFormat("+$%.2f", value);
+    return StringFormat("-$%.2f", MathAbs(value));
+}
+
+string FormatMartingalePoints(double value)
+{
+    return DoubleToString(value, 1) + " pts";
+}
+
 int MartingaleMaxLevelsBeforeSl()
 {
     if(Martingale_LevelSpacing_Points <= 0.0 || SimpleStopLoss_Points <= 0.0)
@@ -3499,6 +3512,8 @@ string MartingaleTpLineName(ulong parentTicket) { return StringFormat("%sTP_%I64
 string MartingaleSlLineName(ulong parentTicket) { return StringFormat("%sSL_%I64u", MartingaleChartPrefix, parentTicket); }
 string MartingaleTpLabelName(ulong parentTicket) { return StringFormat("%sTP_LABEL_%I64u", MartingaleChartPrefix, parentTicket); }
 string MartingaleSlLabelName(ulong parentTicket) { return StringFormat("%sSL_LABEL_%I64u", MartingaleChartPrefix, parentTicket); }
+string MartingaleLevelLineName(ulong parentTicket, int levelIndex) { return StringFormat("%sLEVEL_%I64u_%d", MartingaleChartPrefix, parentTicket, levelIndex + 1); }
+string MartingaleLevelLabelName(ulong parentTicket, int levelIndex) { return StringFormat("%sLEVEL_LABEL_%I64u_%d", MartingaleChartPrefix, parentTicket, levelIndex + 1); }
 
 void ResetMartingaleBasketState(MartingaleBasketState &basket)
 {
@@ -3522,6 +3537,7 @@ void ResetMartingaleBasketState(MartingaleBasketState &basket)
         basket.level_lot[i] = 0.0;
         basket.level_order_tickets[i] = 0;
         basket.level_filled[i] = false;
+        basket.level_triggering[i] = false;
     }
 }
 
@@ -3724,6 +3740,7 @@ void SyncMartingaleBasketFilledLevels(int basketIndex)
 
         g_martingale_baskets[basketIndex].level_filled[levelIndex] = true;
         g_martingale_baskets[basketIndex].level_order_tickets[levelIndex] = 0;
+        g_martingale_baskets[basketIndex].level_triggering[levelIndex] = false;
         if(g_map_position_id_to_base_id != NULL && g_martingale_baskets[basketIndex].base_id != "")
         {
             string existing = "";
@@ -3734,40 +3751,36 @@ void SyncMartingaleBasketFilledLevels(int basketIndex)
     }
 }
 
-bool ModifyMartingalePendingOrder(ulong orderTicket, double price, double sl, double tp)
+double MartingaleBasketUsdAtExitPrice(int basketIndex, double exitPrice)
 {
-    if(orderTicket == 0)
-        return false;
-    if(!OrderSelect(orderTicket))
-        return false;
+    if(basketIndex < 0 || basketIndex >= ArraySize(g_martingale_baskets) || exitPrice <= 0.0)
+        return 0.0;
+    if(!g_martingale_baskets[basketIndex].active)
+        return 0.0;
 
-    MqlTradeRequest request;
-    MqlTradeResult result;
-    ZeroMemory(request);
-    ZeroMemory(result);
+    double pointValuePerLot = 0.0;
+    double minLot = 0.0;
+    double maxLot = 0.0;
+    double lotStep = 0.0;
+    if(!GetMartingaleSymbolSpecs(pointValuePerLot, minLot, maxLot, lotStep))
+        return 0.0;
 
-    request.action = TRADE_ACTION_MODIFY;
-    request.order = orderTicket;
-    request.symbol = _Symbol;
-    request.magic = MagicNumber;
-    request.price = NormalizeDouble(price, _Digits);
-    request.sl = (sl > 0.0 ? NormalizeDouble(sl, _Digits) : 0.0);
-    request.tp = (tp > 0.0 ? NormalizeDouble(tp, _Digits) : 0.0);
-    request.stoplimit = OrderGetDouble(ORDER_PRICE_STOPLIMIT);
-    request.type_time = (ENUM_ORDER_TYPE_TIME)OrderGetInteger(ORDER_TYPE_TIME);
-    request.expiration = (datetime)OrderGetInteger(ORDER_TIME_EXPIRATION);
-
-    ResetLastError();
-    bool ok = OrderSend(request, result);
-    if(!ok || (result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_DONE_PARTIAL))
+    double total = 0.0;
+    ulong tickets[];
+    CollectMartingaleBasketPositionTickets(basketIndex, tickets);
+    for(int i = 0; i < ArraySize(tickets); i++)
     {
-        string __log = StringFormat("MARTINGALE_ORDERMOD_WARN: order=%I64u ok=%d retcode=%u comment=%s",
-            (long)orderTicket, (int)ok, (uint)result.retcode, result.comment);
-        Print(__log); ULogWarnPrint(__log);
-        return false;
+        ulong ticket = tickets[i];
+        if(ticket == 0 || !PositionSelectByTicket(ticket))
+            continue;
+
+        ENUM_POSITION_TYPE positionType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double volume = PositionGetDouble(POSITION_VOLUME);
+        total += MartingaleBasketLegUsd(positionType, pointValuePerLot, entryPrice, volume, exitPrice);
     }
 
-    return true;
+    return total;
 }
 
 void RemoveMartingaleBasketObjects(ulong parentTicket)
@@ -3776,6 +3789,18 @@ void RemoveMartingaleBasketObjects(ulong parentTicket)
     ObjectDelete(0, MartingaleSlLineName(parentTicket));
     ObjectDelete(0, MartingaleTpLabelName(parentTicket));
     ObjectDelete(0, MartingaleSlLabelName(parentTicket));
+    ObjectDelete(0, MartingaleTpLabelName(parentTicket) + "_BG");
+    ObjectDelete(0, MartingaleTpLabelName(parentTicket) + "_TEXT");
+    ObjectDelete(0, MartingaleSlLabelName(parentTicket) + "_BG");
+    ObjectDelete(0, MartingaleSlLabelName(parentTicket) + "_TEXT");
+    for(int i = 0; i < MARTINGALE_MAX_LEVELS; i++)
+    {
+        string levelLabel = MartingaleLevelLabelName(parentTicket, i);
+        ObjectDelete(0, MartingaleLevelLineName(parentTicket, i));
+        ObjectDelete(0, levelLabel);
+        ObjectDelete(0, levelLabel + "_BG");
+        ObjectDelete(0, levelLabel + "_TEXT");
+    }
 }
 
 void CreateOrUpdateMartingalePriceLine(string name,
@@ -3804,7 +3829,8 @@ void CreateOrUpdateMartingalePriceLine(string name,
 void CreateOrUpdateMartingalePriceLabel(string name,
                                         double price,
                                         string text,
-                                        color clr)
+                                        color clr,
+                                        color bgClr)
 {
     if(price <= 0.0)
         return;
@@ -3830,24 +3856,114 @@ void CreateOrUpdateMartingalePriceLabel(string name,
             return;
     }
 
+    const int popupW = 252;
+    const int popupH = 24;
     int chartWidth = (int)chartWidthLong;
     int chartHeight = (int)chartHeightLong;
-    int labelX = MathMax(10, MathMin(chartWidth - 220, x + 18));
-    int labelY = MathMax(10, MathMin(chartHeight - 20, y - 9));
+    int labelX = MathMax(10, MathMin(chartWidth - popupW - 10, x + 18));
+    int labelY = MathMax(10, MathMin(chartHeight - popupH - 8, y - popupH - 8));
+    string bgName = name + "_BG";
+    string textName = name + "_TEXT";
 
-    if(ObjectFind(0, name) < 0)
-        ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+    ObjectDelete(0, name);
 
-    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
-    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, labelX);
-    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, labelY);
-    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
-    ObjectSetInteger(0, name, OBJPROP_BACK, false);
-    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
-    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
-    ObjectSetString(0, name, OBJPROP_FONT, "Arial");
-    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, 9);
-    ObjectSetString(0, name, OBJPROP_TEXT, text);
+    if(ObjectFind(0, bgName) < 0)
+        ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, labelX);
+    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, labelY);
+    ObjectSetInteger(0, bgName, OBJPROP_XSIZE, popupW);
+    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, popupH);
+    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, bgClr);
+    ObjectSetInteger(0, bgName, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, clr);
+    ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+    ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
+    ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 8);
+
+    if(ObjectFind(0, textName) < 0)
+        ObjectCreate(0, textName, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, textName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, textName, OBJPROP_XDISTANCE, labelX + 8);
+    ObjectSetInteger(0, textName, OBJPROP_YDISTANCE, labelY + 4);
+    ObjectSetInteger(0, textName, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, textName, OBJPROP_BACK, false);
+    ObjectSetInteger(0, textName, OBJPROP_HIDDEN, true);
+    ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+    ObjectSetString(0, textName, OBJPROP_FONT, "Arial");
+    ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 9);
+    ObjectSetString(0, textName, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, textName, OBJPROP_ZORDER, 9);
+}
+
+void CreateOrUpdateMartingaleLevelLabel(string baseName,
+                                        double price,
+                                        string text,
+                                        color textClr,
+                                        color bgClr)
+{
+    if(price <= 0.0)
+        return;
+
+    long chartWidthLong = 0;
+    long chartHeightLong = 0;
+    if(!ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chartWidthLong))
+        return;
+    if(!ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chartHeightLong))
+        return;
+
+    datetime barOpen = iTime(_Symbol, _Period, 0);
+    int periodSec = PeriodSeconds(_Period);
+    if(periodSec <= 0)
+        periodSec = 60;
+    datetime labelTime = (barOpen > 0 ? barOpen + periodSec : TimeCurrent());
+
+    int x = 0;
+    int y = 0;
+    if(!ChartTimePriceToXY(0, 0, labelTime, price, x, y))
+    {
+        if(!ChartTimePriceToXY(0, 0, barOpen, price, x, y))
+            return;
+    }
+
+    const int popupW = 176;
+    const int popupH = 20;
+    int chartWidth = (int)chartWidthLong;
+    int chartHeight = (int)chartHeightLong;
+    int labelX = MathMax(10, MathMin(chartWidth - popupW - 10, x + 18));
+    int labelY = MathMax(10, MathMin(chartHeight - popupH - 8, y - popupH - 8));
+    string bgName = baseName + "_BG";
+    string textName = baseName + "_TEXT";
+
+    if(ObjectFind(0, bgName) < 0)
+        ObjectCreate(0, bgName, OBJ_RECTANGLE_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, bgName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, bgName, OBJPROP_XDISTANCE, labelX);
+    ObjectSetInteger(0, bgName, OBJPROP_YDISTANCE, labelY);
+    ObjectSetInteger(0, bgName, OBJPROP_XSIZE, popupW);
+    ObjectSetInteger(0, bgName, OBJPROP_YSIZE, popupH);
+    ObjectSetInteger(0, bgName, OBJPROP_BGCOLOR, bgClr);
+    ObjectSetInteger(0, bgName, OBJPROP_COLOR, textClr);
+    ObjectSetInteger(0, bgName, OBJPROP_BORDER_COLOR, textClr);
+    ObjectSetInteger(0, bgName, OBJPROP_BACK, false);
+    ObjectSetInteger(0, bgName, OBJPROP_HIDDEN, true);
+    ObjectSetInteger(0, bgName, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, bgName, OBJPROP_ZORDER, 8);
+
+    if(ObjectFind(0, textName) < 0)
+        ObjectCreate(0, textName, OBJ_LABEL, 0, 0, 0);
+    ObjectSetInteger(0, textName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, textName, OBJPROP_XDISTANCE, labelX + 8);
+    ObjectSetInteger(0, textName, OBJPROP_YDISTANCE, labelY + 3);
+    ObjectSetInteger(0, textName, OBJPROP_COLOR, textClr);
+    ObjectSetInteger(0, textName, OBJPROP_BACK, false);
+    ObjectSetInteger(0, textName, OBJPROP_HIDDEN, true);
+    ObjectSetInteger(0, textName, OBJPROP_SELECTABLE, false);
+    ObjectSetString(0, textName, OBJPROP_FONT, "Arial");
+    ObjectSetInteger(0, textName, OBJPROP_FONTSIZE, 9);
+    ObjectSetString(0, textName, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, textName, OBJPROP_ZORDER, 9);
 }
 
 void UpdateMartingaleBasketVisual(int basketIndex)
@@ -3875,14 +3991,45 @@ void UpdateMartingaleBasketVisual(int basketIndex)
                                       2,
                                       true);
 
+    double tpUsd = MartingaleBasketUsdAtExitPrice(basketIndex, currentTpPrice);
+    double slUsd = MartingaleBasketUsdAtExitPrice(basketIndex, currentSlPrice);
+    double tpPoints = MartingaleFavorablePointsBetween(g_martingale_baskets[basketIndex].parent_type,
+                                                       g_martingale_baskets[basketIndex].entry_price,
+                                                       currentTpPrice);
+    double slPoints = MartingaleFavorablePointsBetween(g_martingale_baskets[basketIndex].parent_type,
+                                                       g_martingale_baskets[basketIndex].entry_price,
+                                                       currentSlPrice);
+
     CreateOrUpdateMartingalePriceLabel(MartingaleTpLabelName(parentTicket),
                                        currentTpPrice,
-                                       StringFormat("TP  %s", DoubleToString(currentTpPrice, _Digits)),
-                                       clrLimeGreen);
+                                       StringFormat("TP  %s  |  %s", FormatMartingaleUsd(tpUsd), FormatMartingalePoints(tpPoints)),
+                                       clrLimeGreen,
+                                       (color)C'12,40,18');
     CreateOrUpdateMartingalePriceLabel(MartingaleSlLabelName(parentTicket),
                                        currentSlPrice,
-                                       StringFormat("SL  %s", DoubleToString(currentSlPrice, _Digits)),
-                                       clrTomato);
+                                       StringFormat("SL  %s  |  %s", FormatMartingaleUsd(slUsd), FormatMartingalePoints(slPoints)),
+                                       clrTomato,
+                                       (color)C'52,18,18');
+
+    for(int i = 0; i < g_martingale_baskets[basketIndex].level_count; i++)
+    {
+        bool filled = g_martingale_baskets[basketIndex].level_filled[i];
+        color levelClr = (filled ? clrOrange : clrDodgerBlue);
+        color levelBg = (filled ? (color)C'64,36,14' : (color)C'12,28,52');
+        int lineWidth = (filled ? 3 : 2);
+
+        CreateOrUpdateMartingalePriceLine(MartingaleLevelLineName(parentTicket, i),
+                                          g_martingale_baskets[basketIndex].level_price[i],
+                                          levelClr,
+                                          STYLE_DASH,
+                                          lineWidth,
+                                          false);
+        CreateOrUpdateMartingaleLevelLabel(MartingaleLevelLabelName(parentTicket, i),
+                                           g_martingale_baskets[basketIndex].level_price[i],
+                                           StringFormat("L%d  %.4f lots", i + 1, g_martingale_baskets[basketIndex].level_lot[i]),
+                                           levelClr,
+                                           levelBg);
+    }
 }
 
 void CloseMartingalePendingOrders(int basketIndex)
@@ -3998,16 +4145,7 @@ void ApplyMartingaleBasketTargets(int basketIndex)
     }
 
     SyncMartingaleBasketFilledLevels(basketIndex);
-    SyncMartingaleBasketOrderTickets(basketIndex);
-    for(int i = 0; i < g_martingale_baskets[basketIndex].level_count; i++)
-    {
-        if(g_martingale_baskets[basketIndex].level_filled[i] || g_martingale_baskets[basketIndex].level_order_tickets[i] == 0)
-            continue;
-        ModifyMartingalePendingOrder(g_martingale_baskets[basketIndex].level_order_tickets[i],
-                                     g_martingale_baskets[basketIndex].level_price[i],
-                                     g_martingale_baskets[basketIndex].current_sl_price,
-                                     g_martingale_baskets[basketIndex].current_tp_price);
-    }
+    CloseMartingalePendingOrders(basketIndex);
 
     UpdateMartingaleBasketVisual(basketIndex);
 }
@@ -4146,6 +4284,7 @@ bool BuildMartingaleBasketPlan(MartingaleBasketState &basket)
         basket.level_lot[i] = lots[i];
         basket.level_order_tickets[i] = 0;
         basket.level_filled[i] = false;
+        basket.level_triggering[i] = false;
     }
     for(int i = basket.level_count; i < MARTINGALE_MAX_LEVELS; i++)
     {
@@ -4154,60 +4293,135 @@ bool BuildMartingaleBasketPlan(MartingaleBasketState &basket)
         basket.level_lot[i] = 0.0;
         basket.level_order_tickets[i] = 0;
         basket.level_filled[i] = false;
+        basket.level_triggering[i] = false;
     }
 
     return true;
 }
 
-bool PlaceMartingalePendingOrder(int basketIndex, int levelIndex)
+bool MartingaleLevelTriggerReached(int basketIndex, int levelIndex)
 {
     if(basketIndex < 0 || basketIndex >= ArraySize(g_martingale_baskets))
         return false;
-
     if(!g_martingale_baskets[basketIndex].active ||
        levelIndex < 0 ||
        levelIndex >= g_martingale_baskets[basketIndex].level_count ||
        g_martingale_baskets[basketIndex].level_filled[levelIndex])
         return false;
+
+    double triggerPrice = g_martingale_baskets[basketIndex].level_price[levelIndex];
+    if(triggerPrice <= 0.0)
+        return false;
+
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double tolerance = _Point * 0.5;
+    if(g_martingale_baskets[basketIndex].parent_type == POSITION_TYPE_BUY)
+        return (ask > 0.0 && ask <= triggerPrice + tolerance);
+    return (bid > 0.0 && bid >= triggerPrice - tolerance);
+}
+
+bool ExecuteMartingaleLevelMarketOrder(int basketIndex, int levelIndex)
+{
+    if(basketIndex < 0 || basketIndex >= ArraySize(g_martingale_baskets))
+        return false;
+    if(!g_martingale_baskets[basketIndex].active ||
+       g_martingale_baskets[basketIndex].closing ||
+       levelIndex < 0 ||
+       levelIndex >= g_martingale_baskets[basketIndex].level_count ||
+       g_martingale_baskets[basketIndex].level_filled[levelIndex] ||
+       g_martingale_baskets[basketIndex].level_triggering[levelIndex])
+        return false;
     if(g_martingale_baskets[basketIndex].level_lot[levelIndex] <= 0.0 ||
        g_martingale_baskets[basketIndex].level_price[levelIndex] <= 0.0)
         return false;
 
-    MqlTradeRequest request;
-    MqlTradeResult result;
-    ZeroMemory(request);
-    ZeroMemory(result);
-
-    request.action = TRADE_ACTION_PENDING;
-    request.symbol = _Symbol;
-    request.magic = MagicNumber;
-    request.volume = g_martingale_baskets[basketIndex].level_lot[levelIndex];
-    request.price = NormalizeDouble(g_martingale_baskets[basketIndex].level_price[levelIndex], _Digits);
-    request.sl = (g_martingale_baskets[basketIndex].current_sl_price > 0.0 ? NormalizeDouble(g_martingale_baskets[basketIndex].current_sl_price, _Digits) : 0.0);
-    request.tp = (g_martingale_baskets[basketIndex].current_tp_price > 0.0 ? NormalizeDouble(g_martingale_baskets[basketIndex].current_tp_price, _Digits) : 0.0);
-    request.deviation = Slippage;
-    request.type_time = ORDER_TIME_GTC;
-    request.type_filling = ORDER_FILLING_RETURN;
-    request.type = (g_martingale_baskets[basketIndex].parent_type == POSITION_TYPE_BUY ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT);
-    request.comment = MakeMartingaleChildComment(g_martingale_baskets[basketIndex].parent_ticket, levelIndex);
-
-    ResetLastError();
-    bool ok = OrderSend(request, result);
-    if(!ok || (result.retcode != TRADE_RETCODE_DONE && result.retcode != TRADE_RETCODE_PLACED))
+    string tradeBlockReason = "";
+    if(!IsTradingPermitted(tradeBlockReason))
     {
-        string __log = StringFormat("MARTINGALE_ORDERPLACE_WARN: parent=%I64u level=%d lot=%.4f price=%s retcode=%u comment=%s",
+        string __blocked = StringFormat("MARTINGALE_MARKET_SKIP: parent=%I64u level=%d trading blocked: %s",
             (long)g_martingale_baskets[basketIndex].parent_ticket,
             levelIndex + 1,
-            g_martingale_baskets[basketIndex].level_lot[levelIndex],
-            DoubleToString(request.price, _Digits),
-            (uint)result.retcode,
-            result.comment);
+            tradeBlockReason);
+        Print(__blocked); ULogWarnPrint(__blocked);
+        return false;
+    }
+
+    ENUM_ORDER_TYPE orderType = (g_martingale_baskets[basketIndex].parent_type == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL);
+    double price = SymbolInfoDouble(_Symbol, (orderType == ORDER_TYPE_BUY ? SYMBOL_ASK : SYMBOL_BID));
+    if(price <= 0.0)
+        price = SymbolInfoDouble(_Symbol, SYMBOL_LAST);
+    if(price <= 0.0)
+        return false;
+
+    string comment = MakeMartingaleChildComment(g_martingale_baskets[basketIndex].parent_ticket, levelIndex);
+    double sl = (g_martingale_baskets[basketIndex].current_sl_price > 0.0 ? NormalizeDouble(g_martingale_baskets[basketIndex].current_sl_price, _Digits) : 0.0);
+    double tp = (g_martingale_baskets[basketIndex].current_tp_price > 0.0 ? NormalizeDouble(g_martingale_baskets[basketIndex].current_tp_price, _Digits) : 0.0);
+    double lot = g_martingale_baskets[basketIndex].level_lot[levelIndex];
+
+    g_martingale_baskets[basketIndex].level_triggering[levelIndex] = true;
+    trade.SetExpertMagicNumber(MagicNumber);
+    trade.SetDeviationInPoints(Slippage);
+    bool sent = (orderType == ORDER_TYPE_BUY)
+        ? trade.Buy(lot, _Symbol, NormalizeDouble(price, _Digits), sl, tp, comment)
+        : trade.Sell(lot, _Symbol, NormalizeDouble(price, _Digits), sl, tp, comment);
+
+    uint retcode = (uint)trade.ResultRetcode();
+    if(!sent || (retcode != TRADE_RETCODE_DONE && retcode != TRADE_RETCODE_DONE_PARTIAL))
+    {
+        g_martingale_baskets[basketIndex].level_triggering[levelIndex] = false;
+        string __log = StringFormat("MARTINGALE_MARKET_WARN: parent=%I64u level=%d lot=%.4f trigger=%s retcode=%u comment=%s",
+            (long)g_martingale_baskets[basketIndex].parent_ticket,
+            levelIndex + 1,
+            lot,
+            DoubleToString(g_martingale_baskets[basketIndex].level_price[levelIndex], _Digits),
+            retcode,
+            trade.ResultComment());
         Print(__log); ULogWarnPrint(__log);
         return false;
     }
 
-    g_martingale_baskets[basketIndex].level_order_tickets[levelIndex] = result.order;
+    string __ok = StringFormat("MARTINGALE_MARKET_EXEC: parent=%I64u level=%d lot=%.4f trigger=%s price=%s deal=%I64u",
+        (long)g_martingale_baskets[basketIndex].parent_ticket,
+        levelIndex + 1,
+        lot,
+        DoubleToString(g_martingale_baskets[basketIndex].level_price[levelIndex], _Digits),
+        DoubleToString(price, _Digits),
+        (long)trade.ResultDeal());
+    Print(__ok); ULogInfoPrint(__ok);
+
+    ulong positionTicket = 0;
+    ulong dealTicket = trade.ResultDeal();
+    if(dealTicket > 0 && HistoryDealSelect(dealTicket))
+        positionTicket = (ulong)HistoryDealGetInteger(dealTicket, DEAL_POSITION_ID);
+    if(positionTicket > 0)
+        HandleMartingaleChildFill(positionTicket, comment);
+    else
+        ApplyMartingaleBasketTargets(basketIndex);
+
     return true;
+}
+
+void ProcessMartingaleBasketLevelTriggers(int basketIndex)
+{
+    if(basketIndex < 0 || basketIndex >= ArraySize(g_martingale_baskets))
+        return;
+    if(!g_martingale_baskets[basketIndex].active || g_martingale_baskets[basketIndex].closing)
+        return;
+    if(!PositionSelectByTicket(g_martingale_baskets[basketIndex].parent_ticket))
+        return;
+
+    UpdateMartingaleBasketCurrentTargets(basketIndex);
+    for(int i = 0; i < g_martingale_baskets[basketIndex].level_count; i++)
+    {
+        if(g_martingale_baskets[basketIndex].level_filled[i] ||
+           g_martingale_baskets[basketIndex].level_triggering[i])
+            continue;
+        if(!MartingaleLevelTriggerReached(basketIndex, i))
+            continue;
+
+        ExecuteMartingaleLevelMarketOrder(basketIndex, i);
+    }
 }
 
 bool CreateMartingaleBasketForParent(ulong parentTicket, const string &baseId, ENUM_POSITION_TYPE parentType, double entryPrice)
@@ -4223,6 +4437,7 @@ bool CreateMartingaleBasketForParent(ulong parentTicket, const string &baseId, E
         ResetMartingaleBasketState(g_martingale_baskets[basketIndex]);
     }
 
+    RemoveMartingaleBasketObjects(parentTicket);
     ResetMartingaleBasketState(g_martingale_baskets[basketIndex]);
     g_martingale_baskets[basketIndex].active = true;
     g_martingale_baskets[basketIndex].parent_ticket = parentTicket;
@@ -4269,6 +4484,7 @@ bool CreateMartingaleBasketForParent(ulong parentTicket, const string &baseId, E
 
         g_martingale_baskets[basketIndex].level_filled[levelIndex] = true;
         g_martingale_baskets[basketIndex].level_order_tickets[levelIndex] = 0;
+        g_martingale_baskets[basketIndex].level_triggering[levelIndex] = false;
         if(g_map_position_id_to_base_id != NULL && baseId != "")
         {
             string existing = "";
@@ -4279,16 +4495,11 @@ bool CreateMartingaleBasketForParent(ulong parentTicket, const string &baseId, E
     }
 
     SyncMartingaleBasketOrderTickets(basketIndex);
+    CloseMartingalePendingOrders(basketIndex);
     UpdateMartingaleBasketCurrentTargets(basketIndex);
 
-    for(int i = 0; i < g_martingale_baskets[basketIndex].level_count; i++)
-    {
-        if(g_martingale_baskets[basketIndex].level_filled[i] || g_martingale_baskets[basketIndex].level_order_tickets[i] != 0)
-            continue;
-        PlaceMartingalePendingOrder(basketIndex, i);
-    }
-
     ApplyMartingaleBasketTargets(basketIndex);
+    ProcessMartingaleBasketLevelTriggers(basketIndex);
     return true;
 }
 
@@ -4321,6 +4532,7 @@ void HandleMartingaleChildFill(ulong positionTicket, const string &comment)
 
     g_martingale_baskets[basketIndex].level_filled[levelIndex] = true;
     g_martingale_baskets[basketIndex].level_order_tickets[levelIndex] = 0;
+    g_martingale_baskets[basketIndex].level_triggering[levelIndex] = false;
     if(g_map_position_id_to_base_id != NULL && g_martingale_baskets[basketIndex].base_id != "")
     {
         string existing = "";
@@ -4397,13 +4609,11 @@ void CleanupMartingaleBaskets(bool forceCloseChildren)
         if(!parentOpen && !g_martingale_baskets[i].closing)
             RequestMartingaleBasketClose(g_martingale_baskets[i].parent_ticket, "parent_missing");
 
+        CloseMartingalePendingOrders(i);
+
         if(parentOpen && !g_martingale_baskets[i].closing)
         {
-            for(int levelIndex = 0; levelIndex < g_martingale_baskets[i].level_count; levelIndex++)
-            {
-                if(!g_martingale_baskets[i].level_filled[levelIndex] && g_martingale_baskets[i].level_order_tickets[levelIndex] == 0)
-                    PlaceMartingalePendingOrder(i, levelIndex);
-            }
+            ProcessMartingaleBasketLevelTriggers(i);
             UpdateMartingaleBasketVisual(i);
             continue;
         }

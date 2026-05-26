@@ -1497,6 +1497,8 @@ public TrailingActivationType TrailingStopType
             TradeSyncService.TradeRecord record;
             if (!tradeSyncService.TryGetTrade(baseId, out record) || record?.Strategy == null)
                 return false;
+            if (record.ExternalCloseOnly)
+                return false;
 
             if (!(record.Strategy is ITradeSyncParticipant))
                 return false;
@@ -4585,24 +4587,21 @@ public TrailingActivationType TrailingStopType
                 }
 
                 string tradeId = GetTradeIdFromExecution(execution);
-                if (string.IsNullOrWhiteSpace(tradeId))
-                {
-                    LogWarn("EXECUTION", $"Execution {execution.ExecutionId} missing strategy trade_id; skipping add-on processing.");
-                    return;
-                }
-
-                TradeSyncService.TradeRecord record;
-                if (tradeSyncService != null)
+                TradeSyncService.TradeRecord record = null;
+                if (!string.IsNullOrWhiteSpace(tradeId) && tradeSyncService != null)
                     tradeSyncService.TryGetTrade(tradeId, out record);
-                else
-                    record = null;
 
-                UpdateTradeResult(execution, tradeId, record);
+                if (string.IsNullOrWhiteSpace(tradeId))
+                    LogWarn("EXECUTION", $"Execution {execution.ExecutionId} missing strategy trade_id; attempting external close fallback.");
+                else
+                    UpdateTradeResult(execution, tradeId, record);
 
                 if (record != null)
                 {
                     trailingAndElasticManager?.UpdateRemainingQuantity(tradeId, record.RemainingQuantity);
                 }
+
+                HandleExternalCloseExecutionFallback(execution, tradeId, record);
 
                 sltpRemovalLogic?.HandleExecutionUpdate(execution, EnableSLTPRemoval, SLTPRemovalDelaySeconds, execution.Account);
             }
@@ -4651,6 +4650,337 @@ public TrailingActivationType TrailingStopType
 
         return string.Empty;
     }
+
+        private void HandleExternalCloseExecutionFallback(Execution execution, string resolvedTradeId, TradeSyncService.TradeRecord resolvedRecord)
+        {
+            if (execution == null || execution.Order == null || tradeSyncService == null)
+                return;
+
+            if (!IsExitExecution(execution))
+                return;
+
+            try
+            {
+                if (resolvedRecord != null && resolvedRecord.ExternalCloseOnly)
+                {
+                    PublishExternalCloseForRecord(resolvedRecord, execution, false, "resolved_trade_id");
+                    return;
+                }
+
+                var candidates = FindExternalCloseCandidates(execution, resolvedTradeId);
+                if (candidates.Count == 1)
+                {
+                    bool tradeResultAlreadyUpdated =
+                        resolvedRecord != null &&
+                        !string.IsNullOrWhiteSpace(resolvedTradeId) &&
+                        string.Equals(resolvedRecord.TradeId, candidates[0].TradeId, StringComparison.OrdinalIgnoreCase);
+                    PublishExternalCloseForRecord(candidates[0], execution, !tradeResultAlreadyUpdated, "inferred_external_trade");
+                    return;
+                }
+
+                if (candidates.Count > 1 && IsAccountFlatForExecutionSide(execution))
+                {
+                    foreach (var candidate in candidates)
+                        PublishExternalCloseForRecord(candidate, execution, true, "flat_account_external_trade");
+                    return;
+                }
+
+                if (candidates.Count == 0 && TryPublishActiveNtTradeCloseFallback(execution, resolvedTradeId))
+                    return;
+
+                if (string.IsNullOrWhiteSpace(resolvedTradeId) || candidates.Count > 0)
+                {
+                    LogWarn("EXECUTION", $"External close fallback could not resolve execution {execution.ExecutionId}; candidates={candidates.Count}, order={execution.Order.Name ?? "<none>"}, fromEntry={execution.Order.FromEntrySignal ?? "<none>"}");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogAndPrint($"ERROR: External close fallback failed: {ex.Message}");
+            }
+        }
+
+        private bool IsExitExecution(Execution execution)
+        {
+            if (execution == null || execution.Order == null)
+                return false;
+
+            var action = execution.Order.OrderAction;
+            return action == OrderAction.Sell || action == OrderAction.BuyToCover;
+        }
+
+        private MarketPosition GetClosedSideFromExecution(Execution execution)
+        {
+            if (execution == null || execution.Order == null)
+                return MarketPosition.Flat;
+
+            var action = execution.Order.OrderAction;
+            if (action == OrderAction.Sell)
+                return MarketPosition.Long;
+            if (action == OrderAction.BuyToCover)
+                return MarketPosition.Short;
+            return MarketPosition.Flat;
+        }
+
+        private List<TradeSyncService.TradeRecord> FindExternalCloseCandidates(Execution execution, string resolvedTradeId)
+        {
+            var results = new List<TradeSyncService.TradeRecord>();
+            if (execution == null || tradeSyncService == null)
+                return results;
+
+            var closedSide = GetClosedSideFromExecution(execution);
+            if (closedSide == MarketPosition.Flat)
+                return results;
+
+            var snapshot = tradeSyncService.GetOpenTradesSnapshot();
+            if (snapshot == null || snapshot.Count == 0)
+                return results;
+
+            var scoped = snapshot
+                .Where(record => record != null &&
+                                 record.ExternalCloseOnly &&
+                                 record.RemainingQuantity > 0 &&
+                                 record.Side == closedSide &&
+                                 RecordMatchesExecutionScope(record, execution))
+                .ToList();
+
+            if (!string.IsNullOrWhiteSpace(resolvedTradeId))
+            {
+                var exact = scoped
+                    .Where(record => string.Equals(record.TradeId, resolvedTradeId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (exact.Count > 0)
+                    return exact;
+            }
+
+            return scoped;
+        }
+
+        private bool RecordMatchesExecutionScope(TradeSyncService.TradeRecord record, Execution execution)
+        {
+            if (record == null || execution == null)
+                return false;
+
+            string recordAccount = (record.AccountName ?? string.Empty).Trim();
+            string executionAccount = (execution.Account?.Name ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(recordAccount) &&
+                !string.IsNullOrWhiteSpace(executionAccount) &&
+                !recordAccount.Equals(executionAccount, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return InstrumentNamesMatch(record.Instrument, execution.Instrument);
+        }
+
+        private bool InstrumentNamesMatch(string expectedInstrument, Instrument actualInstrument)
+        {
+            string expected = (expectedInstrument ?? string.Empty).Trim();
+            if (string.IsNullOrWhiteSpace(expected))
+                return true;
+            if (actualInstrument == null)
+                return false;
+
+            string fullName = (actualInstrument.FullName ?? string.Empty).Trim();
+            string masterName = (actualInstrument.MasterInstrument?.Name ?? string.Empty).Trim();
+
+            return expected.Equals(fullName, StringComparison.OrdinalIgnoreCase) ||
+                   expected.Equals(masterName, StringComparison.OrdinalIgnoreCase) ||
+                   (!string.IsNullOrWhiteSpace(fullName) && fullName.IndexOf(expected, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                   (!string.IsNullOrWhiteSpace(masterName) && expected.IndexOf(masterName, StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        private bool IsAccountFlatForExecutionSide(Execution execution)
+        {
+            if (execution == null || execution.Account == null || execution.Instrument == null)
+                return false;
+
+            var closedSide = GetClosedSideFromExecution(execution);
+            if (closedSide == MarketPosition.Flat)
+                return false;
+
+            foreach (var position in execution.Account.Positions)
+            {
+                if (position == null || position.Quantity == 0 || position.MarketPosition == MarketPosition.Flat)
+                    continue;
+                if (position.MarketPosition != closedSide)
+                    continue;
+                if (InstrumentNamesMatch(position.Instrument?.FullName, execution.Instrument))
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool HasMatchingOpenPosition(TradeSyncService.TradeRecord record, Account account)
+        {
+            if (record == null || account == null)
+                return false;
+
+            foreach (var position in account.Positions)
+            {
+                if (position == null || position.Quantity == 0 || position.MarketPosition == MarketPosition.Flat)
+                    continue;
+                if (position.MarketPosition != record.Side)
+                    continue;
+                if (InstrumentNamesMatch(record.Instrument, position.Instrument))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private void PublishExternalCloseForRecord(TradeSyncService.TradeRecord record, Execution execution, bool updateTradeResult, string source)
+        {
+            if (record == null || execution == null || tradeSyncService == null)
+                return;
+
+            int executionQuantity = Math.Max(1, Math.Abs((int)execution.Quantity));
+            int previousRemaining = Math.Max(0, record.RemainingQuantity);
+            if (previousRemaining <= 0)
+                return;
+
+            if (updateTradeResult)
+                UpdateTradeResult(execution, record.TradeId, record);
+
+            bool fullyClosed = executionQuantity >= previousRemaining || !HasMatchingOpenPosition(record, execution.Account);
+            if (fullyClosed)
+            {
+                RegisterManualCloseOverride(record.TradeId, "NT_EXTERNAL_FLAT", TimeSpan.FromSeconds(30));
+                tradeSyncService.PublishClosed(record.Strategy, record.TradeId);
+                LogAndPrint($"EXTERNAL_CLOSE_SYNC: Published CLOSED for orphaned trade {record.TradeId} from execution {execution.ExecutionId} ({source}).");
+                return;
+            }
+
+            int newRemaining = Math.Max(0, previousRemaining - executionQuantity);
+            if (newRemaining < previousRemaining)
+            {
+                RegisterManualCloseOverride(record.TradeId, "NT_EXTERNAL_PARTIAL", TimeSpan.FromSeconds(30));
+                tradeSyncService.PublishPartial(record.Strategy, record.TradeId, newRemaining);
+                LogAndPrint($"EXTERNAL_CLOSE_SYNC: Published PARTIAL for orphaned trade {record.TradeId}; remaining={newRemaining} from execution {execution.ExecutionId} ({source}).");
+            }
+        }
+
+        private bool TryPublishActiveNtTradeCloseFallback(Execution execution, string resolvedTradeId)
+        {
+            if (execution == null || execution.Order == null)
+                return false;
+
+            var closedSide = GetClosedSideFromExecution(execution);
+            if (closedSide == MarketPosition.Flat)
+                return false;
+
+            List<OriginalTradeDetails> candidates;
+            lock (_activeNtTradesLock)
+            {
+                candidates = activeNtTrades.Values
+                    .Where(details => details != null &&
+                                      !details.IsClosed &&
+                                      details.RemainingQuantity > 0 &&
+                                      details.MarketPosition == closedSide &&
+                                      ActiveTradeMatchesExecutionScope(details, execution))
+                    .ToList();
+            }
+
+            if (!string.IsNullOrWhiteSpace(resolvedTradeId))
+            {
+                var exact = candidates
+                    .Where(details => string.Equals(details.BaseId, resolvedTradeId, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                if (exact.Count > 0)
+                    candidates = exact;
+            }
+
+            if (candidates.Count != 1)
+                return false;
+
+            var candidate = candidates[0];
+            int executionQuantity = Math.Max(1, Math.Abs((int)execution.Quantity));
+            int previousRemaining = Math.Max(0, candidate.RemainingQuantity);
+            if (previousRemaining <= 0)
+                return false;
+
+            bool fullyClosed = executionQuantity >= previousRemaining || !HasMatchingOpenPosition(candidate, execution.Account);
+            int closeQuantity = fullyClosed ? previousRemaining : Math.Min(previousRemaining, executionQuantity);
+            var record = BuildTradeRecordFromActiveTrade(candidate);
+            UpdateTradeResult(execution, record.TradeId, record);
+            SendHedgeCloseRequest(record, closeQuantity, fullyClosed ? "NT_EXTERNAL_FLAT" : "NT_EXTERNAL_PARTIAL");
+
+            lock (_activeNtTradesLock)
+            {
+                if (activeNtTrades.TryGetValue(candidate.BaseId, out var current))
+                {
+                    current.RemainingQuantity = Math.Max(0, current.RemainingQuantity - closeQuantity);
+                    if (fullyClosed || current.RemainingQuantity <= 0)
+                    {
+                        current.IsClosed = true;
+                        current.ClosedTimestamp = DateTime.UtcNow;
+                        activeNtTrades.TryRemove(candidate.BaseId, out _);
+                    }
+                    else
+                    {
+                        activeNtTrades[candidate.BaseId] = current;
+                    }
+                }
+            }
+
+            LogAndPrint($"EXTERNAL_CLOSE_SYNC: Sent direct CLOSE_HEDGE fallback for active trade {candidate.BaseId}; qty={closeQuantity}, full={fullyClosed}.");
+            return true;
+        }
+
+        private bool ActiveTradeMatchesExecutionScope(OriginalTradeDetails details, Execution execution)
+        {
+            if (details == null || execution == null)
+                return false;
+
+            string detailsAccount = (details.NtAccountName ?? string.Empty).Trim();
+            string executionAccount = (execution.Account?.Name ?? string.Empty).Trim();
+            if (!string.IsNullOrWhiteSpace(detailsAccount) &&
+                !string.IsNullOrWhiteSpace(executionAccount) &&
+                !detailsAccount.Equals(executionAccount, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            return InstrumentNamesMatch(details.NtInstrumentSymbol, execution.Instrument);
+        }
+
+        private bool HasMatchingOpenPosition(OriginalTradeDetails details, Account account)
+        {
+            if (details == null || account == null)
+                return false;
+
+            foreach (var position in account.Positions)
+            {
+                if (position == null || position.Quantity == 0 || position.MarketPosition == MarketPosition.Flat)
+                    continue;
+                if (position.MarketPosition != details.MarketPosition)
+                    continue;
+                if (InstrumentNamesMatch(details.NtInstrumentSymbol, position.Instrument))
+                    return true;
+            }
+
+            return false;
+        }
+
+        private TradeSyncService.TradeRecord BuildTradeRecordFromActiveTrade(OriginalTradeDetails details)
+        {
+            int total = details.TotalQuantity > 0 ? details.TotalQuantity : details.Quantity;
+            int remaining = details.RemainingQuantity > 0 ? details.RemainingQuantity : total;
+            return new TradeSyncService.TradeRecord
+            {
+                TradeId = details.BaseId,
+                Strategy = null,
+                Instrument = details.NtInstrumentSymbol ?? string.Empty,
+                Side = details.MarketPosition,
+                NtQuantity = Math.Max(1, total),
+                RemainingQuantity = Math.Max(1, remaining),
+                AccountName = details.NtAccountName ?? string.Empty,
+                OpenedAtUtc = details.Timestamp == DateTime.MinValue ? DateTime.UtcNow : details.Timestamp,
+                LastUpdateUtc = DateTime.UtcNow,
+                EntryPrice = details.Price,
+                ExternalCloseOnly = true
+            };
+        }
 
     // This method replaces the problematic override that caused CS0115.
     // This is the handler for monitoredAccount.OrderUpdate.

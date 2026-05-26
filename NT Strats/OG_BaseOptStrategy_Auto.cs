@@ -163,7 +163,10 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool tradeSyncWarned;
         private readonly Dictionary<string, MultiEntrySyncGroup> multiEntrySyncGroups = new Dictionary<string, MultiEntrySyncGroup>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, DateTime> recentlyClosedTradeIds = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, DateTime> processedManualPendingExitExecutions = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
+        private readonly object manualPendingExitExecutionLock = new object();
         private const int RecentlyClosedTradeRetentionSeconds = 45;
+        private const int ManualPendingExitExecutionRetentionSeconds = 120;
 
         private bool desyncHoldActive;
         private DateTime desyncHoldActivatedAt = DateTime.MinValue;
@@ -979,6 +982,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 EnableSignalDiagnostics = false;
                 EnableTradeStoryLogging = false;
                 StartHaltedOnEnable = false;
+                FlattenOnStrategyTermination = false;
                 DemaAtrPeriod = 14;
                 DemaAtrMultiplier = 1.5;
                 UseDemaAtrTrailing = true;
@@ -1154,12 +1158,13 @@ namespace NinjaTrader.NinjaScript.Strategies
                 catch { }
 
                 bool preserveProtection = ShouldPreserveProtectionOnTerminate();
+                bool livePositionOnTerminate = Position != null && Position.MarketPosition != MarketPosition.Flat && Position.Quantity > 0;
                 if (preserveProtection)
                     StrategyLogInfo("[SAFETY] Strategy terminating while account disconnected; preserving protective orders.");
 
                 // Cancel any working entry orders so they cannot fill after disable.
                 CancelWorkingEntryOrders("strategy_terminated");
-                if (!preserveProtection)
+                if (!preserveProtection && FlattenOnStrategyTermination)
                 {
                     CancelTrackedOrdersOnShutdown("strategy_terminated");
 
@@ -1169,10 +1174,28 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (forcedClosePublished)
                         StrategyLogInfo("[SAFETY] Published forced hedge close request(s) due to strategy_terminated.");
                 }
+                else if (!preserveProtection)
+                {
+                    if (livePositionOnTerminate)
+                    {
+                        StrategyLogInfo(string.Format(
+                            "[SAFETY] Strategy terminated with live {0} {1}; preserving account position and exit orders because FlattenOnStrategyTermination=false.",
+                            Position.MarketPosition,
+                            Position.Quantity));
+                    }
+                    else
+                    {
+                        CancelTrackedOrdersOnShutdown("strategy_terminated");
+                    }
+                }
 
-                ResetTradeState(preserveProtection);
+                bool preserveRuntimeStateForLateFlat = livePositionOnTerminate && !FlattenOnStrategyTermination;
+                if (preserveRuntimeStateForLateFlat)
+                    StrategyLogInfo("[SAFETY] Keeping runtime trade state during termination so a later NT flat fill can publish CLOSE_HEDGE.");
+                else
+                    ResetTradeState(preserveProtection);
                 if (MultiStratManager.Instance != null && MultiStratManager.Instance.TradeSync != null)
-                    MultiStratManager.Instance.TradeSync.UnregisterStrategy(this);
+                    MultiStratManager.Instance.TradeSync.UnregisterStrategy(this, preserveRuntimeStateForLateFlat);
                 RemoveScaleInOverlayButtons();
                 RemoveChartTraderButtons();
                 RemoveDrawObject("BaseOptAutoChecklist");
@@ -1191,33 +1214,63 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             try
             {
-                PropertyInfo property = GetType().GetProperty("ConnectionLossHandling", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
-                if (property == null || !property.CanWrite || !property.PropertyType.IsEnum)
-                    return;
-
-                string[] preferredModes =
+                PropertyInfo property = GetWritableStrategyProperty("ConnectionLossHandling");
+                if (property != null && property.PropertyType.IsEnum)
                 {
-                    "KeepRunning",
-                    "ReconnectAndKeepRunning",
-                    "WaitUntilReconnected",
-                    "Recalculate"
-                };
+                    string[] preferredModes =
+                    {
+                        "KeepRunning",
+                        "ReconnectAndKeepRunning",
+                        "WaitUntilReconnected",
+                        "Recalculate"
+                    };
 
-                string[] enumNames = Enum.GetNames(property.PropertyType);
-                foreach (string preferredMode in preferredModes)
-                {
-                    string matchedName = enumNames.FirstOrDefault(name => string.Equals(name, preferredMode, StringComparison.OrdinalIgnoreCase));
-                    if (string.IsNullOrEmpty(matchedName))
-                        continue;
+                    string[] enumNames = Enum.GetNames(property.PropertyType);
+                    foreach (string preferredMode in preferredModes)
+                    {
+                        string matchedName = enumNames.FirstOrDefault(name => string.Equals(name, preferredMode, StringComparison.OrdinalIgnoreCase));
+                        if (string.IsNullOrEmpty(matchedName))
+                            continue;
 
-                    object value = Enum.Parse(property.PropertyType, matchedName, true);
-                    property.SetValue(this, value, null);
-                    return;
+                        object value = Enum.Parse(property.PropertyType, matchedName, true);
+                        property.SetValue(this, value, null);
+                        break;
+                    }
                 }
+
+                // Ninja still disables "keep running" strategies after MaxRestarts is exceeded.
+                // Raise the hidden default so transient feed flaps do not terminate and flatten us.
+                TrySetStrategyIntProperty("NumberRestartAttempts", 100000);
+                TrySetStrategyIntProperty("RestartsWithinMinutes", 5);
             }
             catch
             {
             }
+        }
+
+        private PropertyInfo GetWritableStrategyProperty(string propertyName)
+        {
+            PropertyInfo property = GetType().GetProperty(propertyName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (property == null || !property.CanWrite)
+                return null;
+
+            return property;
+        }
+
+        private void TrySetStrategyIntProperty(string propertyName, int value)
+        {
+            PropertyInfo property = GetWritableStrategyProperty(propertyName);
+            if (property == null)
+                return;
+
+            if (property.PropertyType == typeof(int))
+            {
+                property.SetValue(this, value, null);
+                return;
+            }
+
+            if (property.PropertyType == typeof(int?))
+                property.SetValue(this, value, null);
         }
 
         public override string DisplayName
@@ -2733,11 +2786,139 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+        private bool TryHandleManualPendingExitAccountExecution(Execution execution)
+        {
+            if (execution == null || execution.Order == null || !IsManualPendingExitOrder(execution.Order))
+                return false;
+
+            Order order = execution.Order;
+            if (order.OrderAction != OrderAction.Sell && order.OrderAction != OrderAction.BuyToCover)
+                return false;
+
+            string tradeId = ResolveManualPendingExitTradeId(order);
+            TradeRuntimeState state = null;
+            if (!string.IsNullOrWhiteSpace(tradeId))
+            {
+                if (!TryGetTradeState(tradeId, out state) || state == null)
+                {
+                    if (WasTradeRecentlyClosed(tradeId))
+                        return true;
+                }
+            }
+
+            if (state == null)
+                state = ResolveManualPendingExitStateByAction(order);
+
+            if (state == null)
+            {
+                StrategyLogInfo(string.Format("[MANUAL][PEND_EXIT] Account fill {0} could not map to a live trade state; lifecycle close not published.",
+                    order.Name ?? "<unknown>"));
+                return true;
+            }
+
+            if (state.RemainingQuantity <= 0 || WasTradeRecentlyClosed(state.TradeId))
+                return true;
+
+            if (!TryMarkManualPendingExitExecutionProcessed(execution))
+            {
+                if (Debug)
+                    StrategyLogDebug(string.Format("[MANUAL][PEND_EXIT] Duplicate account fill ignored for {0}.", order.Name ?? "<unknown>"));
+                return true;
+            }
+
+            RegisterManualCloseOverride(state.TradeId);
+            StrategyLogInfo(string.Format("[MANUAL][PEND_EXIT] Account fill {0} mappedTo={1} qty={2} price={3:F2}; publishing lifecycle close.",
+                order.Name ?? "<unknown>",
+                state.TradeId ?? "<unknown>",
+                Math.Max(1, Math.Abs((int)execution.Quantity)),
+                execution.Price));
+            HandleExitExecution(execution, state);
+            return true;
+        }
+
+        private TradeRuntimeState ResolveManualPendingExitStateByAction(Order order)
+        {
+            MarketPosition entrySide = GetManualPendingExitEntrySide(order);
+            if (entrySide == MarketPosition.Flat)
+                return null;
+
+            TradeRuntimeState activeState;
+            if (!string.IsNullOrWhiteSpace(activeTradeId) &&
+                tradeStates != null &&
+                tradeStates.TryGetValue(activeTradeId, out activeState) &&
+                activeState != null &&
+                activeState.EntrySide == entrySide &&
+                activeState.RemainingQuantity > 0)
+            {
+                return activeState;
+            }
+
+            foreach (var state in EnumerateOpenTrades(entrySide))
+            {
+                if (state != null && state.RemainingQuantity > 0)
+                    return state;
+            }
+
+            return null;
+        }
+
+        private bool TryMarkManualPendingExitExecutionProcessed(Execution execution)
+        {
+            string key = BuildManualPendingExitExecutionKey(execution);
+            if (string.IsNullOrWhiteSpace(key))
+                return true;
+
+            DateTime now = DateTime.UtcNow;
+            lock (manualPendingExitExecutionLock)
+            {
+                PruneProcessedManualPendingExitExecutions(now);
+                if (processedManualPendingExitExecutions.ContainsKey(key))
+                    return false;
+
+                processedManualPendingExitExecutions[key] = now;
+            }
+
+            return true;
+        }
+
+        private string BuildManualPendingExitExecutionKey(Execution execution)
+        {
+            if (execution == null)
+                return null;
+
+            if (!string.IsNullOrWhiteSpace(execution.ExecutionId))
+                return "exec:" + execution.ExecutionId.Trim();
+
+            Order order = execution.Order;
+            string orderId = order != null ? order.OrderId : string.Empty;
+            string orderName = order != null ? order.Name : string.Empty;
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "order:{0}|name:{1}|time:{2:O}|qty:{3}|price:{4:F5}",
+                orderId ?? string.Empty,
+                orderName ?? string.Empty,
+                execution.Time,
+                Math.Abs((int)execution.Quantity),
+                execution.Price);
+        }
+
+        private void PruneProcessedManualPendingExitExecutions(DateTime now)
+        {
+            foreach (var pair in processedManualPendingExitExecutions.ToList())
+            {
+                if ((now - pair.Value).TotalSeconds > ManualPendingExitExecutionRetentionSeconds)
+                    processedManualPendingExitExecutions.Remove(pair.Key);
+            }
+        }
+
         private void OnTrackedAccountExecutionUpdate(object sender, ExecutionEventArgs e)
         {
             try
             {
                 if (e == null || e.Execution == null || e.Execution.Order == null)
+                    return;
+
+                if (TryHandleManualPendingExitAccountExecution(e.Execution))
                     return;
 
                 string tradeId;
@@ -2785,7 +2966,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             catch (Exception ex)
             {
-                StrategyLogError($"[STRADDLE] Account execution update handler failed: {ex.Message}");
+                StrategyLogError($"[ACCOUNT] Execution update handler failed: {ex.Message}");
             }
         }
 
@@ -13875,6 +14056,11 @@ namespace NinjaTrader.NinjaScript.Strategies
             return hasPending;
         }
 
+        private bool CanPublishTradeLifecycleNow()
+        {
+            return State == State.Realtime || State == State.Terminated || shutdownInProgress;
+        }
+
         private TradeRuntimeState PrepareTradeState(string tradeId, MarketPosition side, int quantityHint, bool preserveProtectionOrders = false, bool setActiveTrade = true, bool isScaleIn = false)
         {
             if (tradeStates == null)
@@ -14309,6 +14495,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 else
                 {
+                    if (isExitAction && IsManualPendingExitOrder(execution.Order))
+                    {
+                        if (!TryMarkManualPendingExitExecutionProcessed(execution))
+                        {
+                            if (Debug)
+                                StrategyLogDebug(string.Format("[MANUAL][PEND_EXIT] Duplicate strategy fill ignored for {0}.", execution.Order.Name ?? "<unknown>"));
+                            return;
+                        }
+
+                        RegisterManualCloseOverride(state.TradeId);
+                    }
+
                     HandleExitExecution(execution, state);
                 }
 
@@ -15155,6 +15353,22 @@ namespace NinjaTrader.NinjaScript.Strategies
             return order != null && IsManualPendingExitOrderName(order.Name);
         }
 
+        private static MarketPosition GetManualPendingExitEntrySide(Order order)
+        {
+            if (order == null)
+                return MarketPosition.Flat;
+
+            switch (order.OrderAction)
+            {
+                case OrderAction.Sell:
+                    return MarketPosition.Long;
+                case OrderAction.BuyToCover:
+                    return MarketPosition.Short;
+                default:
+                    return MarketPosition.Flat;
+            }
+        }
+
         private static string GetManualPendingExitSignalSuffix(Order order)
         {
             if (order == null)
@@ -15408,7 +15622,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private void PublishPartialEvent(string tradeId, int remainingQuantity)
         {
-            if (State != State.Realtime)
+            if (!CanPublishTradeLifecycleNow())
                 return;
             TradeRuntimeState state;
             if (tradeStates != null &&
@@ -15468,7 +15682,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool PublishClosedEvent(string tradeId)
         {
-            if (State != State.Realtime)
+            if (!CanPublishTradeLifecycleNow())
                 return true;
             TradeRuntimeState state;
             if (tradeStates != null &&
@@ -16930,7 +17144,8 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         private bool PublishExternallyFlattenedTrackedCloses(string reason)
         {
-            if (tradeStates == null || tradeStates.Count == 0)
+            if ((tradeStates == null || tradeStates.Count == 0) &&
+                (multiEntrySyncGroups == null || multiEntrySyncGroups.Count == 0))
                 return false;
 
             MultiStratManager manager = MultiStratManager.Instance;
@@ -16940,30 +17155,75 @@ namespace NinjaTrader.NinjaScript.Strategies
             bool publishedAny = false;
             var attemptedTradeIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+            if (multiEntrySyncGroups != null && multiEntrySyncGroups.Count > 0)
+            {
+                foreach (var group in multiEntrySyncGroups.Values.ToList())
+                {
+                    if (group == null || string.IsNullOrWhiteSpace(group.TradeId))
+                        continue;
+                    if (!group.OpenPublished || group.ClosedPublished)
+                        continue;
+                    if (!attemptedTradeIds.Add(group.TradeId))
+                        continue;
+
+                    if (TryPublishForcedClose(manager, group.TradeId, reason, null))
+                    {
+                        publishedAny = true;
+                        group.ClosedPublished = true;
+                        group.LastPublishedRemaining = 0;
+                        foreach (var groupedState in GetMultiEntrySyncStates(group.TradeId))
+                        {
+                            if (groupedState == null)
+                                continue;
+                            groupedState.PendingClosePublish = false;
+                            groupedState.ClosePublished = true;
+                        }
+                    }
+                    else
+                    {
+                        foreach (var groupedState in GetMultiEntrySyncStates(group.TradeId))
+                        {
+                            if (groupedState != null)
+                                groupedState.PendingClosePublish = true;
+                        }
+                    }
+                }
+            }
+
+            if (tradeStates == null || tradeStates.Count == 0)
+                return publishedAny;
+
             foreach (var state in tradeStates.Values.ToList())
             {
                 if (state == null || state.IsSynthetic || state.IsManualEntry)
                     continue;
-                if (!ShouldPublishTradeLifecycle(state) || !state.OpenPublished || state.ClosePublished)
+                if (!ShouldPublishTradeLifecycle(state) || state.ClosePublished)
                     continue;
 
                 string syncTradeId = ResolveSyncTradeId(state.TradeId);
                 if (string.IsNullOrWhiteSpace(syncTradeId) || !attemptedTradeIds.Add(syncTradeId))
                     continue;
 
-                try
+                MultiEntrySyncGroup group;
+                bool hasPublishedOpen = state.OpenPublished;
+                if (TryGetMultiEntrySyncGroupByTradeId(syncTradeId, out group) && group != null)
                 {
-                    TradeSyncService.TradeRecord trackedRecord;
-                    if (!manager.TradeSync.TryGetTrade(syncTradeId, out trackedRecord) || trackedRecord == null)
-                    {
-                        StrategyLogInfo($"[AUTO][SYNC] Skip forced close for externally flattened trade {syncTradeId} (trigger={reason}): trade not tracked.");
+                    if (group.ClosedPublished)
                         continue;
-                    }
+                    hasPublishedOpen = hasPublishedOpen || group.OpenPublished;
+                }
+                if (!hasPublishedOpen)
+                    continue;
 
-                    MultiStratManager.Instance?.RegisterManualCloseOverride(syncTradeId, ExternalFlatCloseReason, TimeSpan.FromSeconds(30));
-                    manager.TradeSync.PublishClosed(this, syncTradeId);
+                if (TryPublishForcedClose(manager, syncTradeId, reason, state))
+                {
                     publishedAny = true;
-                    if (!string.IsNullOrEmpty(state.SyncTradeId))
+                    if (group != null)
+                    {
+                        group.ClosedPublished = true;
+                        group.LastPublishedRemaining = 0;
+                    }
+                    if (group != null || !string.IsNullOrEmpty(state.SyncTradeId))
                     {
                         foreach (var groupedState in GetMultiEntrySyncStates(syncTradeId))
                         {
@@ -16978,17 +17238,38 @@ namespace NinjaTrader.NinjaScript.Strategies
                         state.PendingClosePublish = false;
                         state.ClosePublished = true;
                     }
-
-                    StrategyLogInfo($"[AUTO][SYNC] Published forced close for externally flattened trade {syncTradeId} (trigger={reason}).");
-                }
-                catch (Exception ex)
-                {
-                    state.PendingClosePublish = true;
-                    StrategyLogError($"[AUTO][SYNC] Exception publishing forced close for externally flattened trade {syncTradeId} (trigger={reason}): {ex.Message}");
                 }
             }
 
             return publishedAny;
+        }
+
+        private bool TryPublishForcedClose(MultiStratManager manager, string syncTradeId, string reason, TradeRuntimeState pendingState)
+        {
+            if (manager == null || manager.TradeSync == null || string.IsNullOrWhiteSpace(syncTradeId))
+                return false;
+
+            try
+            {
+                TradeSyncService.TradeRecord trackedRecord;
+                if (!manager.TradeSync.TryGetTrade(syncTradeId, out trackedRecord) || trackedRecord == null)
+                {
+                    StrategyLogInfo($"[AUTO][SYNC] Skip forced close for externally flattened trade {syncTradeId} (trigger={reason}): trade not tracked.");
+                    return false;
+                }
+
+                MultiStratManager.Instance?.RegisterManualCloseOverride(syncTradeId, ExternalFlatCloseReason, TimeSpan.FromSeconds(30));
+                manager.TradeSync.PublishClosed(this, syncTradeId);
+                StrategyLogInfo($"[AUTO][SYNC] Published forced close for externally flattened trade {syncTradeId} (trigger={reason}).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (pendingState != null)
+                    pendingState.PendingClosePublish = true;
+                StrategyLogError($"[AUTO][SYNC] Exception publishing forced close for externally flattened trade {syncTradeId} (trigger={reason}): {ex.Message}");
+                return false;
+            }
         }
 
         private void SubmitAccountFlatten(OrderAction action, int quantity, string reason)
@@ -24222,6 +24503,9 @@ namespace NinjaTrader.NinjaScript.Strategies
 
         [NinjaScriptProperty, Display(Name = "Start Halted On Enable", GroupName = "11 - Misc", Order = 3)]
         public bool StartHaltedOnEnable { get; set; }
+
+        [NinjaScriptProperty, Display(Name = "Flatten On Strategy Termination", GroupName = "11 - Misc", Order = 4)]
+        public bool FlattenOnStrategyTermination { get; set; }
 
         [NinjaScriptProperty, Display(Name = "Enable Daily PnL Limits (DLL/DPL)", GroupName = "12 - Daily Limits", Order = 0)]
         public bool EnableDailyPnLLimits { get; set; }

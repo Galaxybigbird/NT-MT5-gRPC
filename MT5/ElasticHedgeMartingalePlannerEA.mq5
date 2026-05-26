@@ -20,16 +20,25 @@ enum PLANNER_LOT_MODE
     PlannerLotMode_AutoMaintainMinTp = 0,
     PlannerLotMode_FixedScaleInLots = 1
 };
+enum PLANNER_MAX_LOSS_MODE
+{
+    PlannerMaxLossMode_OverrideMinFinalTp = 0,
+    PlannerMaxLossMode_ShowWarning = 1
+};
 input PLANNER_DIRECTION         InpDirection                  = PlannerDirection_Short;
 input PLANNER_LEVEL_COUNT_MODE  InpLevelCountMode             = PlannerLevelCount_AutoFillToFinalSL;
 input PLANNER_LOT_MODE          InpLotMode                    = PlannerLotMode_AutoMaintainMinTp;
+input PLANNER_MAX_LOSS_MODE     InpMaxLossMode                = PlannerMaxLossMode_OverrideMinFinalTp;
 input double                    InpFinalTakeProfitPoints      = 10000.0;
 input double                    InpFinalStopLossPoints        = 25000.0;
 input double                    InpMinimumFinalTakeProfitUsd  = 25.0;
 input double                    InpInitialHedgeLot            = 0.10;
 input double                    InpLevelSpacingPoints         = 1000.0;
+input double                    InpSpacingMultiplier          = 1.00;
 input int                       InpMaxLevels                  = 6;
 input double                    InpFixedScaleInLot            = 0.10;
+input double                    InpMaxLossUsd                 = 0.0;
+input double                    InpMaxTpOverridePercent       = 70.0;
 
 struct PlannerLevel
 {
@@ -46,6 +55,7 @@ const int    PANEL_W = 760;
 const int    PANEL_H = 680;
 const int    LEVEL_ROWS_PER_PAGE = 8;
 const int    MAX_LEVELS_LIMIT = 60;
+const double MAX_LOSS_LEVEL_ZONE_FRACTION = 0.70;
 const int    CALLOUT_BASE_X_GAP = 28;
 const int    CALLOUT_LANE_STEP = 188;
 const int    CALLOUT_MAIN_GAP_Y = 18;
@@ -53,9 +63,11 @@ const int    CALLOUT_LEVEL_GAP_Y = 14;
 const int    CALLOUT_MAIN_W = 252;
 const int    CALLOUT_MAIN_H = 24;
 const int    CALLOUT_LEVEL_W = 176;
+const int    CALLOUT_LEVEL_ACTIVE_W = 304;
 const int    CALLOUT_LEVEL_H = 20;
 const int    CALLOUT_TEXT_PAD_X = 8;
 const int    CALLOUT_TEXT_PAD_Y = 3;
+const int    CALLOUT_DRAWDOWN_X = 122;
 const int    PANEL_HEADER_H = 42;
 const int    PANEL_CONTENT_MARGIN = 14;
 const int    PANEL_CONTENT_TOP = 56;
@@ -69,19 +81,25 @@ const int    PANEL_RESIZE_STEP_H = 60;
 const int    PANEL_MINIMIZED_W = 360;
 const int    PANEL_MINIMIZED_H = PANEL_HEADER_H + 2;
 const string PANEL_FONT = "Segoe UI";
+const string PANEL_FONT_BOLD = "Segoe UI Semibold";
+const string PLANNER_OBJECT_PREFIX_ROOT = "EHMP_";
 
 string g_prefix = "";
 
 PLANNER_DIRECTION         g_direction;
 PLANNER_LEVEL_COUNT_MODE  g_level_count_mode;
 PLANNER_LOT_MODE          g_lot_mode;
+PLANNER_MAX_LOSS_MODE     g_max_loss_mode;
 double                    g_final_tp_points = 0.0;
 double                    g_final_sl_points = 0.0;
 double                    g_min_final_tp_usd = 0.0;
 double                    g_initial_lot = 0.0;
 double                    g_spacing_points = 0.0;
+double                    g_spacing_multiplier = 1.0;
 int                       g_max_levels = 0;
 double                    g_fixed_scale_in_lot = 0.0;
+double                    g_max_loss_usd = 0.0;
+double                    g_max_tp_override_percent = 70.0;
 
 PlannerLevel g_levels[];
 
@@ -161,6 +179,16 @@ string LevelCountModeButtonText()
 string LotModeButtonText()
 {
     return (g_lot_mode == PlannerLotMode_AutoMaintainMinTp ? "Auto Min TP" : "Fixed Lots");
+}
+
+string MaxLossModeName()
+{
+    return (g_max_loss_mode == PlannerMaxLossMode_OverrideMinFinalTp ? "OverrideMinFinalTP" : "ShowWarning");
+}
+
+string MaxLossModeButtonText()
+{
+    return (g_max_loss_mode == PlannerMaxLossMode_OverrideMinFinalTp ? "Override TP" : "Warn Only");
 }
 
 int DirectionSign()
@@ -243,6 +271,20 @@ double NormalizeLotUp(double volume)
     return NormalizeDouble(normalized, 8);
 }
 
+double NormalizeLotDown(double volume)
+{
+    if(volume <= 0.0)
+        return 0.0;
+
+    double steps = MathFloor((volume / g_lot_step) + 1e-10);
+    double normalized = NormalizeDouble(steps * g_lot_step, 8);
+    if(normalized < g_min_lot)
+        return 0.0;
+    if(normalized > g_max_lot)
+        normalized = g_max_lot;
+    return NormalizeDouble(normalized, 8);
+}
+
 double NormalizeManualLevelLot(double volume)
 {
     if(volume <= 0.0)
@@ -269,9 +311,76 @@ string FormatUsd(const double value)
     return StringFormat("-$%.2f", MathAbs(value));
 }
 
+string FormatDrawdownUsd(const double value)
+{
+    if(value <= 0.0)
+        return StringFormat("DD -$%.2f", MathAbs(value));
+    return StringFormat("DD +$%.2f", value);
+}
+
 string FormatPoints(const double value)
 {
     return DoubleToString(value, 1) + " pts";
+}
+
+bool MaxLossEnabled()
+{
+    return (g_max_loss_usd > 0.0);
+}
+
+double MaxLossCapUsd()
+{
+    return MathAbs(g_max_loss_usd);
+}
+
+double NormalizedTpOverridePercent()
+{
+    if(g_max_tp_override_percent < 0.0)
+        return 0.0;
+    if(g_max_tp_override_percent > 100.0)
+        return 100.0;
+    return g_max_tp_override_percent;
+}
+
+double BaseTradeTpUsd()
+{
+    double base_tp_price = g_entry_price + (DirectionSign() * g_final_tp_points * _Point);
+    return BasketLegUsd(g_entry_price, g_initial_lot, base_tp_price);
+}
+
+double OverrideTpFloorUsd()
+{
+    double base_tp_usd = BaseTradeTpUsd();
+    if(base_tp_usd <= 0.0)
+        return 0.0;
+
+    double remaining_fraction = 1.0 - (NormalizedTpOverridePercent() / 100.0);
+    if(remaining_fraction < 0.0)
+        remaining_fraction = 0.0;
+    if(remaining_fraction > 1.0)
+        remaining_fraction = 1.0;
+
+    return base_tp_usd * remaining_fraction;
+}
+
+bool MaxLossOverridesMinTp()
+{
+    return (g_max_loss_mode == PlannerMaxLossMode_OverrideMinFinalTp);
+}
+
+double EffectiveSpacingMultiplier()
+{
+    if(g_spacing_multiplier < 1.0)
+        return 1.0;
+    return g_spacing_multiplier;
+}
+
+void CopyDoubleArray(const double &src[], double &dest[])
+{
+    int count = ArraySize(src);
+    ArrayResize(dest, count);
+    for(int i = 0; i < count; i++)
+        dest[i] = src[i];
 }
 
 string TrimSpaces(const string value)
@@ -368,6 +477,13 @@ double CurrentDeepestConsumedDistance()
     return MathMax(0.0, g_levels[g_consumed_levels - 1].distance_points);
 }
 
+int CurrentMartingaleLevelIndex()
+{
+    if(g_consumed_levels <= 0 || g_consumed_levels > ArraySize(g_levels))
+        return -1;
+    return g_consumed_levels - 1;
+}
+
 double ComputeCurrentTpPrice()
 {
     double deepest = CurrentDeepestConsumedDistance();
@@ -397,6 +513,36 @@ double BasketUsdAtPrice(const double exit_price, const int active_levels)
     return total;
 }
 
+double CurrentMartingaleDrawdownUsd()
+{
+    int idx = CurrentMartingaleLevelIndex();
+    if(idx < 0)
+        return 0.0;
+    return BasketUsdAtPrice(g_levels[idx].price, g_consumed_levels);
+}
+
+string CurrentMartingaleDrawdownText()
+{
+    int idx = CurrentMartingaleLevelIndex();
+    if(idx < 0)
+        return "";
+    return FormatDrawdownUsd(CurrentMartingaleDrawdownUsd());
+}
+
+double CurrentOpenLots()
+{
+    double total = g_initial_lot;
+    int count = MathMin(g_consumed_levels, ArraySize(g_levels));
+    for(int i = 0; i < count; i++)
+        total += g_levels[i].lot;
+    return NormalizeDouble(total, 8);
+}
+
+string CurrentOpenLotsText()
+{
+    return StringFormat("Open Lots: %.4f", CurrentOpenLots());
+}
+
 double GeneratedBasketUsdAtPrice(const double &distances[], const double &lots[], const int active_levels, const double exit_price)
 {
     double total = BasketLegUsd(g_entry_price, g_initial_lot, exit_price);
@@ -411,19 +557,99 @@ int MaxLevelsBeforeSl()
     if(g_spacing_points <= 0.0 || g_final_sl_points <= 0.0)
         return 0;
 
-    int theoretical = (int)MathFloor((g_final_sl_points - 1e-6) / g_spacing_points);
-    while(theoretical > 0 && (theoretical * g_spacing_points) >= (g_final_sl_points - 1e-6))
-        theoretical--;
-    if(theoretical < 0)
-        theoretical = 0;
-    return MathMin(theoretical, MAX_LEVELS_LIMIT);
+    int count = 0;
+    double distance = 0.0;
+    double gap = g_spacing_points;
+    double multiplier = EffectiveSpacingMultiplier();
+    double max_distance = g_final_sl_points - 1e-6;
+
+    while(count < MAX_LEVELS_LIMIT)
+    {
+        distance += gap;
+        if(distance >= max_distance)
+            break;
+
+        count++;
+        gap *= multiplier;
+        if(gap <= 0.0 || gap > g_final_sl_points * 1000.0)
+            break;
+    }
+
+    return count;
+}
+
+double DistanceFactorSum(const int level_count)
+{
+    if(level_count <= 0)
+        return 0.0;
+
+    double sum = 0.0;
+    double factor = 1.0;
+    double multiplier = EffectiveSpacingMultiplier();
+    for(int i = 0; i < level_count; i++)
+    {
+        sum += factor;
+        if(i < level_count - 1)
+            factor *= multiplier;
+        if(factor > 1e100)
+            return 1e100;
+    }
+    return sum;
+}
+
+double MaxBaseSpacingInsideMaxLossZone(const int level_count)
+{
+    if(level_count <= 0 || g_final_sl_points <= 0.0)
+        return 0.0;
+
+    double factor_sum = DistanceFactorSum(level_count);
+    if(factor_sum <= 0.0)
+        return 0.0;
+
+    double available_points = g_final_sl_points * MAX_LOSS_LEVEL_ZONE_FRACTION;
+    if(available_points <= 0.0)
+        available_points = g_final_sl_points - 1.0;
+    if(available_points <= 0.0)
+        return 0.0;
+
+    return available_points / factor_sum;
+}
+
+void BuildDistancesForBaseSpacing(const int level_count, const double base_spacing_points, double &distances[])
+{
+    ArrayResize(distances, level_count);
+    double distance = 0.0;
+    double gap = base_spacing_points;
+    double multiplier = EffectiveSpacingMultiplier();
+    for(int i = 0; i < level_count; i++)
+    {
+        distance += gap;
+        distances[i] = distance;
+        gap *= multiplier;
+    }
 }
 
 void BuildDistances(const int level_count, double &distances[])
 {
-    ArrayResize(distances, level_count);
-    for(int i = 0; i < level_count; i++)
-        distances[i] = g_spacing_points * (i + 1);
+    BuildDistancesForBaseSpacing(level_count, g_spacing_points, distances);
+}
+
+bool BuildMaxLossCandidateDistances(const int level_count, double &distances[], double &out_base_spacing)
+{
+    out_base_spacing = g_spacing_points;
+    if(level_count <= 0)
+    {
+        ArrayResize(distances, 0);
+        return true;
+    }
+
+    double max_base_spacing = MaxBaseSpacingInsideMaxLossZone(level_count);
+    if(max_base_spacing <= 0.0)
+        return false;
+
+    out_base_spacing = max_base_spacing;
+    BuildDistancesForBaseSpacing(level_count, out_base_spacing, distances);
+    return true;
 }
 
 bool AttemptSolveAutoLots(const int level_count,
@@ -434,6 +660,9 @@ bool AttemptSolveAutoLots(const int level_count,
                           string &out_note)
 {
     ArrayResize(out_lots, level_count);
+    for(int reset = 0; reset < level_count; reset++)
+        out_lots[reset] = 0.0;
+
     out_risk_abs = 0.0;
     out_last_stage_tp_usd = BasketLegUsd(g_entry_price, g_initial_lot, ComputeCurrentTpPrice());
     out_note = "";
@@ -446,17 +675,41 @@ bool AttemptSolveAutoLots(const int level_count,
 
     bool feasible = true;
     double sl_price = ComputeCurrentSlPrice();
+    bool max_loss_enabled = MaxLossEnabled();
+    bool override_min_tp = (max_loss_enabled && MaxLossOverridesMinTp());
+    double max_loss_cap = MaxLossCapUsd();
+    double override_tp_floor_usd = (override_min_tp ? OverrideTpFloorUsd() : g_min_final_tp_usd);
+    double base_risk_abs = MathAbs(GeneratedBasketUsdAtPrice(distances, out_lots, 0, sl_price));
+    if(max_loss_enabled && base_risk_abs > max_loss_cap + 1e-6)
+    {
+        out_risk_abs = base_risk_abs;
+        if(override_min_tp)
+        {
+            AppendLine(out_note, StringFormat("Initial hedge alone projects %s at final SL, above max loss -$%.2f.",
+                                              FormatUsd(-base_risk_abs),
+                                              max_loss_cap));
+            return false;
+        }
+    }
 
     if(level_count <= 0)
     {
         double base_tp = GeneratedBasketUsdAtPrice(distances, out_lots, 0, g_entry_price + (DirectionSign() * g_final_tp_points * _Point));
         out_last_stage_tp_usd = base_tp;
-        out_risk_abs = MathAbs(GeneratedBasketUsdAtPrice(distances, out_lots, 0, sl_price));
+        out_risk_abs = base_risk_abs;
         if(base_tp + 1e-6 < g_min_final_tp_usd)
         {
-            out_note = StringFormat("Base trade only reaches %s at TP, below target %s.",
-                                    FormatUsd(base_tp),
-                                    FormatUsd(g_min_final_tp_usd));
+            AppendLine(out_note, StringFormat("Base trade only reaches %s at TP, below target %s.",
+                                              FormatUsd(base_tp),
+                                              FormatUsd(g_min_final_tp_usd)));
+            if(!override_min_tp)
+                feasible = false;
+        }
+        if(override_min_tp && base_tp + 1e-6 < override_tp_floor_usd)
+        {
+            AppendLine(out_note, StringFormat("Base trade TP %s is below override floor %s.",
+                                              FormatUsd(base_tp),
+                                              FormatUsd(override_tp_floor_usd)));
             feasible = false;
         }
         return feasible;
@@ -482,12 +735,48 @@ bool AttemptSolveAutoLots(const int level_count,
         if(required_lot < g_min_lot)
             required_lot = g_min_lot;
 
+        bool lot_capped_by_max_loss = false;
+        double max_lot_for_risk = g_max_lot;
+        if(override_min_tp)
+        {
+            double existing_risk_abs = MathAbs(GeneratedBasketUsdAtPrice(distances, out_lots, i, sl_price));
+            double new_leg_risk_per_lot = MathAbs(BasketLegUsd(PriceFromAdverseDistance(distances[i]), 1.0, sl_price));
+            if(new_leg_risk_per_lot <= 0.0)
+            {
+                feasible = false;
+                AppendLine(out_note, StringFormat("Level %d has non-positive per-lot final SL risk.", i + 1));
+                out_lots[i] = 0.0;
+                continue;
+            }
+
+            max_lot_for_risk = (max_loss_cap - existing_risk_abs) / new_leg_risk_per_lot;
+            if(max_lot_for_risk < g_min_lot - 1e-8)
+            {
+                feasible = false;
+                AppendLine(out_note, StringFormat("Level %d cannot fit the minimum tradable lot inside max loss -$%.2f.",
+                                                  i + 1,
+                                                  max_loss_cap));
+                out_lots[i] = 0.0;
+                continue;
+            }
+
+            if(required_lot > max_lot_for_risk)
+            {
+                required_lot = max_lot_for_risk;
+                lot_capped_by_max_loss = true;
+            }
+        }
+
         double normalized_lot = NormalizeLotUp(required_lot);
+        if(max_loss_enabled && override_min_tp && normalized_lot > max_lot_for_risk + 1e-8)
+            normalized_lot = NormalizeLotDown(max_lot_for_risk);
+
         if(normalized_lot <= 0.0)
         {
-            normalized_lot = g_min_lot;
             feasible = false;
             AppendLine(out_note, StringFormat("Level %d could not be normalized to a tradable lot.", i + 1));
+            out_lots[i] = 0.0;
+            continue;
         }
         if(normalized_lot > g_max_lot + 1e-8)
         {
@@ -500,17 +789,42 @@ bool AttemptSolveAutoLots(const int level_count,
 
         double stage_profit = GeneratedBasketUsdAtPrice(distances, out_lots, i + 1, stage_tp_price);
         out_last_stage_tp_usd = stage_profit;
-        if(stage_profit + 1e-6 < g_min_final_tp_usd)
+        if(override_min_tp && stage_profit + 1e-6 < override_tp_floor_usd)
         {
             feasible = false;
+            AppendLine(out_note, StringFormat("Level %d TP resolves to %s below override floor %s.",
+                                              i + 1,
+                                              FormatUsd(stage_profit),
+                                              FormatUsd(override_tp_floor_usd)));
+        }
+        if(stage_profit + 1e-6 < g_min_final_tp_usd)
+        {
+            if(!override_min_tp)
+            {
+                feasible = false;
+            }
             AppendLine(out_note, StringFormat("Level %d TP resolves to %s below target %s.",
                                               i + 1,
                                               FormatUsd(stage_profit),
                                               FormatUsd(g_min_final_tp_usd)));
+            if(lot_capped_by_max_loss)
+                AppendLine(out_note, StringFormat("Level %d lot was reduced to keep projected final SL within -$%.2f.",
+                                                  i + 1,
+                                                  max_loss_cap));
         }
     }
 
     out_risk_abs = MathAbs(GeneratedBasketUsdAtPrice(distances, out_lots, level_count, sl_price));
+    if(max_loss_enabled && out_risk_abs > max_loss_cap + 1e-6)
+    {
+        if(override_min_tp)
+        {
+            AppendLine(out_note, StringFormat("Projected final SL %s exceeds max loss -$%.2f.",
+                                              FormatUsd(-out_risk_abs),
+                                              max_loss_cap));
+            feasible = false;
+        }
+    }
     return feasible;
 }
 
@@ -578,6 +892,19 @@ void ValidateCurrentPlan()
         prev_distance = distance;
     }
 
+    if(levels_ok && MaxLossEnabled())
+    {
+        double projected_full_sl_abs = MathAbs(BasketUsdAtPrice(ComputeCurrentSlPrice(), ArraySize(g_levels)));
+        if(projected_full_sl_abs > MaxLossCapUsd() + 1e-6)
+        {
+            g_validation_warning = StringFormat("Projected full-ladder SL %s exceeds max loss -$%.2f.",
+                                                FormatUsd(-projected_full_sl_abs),
+                                                MaxLossCapUsd());
+            if(MaxLossOverridesMinTp())
+                levels_ok = false;
+        }
+    }
+
     if(g_custom_mode)
         g_generated_feasible = false;
 
@@ -618,13 +945,6 @@ void RebuildGeneratedPlanner()
     if(g_entry_price <= 0.0)
         g_entry_price = AnchorPrice();
 
-    int max_before_sl = MaxLevelsBeforeSl();
-    int chosen_count = 0;
-    double distances[];
-    double chosen_lots[];
-    ArrayResize(distances, 0);
-    ArrayResize(chosen_lots, 0);
-
     if(g_spacing_points <= 0.0)
     {
         g_generated_feasible = false;
@@ -633,10 +953,40 @@ void RebuildGeneratedPlanner()
         return;
     }
 
+    if(g_spacing_multiplier < 1.0)
+    {
+        g_spacing_multiplier = 1.0;
+        AppendLine(g_plan_warning, "Spacing multiplier was floored at 1.00.");
+    }
+
+    if(g_max_loss_usd < 0.0)
+    {
+        g_max_loss_usd = MathAbs(g_max_loss_usd);
+        AppendLine(g_plan_warning, "Max loss was converted to a positive USD amount.");
+    }
+
+    if(g_max_tp_override_percent < 0.0)
+    {
+        g_max_tp_override_percent = 0.0;
+        AppendLine(g_plan_warning, "Max TP override was floored at 0%.");
+    }
+    if(g_max_tp_override_percent > 100.0)
+    {
+        g_max_tp_override_percent = 100.0;
+        AppendLine(g_plan_warning, "Max TP override was capped at 100%.");
+    }
+
+    int max_before_sl = MaxLevelsBeforeSl();
+    int chosen_count = 0;
+    double distances[];
+    double chosen_lots[];
+    ArrayResize(distances, 0);
+    ArrayResize(chosen_lots, 0);
+
     if(g_level_count_mode == PlannerLevelCount_AutoFillToFinalSL)
     {
         chosen_count = max_before_sl;
-        if(chosen_count == MAX_LEVELS_LIMIT && (chosen_count * g_spacing_points) < g_final_sl_points - 1e-6)
+        if(chosen_count == MAX_LEVELS_LIMIT)
             AppendLine(g_plan_warning, StringFormat("Auto-fill was truncated at the internal %d-level limit.", MAX_LEVELS_LIMIT));
     }
     else
@@ -657,7 +1007,79 @@ void RebuildGeneratedPlanner()
 
     if(g_lot_mode == PlannerLotMode_AutoMaintainMinTp)
     {
-        if(g_level_count_mode == PlannerLevelCount_UserMaxLevels && chosen_count > 0)
+        if(MaxLossEnabled() && MaxLossOverridesMinTp())
+        {
+            double best_risk = 1e100;
+            double best_base_spacing = g_spacing_points;
+            int best_count = -1;
+            double best_distances[];
+            double best_lots[];
+            string best_note = "";
+
+            for(int candidate = chosen_count; candidate >= 0; candidate--)
+            {
+                double candidate_distances[];
+                double candidate_lots[];
+                double candidate_base_spacing = g_spacing_points;
+                double risk_abs = 0.0;
+                double last_tp_usd = 0.0;
+                string note = "";
+
+                if(!BuildMaxLossCandidateDistances(candidate, candidate_distances, candidate_base_spacing))
+                    continue;
+
+                bool feasible = AttemptSolveAutoLots(candidate, candidate_distances, candidate_lots, risk_abs, last_tp_usd, note);
+                if(feasible && risk_abs <= MaxLossCapUsd() + 1e-6)
+                {
+                    best_risk = risk_abs;
+                    best_count = candidate;
+                    best_base_spacing = candidate_base_spacing;
+                    best_note = note;
+                    CopyDoubleArray(candidate_distances, best_distances);
+                    CopyDoubleArray(candidate_lots, best_lots);
+                    break;
+                }
+            }
+
+            if(best_count >= 0)
+            {
+                chosen_count = best_count;
+                CopyDoubleArray(best_distances, distances);
+                CopyDoubleArray(best_lots, chosen_lots);
+                g_generated_feasible = true;
+                if(chosen_count == 0)
+                    g_solver_status = StringFormat("Max loss mode selected base trade only; projected final SL %s / cap -$%.2f.",
+                                                   FormatUsd(-best_risk),
+                                                   MaxLossCapUsd());
+                else
+                    g_solver_status = StringFormat("Max loss mode selected %d level(s); projected final SL %s / cap -$%.2f.",
+                                                   chosen_count,
+                                                   FormatUsd(-best_risk),
+                                                   MaxLossCapUsd());
+                if(best_base_spacing > g_spacing_points + 1e-6)
+                    AppendLine(g_plan_warning, StringFormat("Max loss mode widened base spacing to %.1f pts.", best_base_spacing));
+                if(best_note != "")
+                    AppendLine(g_plan_warning, best_note);
+            }
+            else
+            {
+                double fallback_risk = 0.0;
+                double fallback_tp = 0.0;
+                string fallback_note = "";
+                double fallback_spacing = g_spacing_points;
+                BuildMaxLossCandidateDistances(chosen_count, distances, fallback_spacing);
+                AttemptSolveAutoLots(chosen_count, distances, chosen_lots, fallback_risk, fallback_tp, fallback_note);
+                g_generated_feasible = false;
+                g_solver_status = StringFormat("No max-loss compliant auto ladder found up to %d level(s). Showing the %d-level attempt.",
+                                               MathMax(1, chosen_count),
+                                               chosen_count);
+                if(fallback_spacing > g_spacing_points + 1e-6)
+                    AppendLine(g_plan_warning, StringFormat("Fallback widened base spacing to %.1f pts.", fallback_spacing));
+                if(fallback_note != "")
+                    AppendLine(g_plan_warning, fallback_note);
+            }
+        }
+        else if(g_level_count_mode == PlannerLevelCount_UserMaxLevels && chosen_count > 0)
         {
             double best_risk = 1e100;
             int best_count = -1;
@@ -767,6 +1189,19 @@ void RebuildGeneratedPlanner()
                                                         FormatUsd(first_below_value),
                                                         FormatUsd(g_min_final_tp_usd)));
         }
+
+        if(MaxLossEnabled())
+        {
+            double fixed_risk_abs = MathAbs(GeneratedBasketUsdAtPrice(distances, chosen_lots, chosen_count, ComputeCurrentSlPrice()));
+            if(fixed_risk_abs > MaxLossCapUsd() + 1e-6)
+            {
+                AppendLine(g_plan_warning, StringFormat("Fixed lot mode projects %s at final SL, above max loss -$%.2f.",
+                                                        FormatUsd(-fixed_risk_abs),
+                                                        MaxLossCapUsd()));
+                if(MaxLossOverridesMinTp())
+                    g_generated_feasible = false;
+            }
+        }
     }
 
     ArrayResize(g_levels, chosen_count);
@@ -815,6 +1250,14 @@ void CycleLotMode()
     g_lot_mode = (g_lot_mode == PlannerLotMode_AutoMaintainMinTp
         ? PlannerLotMode_FixedScaleInLots
         : PlannerLotMode_AutoMaintainMinTp);
+    ApplyInputChangeAndRebuild();
+}
+
+void CycleMaxLossMode()
+{
+    g_max_loss_mode = (g_max_loss_mode == PlannerMaxLossMode_OverrideMinFinalTp
+        ? PlannerMaxLossMode_ShowWarning
+        : PlannerMaxLossMode_OverrideMinFinalTp);
     ApplyInputChangeAndRebuild();
 }
 
@@ -1031,6 +1474,18 @@ void CreateOrUpdateScrolledLabel(const string name,
     CreateOrUpdateLabel(name, ContentScreenX(content_x), ContentScreenY(content_y), text, clr, font_size);
 }
 
+void CreateOrUpdateScrolledBoldLabel(const string name,
+                                     const int content_x,
+                                     const int content_y,
+                                     const string text,
+                                     const color clr,
+                                     const int font_size)
+{
+    if(!ContentPointVisible(content_x, content_y))
+        return;
+    CreateOrUpdateBoldLabel(name, ContentScreenX(content_x), ContentScreenY(content_y), text, clr, font_size, 5);
+}
+
 void CreateOrUpdateScrolledMultilineLabelBlock(const string base_name,
                                                const int content_x,
                                                const int content_y,
@@ -1190,14 +1645,41 @@ void HandlePanelResizeDrag(const string name)
     ClampPanelScroll();
 }
 
+void DeletePlannerObjectsByPrefix(const string prefix)
+{
+    if(prefix == "")
+        return;
+
+    ObjectsDeleteAll(0, prefix, -1, -1);
+
+    // Fallback for any objects that were left behind by older builds or a failed queued delete.
+    for(int pass = 0; pass < 3; pass++)
+    {
+        bool deleted = false;
+        for(int i = ObjectsTotal(0, -1, -1) - 1; i >= 0; i--)
+        {
+            string name = ObjectName(0, i, -1, -1);
+            if(StartsWith(name, prefix))
+            {
+                ObjectSetInteger(0, name, OBJPROP_HIDDEN, false);
+                ObjectSetInteger(0, name, OBJPROP_SELECTABLE, true);
+                ObjectSetInteger(0, name, OBJPROP_SELECTED, false);
+                ObjectDelete(0, name);
+                deleted = true;
+            }
+        }
+
+        if(!deleted)
+            break;
+    }
+}
+
 void DeletePlannerObjects()
 {
-    for(int i = ObjectsTotal(0) - 1; i >= 0; i--)
-    {
-        string name = ObjectName(0, i);
-        if(StartsWith(name, g_prefix))
-            ObjectDelete(0, name);
-    }
+    if(g_prefix != "")
+        DeletePlannerObjectsByPrefix(g_prefix);
+
+    DeletePlannerObjectsByPrefix(PLANNER_OBJECT_PREFIX_ROOT);
 }
 
 void CreateOrUpdatePanelBackground(const string name, const int x, const int y, const int w, const int h, const color bg, const color border)
@@ -1235,6 +1717,30 @@ void CreateOrUpdateLabel(const string name, const int x, const int y, const stri
     ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
     ObjectSetString(0, name, OBJPROP_TEXT, text);
     ObjectSetInteger(0, name, OBJPROP_ZORDER, 2);
+}
+
+void CreateOrUpdateBoldLabel(const string name,
+                             const int x,
+                             const int y,
+                             const string text,
+                             const color clr,
+                             const int font_size,
+                             const int zorder)
+{
+    if(ObjectFind(0, name) < 0)
+        ObjectCreate(0, name, OBJ_LABEL, 0, 0, 0);
+
+    ObjectSetInteger(0, name, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+    ObjectSetInteger(0, name, OBJPROP_XDISTANCE, x);
+    ObjectSetInteger(0, name, OBJPROP_YDISTANCE, y);
+    ObjectSetInteger(0, name, OBJPROP_COLOR, clr);
+    ObjectSetInteger(0, name, OBJPROP_BACK, false);
+    ObjectSetInteger(0, name, OBJPROP_SELECTABLE, false);
+    ObjectSetInteger(0, name, OBJPROP_HIDDEN, true);
+    ObjectSetString(0, name, OBJPROP_FONT, PANEL_FONT_BOLD);
+    ObjectSetInteger(0, name, OBJPROP_FONTSIZE, font_size);
+    ObjectSetString(0, name, OBJPROP_TEXT, text);
+    ObjectSetInteger(0, name, OBJPROP_ZORDER, zorder);
 }
 
 void CreateOrUpdateMultilineLabelBlock(const string base_name,
@@ -1427,27 +1933,25 @@ bool ResolveDraggedLabelPrice(const string object_name, const int popup_h, doubl
     return true;
 }
 
-void CreateOrUpdatePriceText(const string base_name,
-                             const double price,
-                             const string text,
-                             const color text_clr,
-                             const color bg_clr,
-                             const int popup_w,
-                             const int popup_h,
-                             const int lane_index,
-                             const int gap_y)
+bool ResolvePriceTextLayout(const double price,
+                            const int popup_w,
+                            const int popup_h,
+                            const int lane_index,
+                            const int gap_y,
+                            int &out_x,
+                            int &out_y)
 {
     int price_x = 0;
     int price_y = 0;
     if(!ResolvePriceLabelScreenPoint(price, price_x, price_y))
-        return;
+        return false;
 
     long chart_width_long = 0;
     long chart_height_long = 0;
     if(!ChartGetInteger(0, CHART_WIDTH_IN_PIXELS, 0, chart_width_long))
-        return;
+        return false;
     if(!ChartGetInteger(0, CHART_HEIGHT_IN_PIXELS, 0, chart_height_long))
-        return;
+        return false;
 
     int chart_width = (int)chart_width_long;
     int chart_height = (int)chart_height_long;
@@ -1477,6 +1981,26 @@ void CreateOrUpdatePriceText(const string base_name,
         else
             desired_y = chart_height - popup_h - 8;
     }
+
+    out_x = desired_x;
+    out_y = desired_y;
+    return true;
+}
+
+void CreateOrUpdatePriceText(const string base_name,
+                             const double price,
+                             const string text,
+                             const color text_clr,
+                             const color bg_clr,
+                             const int popup_w,
+                             const int popup_h,
+                             const int lane_index,
+                             const int gap_y)
+{
+    int desired_x = 0;
+    int desired_y = 0;
+    if(!ResolvePriceTextLayout(price, popup_w, popup_h, lane_index, gap_y, desired_x, desired_y))
+        return;
 
     string bg_name = base_name + "_Bg";
     string text_name = base_name + "_Text";
@@ -1513,6 +2037,31 @@ void CreateOrUpdatePriceText(const string base_name,
     ObjectSetInteger(0, text_name, OBJPROP_ZORDER, 9);
 }
 
+void CreateOrUpdatePriceDrawdownText(const string name,
+                                     const double price,
+                                     const string text,
+                                     const int popup_w,
+                                     const int popup_h,
+                                     const int lane_index,
+                                     const int gap_y)
+{
+    if(text == "")
+        return;
+
+    int desired_x = 0;
+    int desired_y = 0;
+    if(!ResolvePriceTextLayout(price, popup_w, popup_h, lane_index, gap_y, desired_x, desired_y))
+        return;
+
+    CreateOrUpdateBoldLabel(name,
+                            desired_x + CALLOUT_DRAWDOWN_X,
+                            desired_y + CALLOUT_TEXT_PAD_Y,
+                            text,
+                            clrRed,
+                            9,
+                            11);
+}
+
 string SummaryText()
 {
     string text = "";
@@ -1521,6 +2070,12 @@ string SummaryText()
     AppendLine(text, StringFormat("Modes: %s | %s",
                                   (g_level_count_mode == PlannerLevelCount_AutoFillToFinalSL ? "Auto Fill" : "User Max"),
                                   (g_lot_mode == PlannerLotMode_AutoMaintainMinTp ? "Auto Min TP" : "Fixed Lots")));
+    if(MaxLossEnabled())
+    {
+        AppendLine(text, StringFormat("Max Loss: -$%.2f | %s", MaxLossCapUsd(), MaxLossModeButtonText()));
+        if(MaxLossOverridesMinTp())
+            AppendLine(text, StringFormat("TP Floor: %s", FormatUsd(OverrideTpFloorUsd())));
+    }
     AppendLine(text, StringFormat("Entry: %s", FormatPrice(g_entry_price)));
     AppendLine(text, StringFormat("TP: %s | %s", FormatUsd(g_last_tp_usd), FormatPoints(g_last_tp_points_from_entry)));
     AppendLine(text, StringFormat("SL: %s | %s", FormatUsd(g_last_sl_usd), FormatPoints(g_last_sl_points_from_entry)));
@@ -1537,6 +2092,7 @@ string SummaryText()
 string WarningText()
 {
     string text = "";
+    AppendLine(text, CurrentOpenLotsText());
     if(g_solver_status != "")
         AppendLine(text, g_solver_status);
     if(g_plan_warning != "")
@@ -1605,10 +2161,10 @@ void RenderPanel()
     int row_y = 10;
     int row_h = (compact ? 28 : 30);
     int input_y = row_y + row_h * 3 + 18;
-    int input_field_rows = 7;
+    int input_field_rows = 11;
     int input_h = input_y + (input_field_rows * row_h) + 18;
     int summary_h = (stacked ? (compact ? 190 : 168) : 214);
-    int status_h = (compact ? 94 : 72);
+    int status_h = (compact ? 114 : 94);
     int action_h = (split_action_rows ? 104 : 72);
 
     int summary_x = (stacked ? 0 : left_w + section_gap);
@@ -1676,12 +2232,28 @@ void RenderPanel()
     CreateOrUpdateScrolledEdit(Obj("EditSpacing"), value_x, input_y, input_value_w, 24, DoubleToString(g_spacing_points, 1));
     input_y += row_h;
 
+    CreateOrUpdateScrolledLabel(Obj("LblSpacingMultiplier"), label_x, input_y + 6, "Space Multiplier", clrGainsboro, 10);
+    CreateOrUpdateScrolledEdit(Obj("EditSpacingMultiplier"), value_x, input_y, input_value_w, 24, DoubleToString(g_spacing_multiplier, 2));
+    input_y += row_h;
+
     CreateOrUpdateScrolledLabel(Obj("LblMaxLevels"), label_x, input_y + 6, "Max Levels", clrGainsboro, 10);
     CreateOrUpdateScrolledEdit(Obj("EditMaxLevels"), value_x, input_y, input_value_w, 24, IntegerToString(g_max_levels));
     input_y += row_h;
 
     CreateOrUpdateScrolledLabel(Obj("LblFixedLot"), label_x, input_y + 6, "Fixed Scale-In Lot", clrGainsboro, 10);
     CreateOrUpdateScrolledEdit(Obj("EditFixedLot"), value_x, input_y, input_value_w, 24, DoubleToString(g_fixed_scale_in_lot, 4));
+    input_y += row_h;
+
+    CreateOrUpdateScrolledLabel(Obj("LblMaxLossUsd"), label_x, input_y + 6, "Max Loss ($)", clrGainsboro, 10);
+    CreateOrUpdateScrolledEdit(Obj("EditMaxLossUsd"), value_x, input_y, input_value_w, 24, DoubleToString(g_max_loss_usd, 2));
+    input_y += row_h;
+
+    CreateOrUpdateScrolledLabel(Obj("LblMaxTpOverride"), label_x, input_y + 6, "Max TP Override (%)", clrGainsboro, 10);
+    CreateOrUpdateScrolledEdit(Obj("EditMaxTpOverride"), value_x, input_y, input_value_w, 24, DoubleToString(g_max_tp_override_percent, 1));
+    input_y += row_h;
+
+    CreateOrUpdateScrolledLabel(Obj("LblMaxLossMode"), label_x, input_y + 6, "Max Loss Mode", clrGainsboro, 10);
+    CreateOrUpdateScrolledButton(Obj("BtnMaxLossMode"), value_x, input_y, input_value_w, 24, MaxLossModeButtonText(), clrDimGray, clrWhite);
 
     int action_gap = (compact ? 8 : 12);
     int action_x = 8;
@@ -1741,11 +2313,14 @@ void RenderPanel()
     }
     int start = g_level_page * LEVEL_ROWS_PER_PAGE;
     int total = ArraySize(g_levels);
+    int active_level_idx = CurrentMartingaleLevelIndex();
+    string active_drawdown_text = CurrentMartingaleDrawdownText();
     for(int slot = 0; slot < LEVEL_ROWS_PER_PAGE; slot++)
     {
         int idx = start + slot;
         int y = level_top + (slot * level_row_h);
         string label_name = Obj(StringFormat("LevelLabel_%d", slot));
+        string drawdown_name = Obj(StringFormat("LevelDrawdown_%d", slot));
         string edit_name = Obj(StringFormat("LevelLotEdit_%d", slot));
         if(idx < total)
         {
@@ -1761,6 +2336,21 @@ void RenderPanel()
                                     FormatPrice(g_levels[idx].price));
             color row_color = (idx < g_consumed_levels ? clrOrange : clrDodgerBlue);
             CreateOrUpdateScrolledLabel(label_name, label_x, y + 4, line, row_color, 10);
+            if(idx == active_level_idx && active_drawdown_text != "")
+            {
+                int drawdown_x = label_x + 300;
+                if(compact)
+                    drawdown_x = MathMax(label_x + 142, content_w - 118);
+                else if(drawdown_x + 118 > level_value_x)
+                {
+                    if(level_value_x + level_value_w + 126 < content_w)
+                        drawdown_x = level_value_x + level_value_w + 8;
+                    else
+                        drawdown_x = MathMax(label_x + 170, content_w - 126);
+                }
+
+                CreateOrUpdateScrolledBoldLabel(drawdown_name, drawdown_x, y + 4, active_drawdown_text, clrRed, 10);
+            }
             CreateOrUpdateScrolledEdit(edit_name, level_value_x, (compact ? y + 20 : y), level_value_w, 24, DoubleToString(g_levels[idx].lot, 4));
         }
         else
@@ -1782,10 +2372,14 @@ void RenderLines()
     CreateOrUpdatePriceText(Obj("TpCallout"), g_current_tp_price, StringFormat("TP  %s  |  %s", FormatUsd(g_last_tp_usd), FormatPoints(g_last_tp_points_from_entry)), clrLimeGreen, (color)C'12,40,18', CALLOUT_MAIN_W, CALLOUT_MAIN_H, 1, CALLOUT_MAIN_GAP_Y);
     CreateOrUpdatePriceText(Obj("SlCallout"), g_current_sl_price, StringFormat("SL  %s  |  %s", FormatUsd(g_last_sl_usd), FormatPoints(g_last_sl_points_from_entry)), clrTomato, (color)C'52,18,18', CALLOUT_MAIN_W, CALLOUT_MAIN_H, 1, CALLOUT_MAIN_GAP_Y);
 
+    int active_level_idx = CurrentMartingaleLevelIndex();
+    string active_drawdown_text = CurrentMartingaleDrawdownText();
     for(int i = 0; i < ArraySize(g_levels); i++)
     {
+        bool is_active_level = (i == active_level_idx && active_drawdown_text != "");
         color level_color = (i < g_consumed_levels ? clrOrange : clrDodgerBlue);
         int line_width = (i < g_consumed_levels ? 3 : 2);
+        int popup_w = (is_active_level ? CALLOUT_LEVEL_ACTIVE_W : CALLOUT_LEVEL_W);
         string line_name = Obj(StringFormat("LevelLine_%d", i));
         string text_name = Obj(StringFormat("LevelCallout_%d", i));
         CreateOrUpdateHLine(line_name, g_levels[i].price, level_color, STYLE_DASH, line_width);
@@ -1794,10 +2388,18 @@ void RenderLines()
                                 StringFormat("L%d  %.4f lots", i + 1, g_levels[i].lot),
                                 level_color,
                                 (i < g_consumed_levels ? (color)C'64,36,14' : (color)C'12,28,52'),
-                                CALLOUT_LEVEL_W,
+                                popup_w,
                                 CALLOUT_LEVEL_H,
                                 (i % 3),
                                 CALLOUT_LEVEL_GAP_Y);
+        if(is_active_level)
+            CreateOrUpdatePriceDrawdownText(Obj(StringFormat("LevelDrawdownCallout_%d", i)),
+                                            g_levels[i].price,
+                                            active_drawdown_text,
+                                            popup_w,
+                                            CALLOUT_LEVEL_H,
+                                            (i % 3),
+                                            CALLOUT_LEVEL_GAP_Y);
     }
 }
 
@@ -2059,18 +2661,22 @@ void LoadInputsToRuntime()
     g_direction = InpDirection;
     g_level_count_mode = InpLevelCountMode;
     g_lot_mode = InpLotMode;
+    g_max_loss_mode = InpMaxLossMode;
     g_final_tp_points = InpFinalTakeProfitPoints;
     g_final_sl_points = InpFinalStopLossPoints;
     g_min_final_tp_usd = InpMinimumFinalTakeProfitUsd;
     g_initial_lot = InpInitialHedgeLot;
     g_spacing_points = InpLevelSpacingPoints;
+    g_spacing_multiplier = InpSpacingMultiplier;
     g_max_levels = InpMaxLevels;
     g_fixed_scale_in_lot = InpFixedScaleInLot;
+    g_max_loss_usd = InpMaxLossUsd;
+    g_max_tp_override_percent = InpMaxTpOverridePercent;
 }
 
 int OnInit()
 {
-    g_prefix = StringFormat("EHMP_%I64d_", ChartID());
+    g_prefix = StringFormat("%s%I64d_", PLANNER_OBJECT_PREFIX_ROOT, ChartID());
     LoadInputsToRuntime();
     RefreshSymbolSpecs();
     g_panel_x = PANEL_X;
@@ -2091,6 +2697,7 @@ int OnInit()
 void OnDeinit(const int reason)
 {
     DeletePlannerObjects();
+    ChartRedraw();
 }
 
 void OnTick()
@@ -2147,6 +2754,11 @@ void OnChartEvent(const int id,
         else if(sparam == Obj("BtnLotMode"))
         {
             CycleLotMode();
+            handled_click = true;
+        }
+        else if(sparam == Obj("BtnMaxLossMode"))
+        {
+            CycleMaxLossMode();
             handled_click = true;
         }
         else if(sparam == Obj("BtnAddTrade"))
@@ -2257,10 +2869,16 @@ void OnChartEvent(const int id,
             ApplyDoubleEdit(sparam, g_initial_lot, true, true);
         else if(sparam == Obj("EditSpacing"))
             ApplyDoubleEdit(sparam, g_spacing_points, true, true);
+        else if(sparam == Obj("EditSpacingMultiplier"))
+            ApplyDoubleEdit(sparam, g_spacing_multiplier, true, true);
         else if(sparam == Obj("EditMaxLevels"))
             ApplyIntEdit(sparam, g_max_levels, 0, MAX_LEVELS_LIMIT, true);
         else if(sparam == Obj("EditFixedLot"))
             ApplyDoubleEdit(sparam, g_fixed_scale_in_lot, true, true);
+        else if(sparam == Obj("EditMaxLossUsd"))
+            ApplyDoubleEdit(sparam, g_max_loss_usd, false, true);
+        else if(sparam == Obj("EditMaxTpOverride"))
+            ApplyDoubleEdit(sparam, g_max_tp_override_percent, false, true);
         else if(StartsWith(sparam, Obj("LevelLotEdit_")))
             HandleLevelLotEdit(ParseTrailingIndex(sparam));
 

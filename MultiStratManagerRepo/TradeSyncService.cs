@@ -64,6 +64,7 @@ namespace NinjaTrader.NinjaScript.AddOns
             public bool ManualTargetOverride;
             public bool AggregateEntry;
             public bool IsScaleInTrade;
+            public bool ExternalCloseOnly;
         }
 
         private readonly MultiStratManager owner;
@@ -173,21 +174,56 @@ namespace NinjaTrader.NinjaScript.AddOns
 
         public void UnregisterStrategy(StrategyBase strategy)
         {
+            UnregisterStrategy(strategy, false);
+        }
+
+        public void UnregisterStrategy(StrategyBase strategy, bool preserveOpenTradesForExternalClose)
+        {
             if (strategy == null)
                 return;
 
+            int preserved = 0;
+            int removed = 0;
             lock (gate)
             {
                 HashSet<string> ids;
                 if (tradesByStrategy.TryGetValue(strategy, out ids))
                 {
-                    foreach (var tradeId in ids)
-                        tradesById.Remove(tradeId);
+                    foreach (var tradeId in ids.ToList())
+                    {
+                        TradeRecord record;
+                        if (!tradesById.TryGetValue(tradeId, out record))
+                            continue;
+
+                        if (preserveOpenTradesForExternalClose && record.RemainingQuantity > 0)
+                        {
+                            record.ExternalCloseOnly = true;
+                            record.LastUpdateUtc = DateTime.UtcNow;
+                            preserved++;
+                        }
+                        else
+                        {
+                            tradesById.Remove(tradeId);
+                            removed++;
+                        }
+                    }
                 }
                 tradesByStrategy.Remove(strategy);
             }
 
-            owner?.ClearExposureForStrategy(strategy);
+            if (!preserveOpenTradesForExternalClose)
+                owner?.ClearExposureForStrategy(strategy);
+
+            if (preserved > 0)
+            {
+                string strategyName = !string.IsNullOrEmpty(strategy.Name) ? strategy.Name : "<unknown>";
+                owner?.LogInfo("TRADE_SYNC", $"Preserved {preserved} open trade(s) for external close after strategy unregister: {strategyName}");
+            }
+            else if (removed > 0)
+            {
+                string strategyName = !string.IsNullOrEmpty(strategy.Name) ? strategy.Name : "<unknown>";
+                owner?.LogInfo("TRADE_SYNC", $"Removed {removed} trade record(s) for strategy unregister: {strategyName}");
+            }
         }
 
         public void PublishOpen(StrategyBase strategy, string tradeId, string instrument, MarketPosition side, int quantity, string accountName, double pointsPer1kLoss, double entryPrice, bool aggregateEntry = false, bool isScaleInTrade = false)
@@ -403,7 +439,8 @@ namespace NinjaTrader.NinjaScript.AddOns
                 ManualStopOverride = source.ManualStopOverride,
                 ManualTargetOverride = source.ManualTargetOverride,
                 AggregateEntry = source.AggregateEntry,
-                IsScaleInTrade = source.IsScaleInTrade
+                IsScaleInTrade = source.IsScaleInTrade,
+                ExternalCloseOnly = source.ExternalCloseOnly
             };
         }
 
@@ -419,7 +456,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     return;
             }
 
-            if (record.Strategy is ITradeSyncParticipant participant)
+            if (!record.ExternalCloseOnly && record.Strategy is ITradeSyncParticipant participant)
             {
                 participant.HandleTradeSyncPartial(tradeId, quantityToExit);
             }
@@ -444,7 +481,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     return;
             }
 
-            if (record.Strategy is ITradeSyncParticipant participant)
+            if (!record.ExternalCloseOnly && record.Strategy is ITradeSyncParticipant participant)
             {
                 participant.HandleTradeSyncClose(tradeId);
             }
@@ -469,7 +506,7 @@ namespace NinjaTrader.NinjaScript.AddOns
                     return false;
             }
 
-            if (record.Strategy is IRunUpParticipant participant)
+            if (!record.ExternalCloseOnly && record.Strategy is IRunUpParticipant participant)
             {
                 participant.HandleRunUpStart(tradeId, anchorPrice, config);
                 owner.LogInfo("RUN_UP", $"Activated NT Run-Up trailing for trade_id {tradeId} at anchor {anchorPrice:F2}", tradeId, tradeId);
