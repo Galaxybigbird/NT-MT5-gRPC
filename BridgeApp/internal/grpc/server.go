@@ -511,6 +511,17 @@ func (s *Server) forwardTradesToStream(streamChan chan<- *trading.Trade, streamI
 			case streamChan <- trade:
 				log.Printf("gRPC: Forwarded trade %s to stream %s", trade.Id, streamID)
 			default:
+				if strings.EqualFold(trade.Action, "CLOSE_HEDGE") {
+					select {
+					case streamChan <- trade:
+						log.Printf("gRPC: Forwarded priority CLOSE_HEDGE trade %s to stream %s after waiting for buffer room", trade.Id, streamID)
+					case <-time.After(2 * time.Second):
+						log.Printf("gRPC: Stream %s buffer stayed full; could not forward priority CLOSE_HEDGE trade %s", streamID, trade.Id)
+						blog.L().Warn("stream", "stream buffer full - priority close could not be forwarded", map[string]interface{}{"stream_id": streamID, "trade_id": trade.Id, "action": trade.Action})
+						break drainLoop
+					}
+					continue
+				}
 				log.Printf("gRPC: Stream %s buffer full, dropping trade %s", streamID, trade.Id)
 				blog.L().Warn("stream", "stream buffer full - dropping trade", map[string]interface{}{"stream_id": streamID, "trade_id": trade.Id})
 				break drainLoop // Stop trying if buffer is full

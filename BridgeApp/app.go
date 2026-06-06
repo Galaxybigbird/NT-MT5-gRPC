@@ -20,6 +20,7 @@ import (
 type App struct {
 	ctx                  context.Context
 	tradeQueue           chan Trade
+	priorityTradeQueue   chan Trade
 	queueMux             sync.Mutex
 	netNT                int
 	hedgeLot             float64
@@ -94,6 +95,11 @@ type tradeSyncState struct {
 	TargetLots float64
 	LastUpdate time.Time
 }
+
+const (
+	tradeQueueCapacity         = 100
+	priorityTradeQueueCapacity = 1000
+)
 
 // elasticMark captures an elastic close signal context for short-lived correlation
 type elasticMark struct {
@@ -371,7 +377,8 @@ func NewApp() *App {
 	log.Printf("Configuration: gRPC=true, gRPCPort=%s", grpcPort)
 
 	app := &App{
-		tradeQueue:           make(chan Trade, 100),
+		tradeQueue:           make(chan Trade, tradeQueueCapacity),
+		priorityTradeQueue:   make(chan Trade, priorityTradeQueueCapacity),
 		hedgebotActive:       false, // Initialize HedgeBot as inactive
 		tradeLogSenderActive: false,
 		// gRPC configuration from environment
@@ -521,7 +528,7 @@ func (a *App) GetStatus() map[string]interface{} {
 		"tradeLogSenderActive": a.tradeLogSenderActive,
 		"netPosition":          a.netNT,
 		"hedgeSize":            a.hedgeLot,
-		"queueSize":            len(a.tradeQueue),
+		"queueSize":            len(a.priorityTradeQueue) + len(a.tradeQueue),
 	}
 }
 
@@ -537,7 +544,9 @@ func (a *App) GetHedgeSize() float64 {
 
 // GetQueueSize returns the current queue size
 func (a *App) GetQueueSize() int {
-	return len(a.tradeQueue)
+	a.queueMux.Lock()
+	defer a.queueMux.Unlock()
+	return len(a.priorityTradeQueue) + len(a.tradeQueue)
 }
 
 // IsAddonConnected returns whether the addon is connected
@@ -581,13 +590,24 @@ func (a *App) SetHedgebotActive(active bool) {
 
 // GetTradeQueue returns the current trade queue
 func (a *App) GetTradeQueue() chan interface{} {
-	// Convert to interface{} channel for gRPC compatibility
-	ch := make(chan interface{}, len(a.tradeQueue))
-
 	a.queueMux.Lock()
 	defer a.queueMux.Unlock()
 
-	// Copy current trades to the interface channel
+	// Convert to interface{} channel for gRPC compatibility
+	ch := make(chan interface{}, len(a.priorityTradeQueue)+len(a.tradeQueue))
+
+	// Copy priority closes first so they cannot sit behind regular event traffic.
+	for {
+		select {
+		case trade := <-a.priorityTradeQueue:
+			ch <- trade
+		default:
+			goto drainRegularQueue
+		}
+	}
+
+drainRegularQueue:
+	// Copy current regular trades to the interface channel
 	for {
 		select {
 		case trade := <-a.tradeQueue:
@@ -601,11 +621,45 @@ func (a *App) GetTradeQueue() chan interface{} {
 
 // PollTradeFromQueue returns a trade from the queue (non-blocking)
 func (a *App) PollTradeFromQueue() interface{} {
+	a.queueMux.Lock()
+	defer a.queueMux.Unlock()
+
+	select {
+	case trade := <-a.priorityTradeQueue:
+		return trade
+	default:
+	}
+
 	select {
 	case trade := <-a.tradeQueue:
 		return trade
 	default:
 		return nil
+	}
+}
+
+func isPriorityCloseTrade(t Trade) bool {
+	return strings.EqualFold(strings.TrimSpace(t.Action), "CLOSE_HEDGE")
+}
+
+func (a *App) enqueueTrade(t Trade) error {
+	a.queueMux.Lock()
+	defer a.queueMux.Unlock()
+
+	if isPriorityCloseTrade(t) {
+		select {
+		case a.priorityTradeQueue <- t:
+			return nil
+		default:
+			return fmt.Errorf("priority close queue is full")
+		}
+	}
+
+	select {
+	case a.tradeQueue <- t:
+		return nil
+	default:
+		return fmt.Errorf("trade queue is full")
 	}
 }
 
@@ -718,12 +772,7 @@ func (a *App) AddToTradeQueue(trade interface{}) error {
 		}
 	}
 
-	select {
-	case a.tradeQueue <- t:
-		return nil
-	default:
-		return fmt.Errorf("trade queue is full")
-	}
+	return a.enqueueTrade(t)
 }
 
 // handleLifecycleEvent updates local trade sync state based on OPEN/PARTIAL/CLOSED events from NT.
@@ -1711,6 +1760,9 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 				}
 			}
 		}
+		if cur, ok := a.baseIdToMT5Ticket[baseID]; ok && cur == provided {
+			delete(a.baseIdToMT5Ticket, baseID)
+		}
 		a.mt5TicketMux.Unlock()
 		log.Printf("gRPC: Targeted CLOSE_HEDGE enqueued and mappings pruned for ticket %d (BaseID: %s)", provided, baseID)
 		return nil
@@ -1816,6 +1868,10 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			t := availableTickets[0]
 			availableTickets = availableTickets[1:]            // Remove allocated ticket from pool
 			a.baseIdToTickets[actualBaseID] = availableTickets // Update the pool
+			delete(a.mt5TicketToBaseId, t)
+			if cur, ok := a.baseIdToMT5Ticket[actualBaseID]; ok && cur == t {
+				delete(a.baseIdToMT5Ticket, actualBaseID)
+			}
 
 			ct := makeCloseTrade(1, t)
 			if err := a.AddToTradeQueue(ct); err != nil {
@@ -1874,6 +1930,10 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 			t := availableWaitedTickets[0]
 			availableWaitedTickets = availableWaitedTickets[1:] // Remove allocated ticket from pool
 			a.baseIdToTickets[baseID] = availableWaitedTickets  // Update the pool
+			delete(a.mt5TicketToBaseId, t)
+			if cur, ok := a.baseIdToMT5Ticket[baseID]; ok && cur == t {
+				delete(a.baseIdToMT5Ticket, baseID)
+			}
 
 			ct := makeCloseTrade(1, t)
 			if err := a.AddToTradeQueue(ct); err != nil {
@@ -1923,6 +1983,12 @@ func (a *App) HandleNTCloseHedgeRequest(request interface{}) error {
 		}
 		// Track NT-initiated close for origin tagging.
 		a.markNTCloseIntent(baseID, ticket)
+		a.mt5TicketMux.Lock()
+		delete(a.mt5TicketToBaseId, ticket)
+		if cur, ok := a.baseIdToMT5Ticket[baseID]; ok && cur == ticket {
+			delete(a.baseIdToMT5Ticket, baseID)
+		}
+		a.mt5TicketMux.Unlock()
 		log.Printf("gRPC: Successfully queued CLOSE_HEDGE for BaseID: %s", baseID)
 		return nil
 	}

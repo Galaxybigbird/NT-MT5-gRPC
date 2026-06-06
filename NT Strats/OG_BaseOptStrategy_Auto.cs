@@ -6593,7 +6593,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (stopExit)
                     RegisterStopLossCloseOverride(state.TradeId);
 
-                if (IsNativeProtectionOrderCoveringSyntheticTouch(state, stopExit, linePrice))
+                bool allowNativeProtectionWait = stopExit && IsNativeProtectionOrderCoveringSyntheticTouch(state, stopExit, linePrice);
+                if (allowNativeProtectionWait)
                 {
                     CancelOpposingProtectiveOrder(state, stopExit);
                     nativeProtectionCount++;
@@ -14954,9 +14955,38 @@ namespace NinjaTrader.NinjaScript.Strategies
 
             string tradeRef = triggerState != null ? triggerState.TradeId : string.Empty;
             if (!string.IsNullOrEmpty(tradeRef))
-                StrategyLogInfo($"[EXIT_ALL] Partial fill detected for {tradeRef}; exiting remaining positions (suffix={suffix}).");
+                StrategyLogInfo($"[EXIT_ALL] Managed exit detected for {tradeRef}; exiting remaining positions (suffix={suffix}).");
             else
-                StrategyLogInfo($"[EXIT_ALL] Partial fill detected; exiting remaining positions (suffix={suffix}).");
+                StrategyLogInfo($"[EXIT_ALL] Managed exit detected; exiting remaining positions (suffix={suffix}).");
+        }
+
+        private bool ShouldTriggerExitAllAfterFullProtectiveClose(Execution execution, TradeRuntimeState state)
+        {
+            if (execution == null || state == null || state.ExitAllTriggered)
+                return false;
+
+            string suffix = GetExitSignalSuffixForExecution(execution, state);
+            bool protectiveExit = string.Equals(suffix, "BS", StringComparison.OrdinalIgnoreCase) ||
+                                  string.Equals(suffix, "BT", StringComparison.OrdinalIgnoreCase) ||
+                                  IsStopLossExecution(execution) ||
+                                  (execution.Order != null && LooksLikeTargetOrder(execution.Order));
+            if (!protectiveExit)
+                return false;
+
+            foreach (TradeRuntimeState candidate in GetOpenManagedStates())
+            {
+                if (candidate == null || candidate.RemainingQuantity <= 0 || candidate.EntryOrderPending)
+                    continue;
+                if (ReferenceEquals(candidate, state))
+                    continue;
+                if (!string.IsNullOrEmpty(candidate.TradeId) &&
+                    string.Equals(candidate.TradeId, state.TradeId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return true;
+            }
+
+            return false;
         }
 
         private void HandleExitExecution(Execution execution, TradeRuntimeState state)
@@ -14989,6 +15019,12 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
             else
             {
+                if (ShouldTriggerExitAllAfterFullProtectiveClose(execution, state))
+                {
+                    state.ExitAllTriggered = true;
+                    TriggerExitAllAfterPartial(execution, state);
+                }
+
                 RememberRecentlyClosedTrade(state.TradeId);
                 bool stopLossExecution = State == State.Realtime && !state.IsSynthetic && ShouldPublishTradeLifecycle(state) && IsStopLossExecution(execution);
                 if (stopLossExecution)

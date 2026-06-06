@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -119,6 +120,49 @@ func TestRemainderFallsBackToBaseIdOnly(t *testing.T) {
 	}
 }
 
+func TestAllocatedTicketIsNotReusedFromLegacyMapping(t *testing.T) {
+	a := NewApp()
+	baseID := "TEST_BASE_LEGACY_REUSE"
+
+	a.mt5TicketMux.Lock()
+	a.mt5TicketToBaseId[5555] = baseID
+	a.baseIdToMT5Ticket[baseID] = 5555
+	a.baseIdToTickets[baseID] = []uint64{5555}
+	a.mt5TicketMux.Unlock()
+
+	req := map[string]interface{}{
+		"BaseID":              baseID,
+		"ClosedHedgeQuantity": 1.0,
+		"NTInstrumentSymbol":  "NQ",
+		"NTAccountName":       "Sim101",
+		"ClosureReason":       "NT_initiated",
+	}
+
+	if err := a.HandleNTCloseHedgeRequest(req); err != nil {
+		t.Fatalf("first HandleNTCloseHedgeRequest error: %v", err)
+	}
+
+	first, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected first CLOSE_HEDGE")
+	}
+	if first.MT5Ticket != 5555 {
+		t.Fatalf("expected first close to target ticket 5555, got %+v", first)
+	}
+
+	if err := a.HandleNTCloseHedgeRequest(req); err != nil {
+		t.Fatalf("second HandleNTCloseHedgeRequest error: %v", err)
+	}
+
+	second, ok := drainOne(a)
+	if !ok {
+		t.Fatalf("expected second CLOSE_HEDGE fallback")
+	}
+	if second.MT5Ticket == 5555 {
+		t.Fatalf("stale legacy ticket was reused for a second close: %+v", second)
+	}
+}
+
 func TestBaseIdOnlyFallbackUsesRequestedBaseIDWhenCrossRefExists(t *testing.T) {
 	a := NewApp()
 
@@ -220,5 +264,57 @@ func TestBaseIdOnlyFallbackMarksNTCloseAckByBaseID(t *testing.T) {
 	}
 	if origin := a.consumeNTCloseOrigin(baseID, 987654, 5*time.Second); origin != "MT5_CLOSE" {
 		t.Fatalf("expected NT close intent to be consumed after one ack, got %s", origin)
+	}
+}
+
+func TestNTCloseHedgePreemptsFullEventQueue(t *testing.T) {
+	tests := []struct {
+		name          string
+		closureReason string
+	}{
+		{name: "full_close", closureReason: "NT_full_close"},
+		{name: "daily_loss_flatten", closureReason: "NT_DAILY_LOSS_LIMIT"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			a := NewApp()
+
+			for i := 0; i < cap(a.tradeQueue); i++ {
+				a.tradeQueue <- Trade{
+					ID:        fmt.Sprintf("event_%d", i),
+					BaseID:    "NOISE",
+					Action:    "EVENT",
+					EventType: "elastic_update",
+				}
+			}
+
+			baseID := "TEST_FULL_QUEUE_CLOSE"
+			req := map[string]interface{}{
+				"BaseID":              baseID,
+				"ClosedHedgeQuantity": 1.0,
+				"NTInstrumentSymbol":  "NQ",
+				"NTAccountName":       "Sim101",
+				"ClosureReason":       tt.closureReason,
+			}
+
+			if err := a.HandleNTCloseHedgeRequest(req); err != nil {
+				t.Fatalf("HandleNTCloseHedgeRequest should not fail when queue is full of events: %v", err)
+			}
+
+			foundClose := false
+			for {
+				tr, ok := drainOne(a)
+				if !ok {
+					break
+				}
+				if tr.Action == "CLOSE_HEDGE" && tr.BaseID == baseID && tr.TotalQuantity == 1 {
+					foundClose = true
+				}
+			}
+			if !foundClose {
+				t.Fatalf("expected CLOSE_HEDGE for %s to be present after preempting full event queue", baseID)
+			}
+		})
 	}
 }

@@ -4666,6 +4666,12 @@ public TrailingActivationType TrailingStopType
                     PublishExternalCloseForRecord(resolvedRecord, execution, false, "resolved_trade_id");
                     return;
                 }
+                if (resolvedRecord != null && !resolvedRecord.ExternalCloseOnly)
+                {
+                    // Managed strategy exits are published by the owning strategy's TradeSync path.
+                    // Do not let the external fallback remap this execution to another active trade.
+                    return;
+                }
 
                 var candidates = FindExternalCloseCandidates(execution, resolvedTradeId);
                 if (candidates.Count == 1)
@@ -4748,8 +4754,9 @@ public TrailingActivationType TrailingStopType
                 var exact = scoped
                     .Where(record => string.Equals(record.TradeId, resolvedTradeId, StringComparison.OrdinalIgnoreCase))
                     .ToList();
-                if (exact.Count > 0)
-                    return exact;
+                if (exact.Count == 0)
+                    return results;
+                return exact;
             }
 
             return scoped;
@@ -4886,8 +4893,9 @@ public TrailingActivationType TrailingStopType
                 var exact = candidates
                     .Where(details => string.Equals(details.BaseId, resolvedTradeId, StringComparison.OrdinalIgnoreCase))
                     .ToList();
-                if (exact.Count > 0)
-                    candidates = exact;
+                if (exact.Count == 0)
+                    return false;
+                candidates = exact;
             }
 
             if (candidates.Count != 1)
